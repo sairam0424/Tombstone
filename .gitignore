@@ -1,0 +1,38 @@
+# Secrets — NEVER commit
+infra/.env
+**/.env.local
+**/.env.production
+
+# Go build artifacts
+services/*/bin/
+services/*/main
+infra/terraform/provider/main
+**/main
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+**/*.egg-info/
+
+# Node
+**/node_modules/
+**/dist/
+**/.turbo/
+
+# IDE
+.idea/
+.vscode/settings.json
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+**/*.test
+**/testdata/tmp/
+
+# Go workspace sum (regenerated)
+go.work.sum
