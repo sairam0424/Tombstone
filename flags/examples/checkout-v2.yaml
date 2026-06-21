@@ -1,0 +1,24 @@
+apiVersion: tombstone.io/v1
+kind: FeatureFlag
+metadata:
+  name: Checkout V2
+  description: New checkout flow with optimized payment UX. Enable gradually to validate conversion.
+  owner: payments-team@example.com
+  tags:
+    - checkout
+    - payments
+    - release
+spec:
+  key: payments.checkout.checkout-v2
+  type: BOOLEAN
+  safeDefault: "false"
+  environments:
+    development:
+      enabled: true
+      rolloutPct: 100
+    staging:
+      enabled: true
+      rolloutPct: 50
+    production:
+      enabled: false
+      rolloutPct: 0

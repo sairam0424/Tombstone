@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tombstone-config
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+data:
+  FLAG_API_URL: "http://{{ include "tombstone.fullname" . }}-flag-api:{{ .Values.flagApi.service.port }}"
+  REDIS_URL: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+  POSTGRES_HOST: {{ .Values.postgresql.host | quote }}
+  POSTGRES_PORT: {{ .Values.postgresql.port | quote }}
+  POSTGRES_DB: {{ .Values.postgresql.database | quote }}

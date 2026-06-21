@@ -1,0 +1,43 @@
+{
+  "name": "@tombstone/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tombstone Node.js SDK — in-process flag evaluation with SSE streaming",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./evaluation": {
+      "types": "./dist/evaluation.d.ts",
+      "default": "./dist/evaluation.js"
+    },
+    "./streaming": {
+      "types": "./dist/streaming.d.ts",
+      "default": "./dist/streaming.js"
+    },
+    "./admin": {
+      "types": "./dist/admin.d.ts",
+      "default": "./dist/admin.js"
+    }
+  },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && npx mocha 'dist/tests/**/*.test.js'",
+    "test:watch": "tsc -w"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^22.0.0",
+    "chai": "^5.0.0",
+    "mocha": "^10.0.0",
+    "typescript": "~5.8.2"
+  },
+  "dependencies": {
+    "eventsource": "^3.0.0",
+    "murmurhash": "^2.0.1"
+  }
+}

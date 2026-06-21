@@ -1,0 +1,14 @@
+apiVersion: v2
+name: tombstone
+description: Tombstone Production Intelligence Layer for Feature Flags
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - feature-flags
+  - intelligence
+  - circuit-breaker
+  - blast-radius
+home: https://github.com/Not-Humans-World/Tombstone
+maintainers:
+  - name: Tombstone Team

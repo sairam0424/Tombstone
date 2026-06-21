@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "description": "Cross-language MurmurHash3 parity vectors for Tombstone SDKs. All SDKs must produce identical bucket assignments for these inputs.",
+  "hash_algorithm": "MurmurHash3 unsigned 32-bit, seed=0",
+  "input_format": "concat(flag_key, user_id) as UTF-8 bytes",
+  "vectors": [
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 100, "expected_in_cohort": true, "note": "100% always true"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 0, "expected_in_cohort": false, "note": "0% always false"},
+    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "rollout_pct": 50, "expected_in_cohort": false, "note": "bucket > 50"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 50, "expected_in_cohort": true, "note": "bucket < 50"},
+    {"flag_key": "payment-gateway-fee-display", "user_id": "user-abc-123", "rollout_pct": 50, "expected_in_cohort": true},
+    {"flag_key": "max-cart-items", "user_id": "user-abc-123", "rollout_pct": 75, "expected_in_cohort": true},
+    {"flag_key": "max-cart-items", "user_id": "user-xyz-789", "rollout_pct": 25, "expected_in_cohort": false},
+    {"flag_key": "a", "user_id": "b", "rollout_pct": 50, "expected_in_cohort": true, "note": "minimal key and user_id — hash stability check"},
+    {"flag_key": "checkout-v2", "user_id": "", "rollout_pct": 50, "expected_in_cohort": false, "note": "empty user_id — must not panic, hash input is flag_key only"},
+    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "rollout_pct": 1, "expected_in_cohort": false, "note": "deep dot-notation key with long path"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 99, "expected_in_cohort": true, "note": "bucket < 99 — confirms sub-100 boundary"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 1, "expected_in_cohort": false, "note": "rollout_pct=1 — nearly everyone excluded"}
+  ]
+}

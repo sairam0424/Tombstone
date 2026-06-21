@@ -1,0 +1,182 @@
+# All secrets are supplied via a .env file (see infra/.env.example).
+# Copy .env.example -> .env and fill values. Never commit .env to git.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16  # includes pgvector extension for NLP search
+    env_file: .env
+    ports:
+      - "5433:5432"   # mapped to 5433 host-side to avoid conflict with local postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../services/flag-api/internal/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tombstone"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"   # mapped to 6380 host-side to avoid conflict with local redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on: [zookeeper]
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  flag-api:
+    build:
+      context: ../services/flag-api
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../services/gateway
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-api:
+        condition: service_started
+    env_file: .env
+    environment:
+      PORT: "8080"
+      FLAG_API_URL: http://flag-api:8081
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  evaluator:
+    build:
+      context: ../services/evaluator
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-api:
+        condition: service_started
+    env_file: .env
+    environment:
+      PORT: "8082"
+      FLAG_API_URL: http://flag-api:8081
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+
+  intelligence:
+    build:
+      context: ../services/intelligence
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    env_file: .env
+    environment:
+      PORT: "8083"
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+
+  gitops-sync:
+    build:
+      context: ../services/gitops-sync
+      dockerfile: Dockerfile
+    depends_on:
+      flag-api:
+        condition: service_started
+    env_file: .env
+    environment:
+      PORT: "8084"
+      FLAG_API_URL: http://flag-api:8081
+    ports:
+      - "8084:8084"
+    restart: unless-stopped
+
+  ast-rewriter:
+    build:
+      context: ../services/ast-rewriter
+      dockerfile: Dockerfile
+    depends_on:
+      flag-api:
+        condition: service_started
+    env_file: .env
+    environment:
+      PORT: "8085"
+    ports:
+      - "8085:8085"
+    restart: unless-stopped
+
+  marketplace:
+    build:
+      context: ../services/marketplace
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      PORT: "8086"
+    ports:
+      - "8086:8086"
+    restart: unless-stopped
+
+  dashboard:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ../workspace-dashboard:/app
+      - dashboard_modules:/app/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - flag-api
+      - gateway
+    environment:
+      VITE_API_URL: http://localhost:8081
+      VITE_GATEWAY_URL: http://localhost:8080
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    profiles:
+      - clickhouse
+
+volumes:
+  postgres_data:
+  dashboard_modules:
+  clickhouse_data:

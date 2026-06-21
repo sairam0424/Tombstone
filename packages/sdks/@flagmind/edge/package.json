@@ -1,0 +1,17 @@
+{
+  "name": "@tombstone/edge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tombstone Edge SDK — sub-1ms flag evaluation on Cloudflare Workers via KV",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "scripts": { "build": "tsc -p tsconfig.build.json" },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "~5.8.2"
+  },
+  "engines": { "node": ">=18" }
+}

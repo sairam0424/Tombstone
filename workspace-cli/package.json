@@ -1,0 +1,19 @@
+{
+  "name": "@tombstone/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "tombstone": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w"
+  },
+  "dependencies": {
+    "chalk": "^5.0.0",
+    "commander": "^12.0.0",
+    "ora": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.8.2"
+  }
+}

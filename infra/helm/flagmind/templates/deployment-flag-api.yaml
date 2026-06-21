@@ -1,0 +1,57 @@
+{{- if .Values.flagApi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tombstone.fullname" . }}-flag-api
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flag-api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: flag-api
+  template:
+    metadata:
+      labels:
+        {{- include "tombstone.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: flag-api
+    spec:
+      serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: flag-api
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.flagApi.image.repository }}:{{ .Values.flagApi.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.flagApi.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.flagApi.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.flagApi.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          envFrom:
+            - configMapRef:
+                name: tombstone-config
+            - secretRef:
+                name: tombstone-secrets
+          resources:
+            requests:
+              cpu: {{ .Values.flagApi.resources.requests.cpu }}
+              memory: {{ .Values.flagApi.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.flagApi.resources.limits.cpu }}
+              memory: {{ .Values.flagApi.resources.limits.memory }}
+{{- end }}

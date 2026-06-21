@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PackageId>Tombstone.Client</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Tombstone</Authors>
+    <Description>Tombstone .NET SDK — server-side feature flag evaluation</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Collections.Immutable" Version="8.0.0" />
+    <PackageReference Include="Murmur" Version="2.0.0" />
+  </ItemGroup>
+</Project>

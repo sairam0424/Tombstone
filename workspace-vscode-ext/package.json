@@ -1,0 +1,118 @@
+{
+  "name": "tombstone-vscode",
+  "displayName": "Tombstone",
+  "description": "Feature flag management for Tombstone — CodeLens, kill switch, search, and cleanup PR generation",
+  "version": "0.1.0",
+  "publisher": "tombstone",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Tombstone",
+      "properties": {
+        "tombstone.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8081",
+          "description": "Base URL of the Tombstone flag-api service (e.g. http://localhost:8081)"
+        },
+        "tombstone.apiToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Bearer token for authenticating against the Tombstone API. Store this in your VS Code secrets store when possible.",
+          "tags": ["sensitive"]
+        },
+        "tombstone.environment": {
+          "type": "string",
+          "enum": ["development", "staging", "production"],
+          "default": "production",
+          "description": "Target environment for flag evaluation and API calls"
+        },
+        "tombstone.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline CodeLens annotations above flag evaluation calls"
+        },
+        "tombstone.intelligenceApiUrl": {
+          "type": "string",
+          "default": "http://localhost:8082",
+          "description": "Base URL of the Tombstone intelligence service (stale flags, NLP search, cleanup PRs)"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "tombstone.killSwitch",
+        "title": "Tombstone: Kill Switch — Disable Flag Immediately",
+        "category": "Tombstone"
+      },
+      {
+        "command": "tombstone.searchFlags",
+        "title": "Tombstone: Search Flags (NLP)",
+        "category": "Tombstone"
+      },
+      {
+        "command": "tombstone.refreshFlags",
+        "title": "Tombstone: Refresh Flags",
+        "category": "Tombstone"
+      },
+      {
+        "command": "tombstone.generateCleanupPR",
+        "title": "Tombstone: Generate Cleanup PR for Stale Flag",
+        "category": "Tombstone"
+      },
+      {
+        "command": "tombstone.openFlagInDashboard",
+        "title": "Tombstone: Open Flag in Dashboard",
+        "category": "Tombstone"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tombstone",
+          "title": "Tombstone",
+          "icon": "$(symbol-boolean)"
+        }
+      ]
+    },
+    "views": {
+      "tombstone": [
+        {
+          "id": "tombstone.flagList",
+          "name": "Feature Flags",
+          "icon": "$(symbol-boolean)",
+          "contextualTitle": "Tombstone Feature Flags"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "tombstone.refreshFlags",
+          "when": "view == tombstone.flagList",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.8.2",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

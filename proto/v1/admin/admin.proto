@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+package tombstone.v1.admin;
+
+option go_package = "github.com/tombstone/proto/v1/admin";
+
+// AdminService: approval workflows, audit log, governance, break-glass
+service AdminService {
+  rpc CreateChangeRequest(CreateChangeRequestRequest) returns (ChangeRequest);
+  rpc ApproveChangeRequest(ApproveChangeRequestRequest) returns (ChangeRequest);
+  rpc RejectChangeRequest(RejectChangeRequestRequest) returns (ChangeRequest);
+  rpc ListChangeRequests(ListChangeRequestsRequest) returns (ListChangeRequestsResponse);
+  rpc ListAuditLog(ListAuditLogRequest) returns (ListAuditLogResponse);
+  rpc GetBlastRadius(GetBlastRadiusRequest) returns (BlastRadiusResponse);
+  rpc CreateBreakGlassToken(CreateBreakGlassTokenRequest) returns (BreakGlassToken);
+  rpc UseBreakGlassToken(UseBreakGlassTokenRequest) returns (UseBreakGlassTokenResponse);
+  rpc GetProjectHealth(GetProjectHealthRequest) returns (ProjectHealthResponse);
+}
+
+enum ChangeRequestStatus {
+  CHANGE_REQUEST_UNSPECIFIED = 0;
+  PENDING = 1;
+  APPROVED = 2;
+  REJECTED = 3;
+  APPLIED = 4;
+}
+
+// RiskScore is the output of blast radius computation.
+// BLOCKED requires typed justification + second approver.
+enum RiskScore {
+  RISK_UNSPECIFIED = 0;
+  LOW = 1;
+  MEDIUM = 2;
+  HIGH = 3;
+  BLOCKED = 4;
+}
+
+message ChangeRequest {
+  string id = 1;
+  string flag_key = 2;
+  string environment = 3;
+  string requested_by = 4;
+  ChangeRequestStatus status = 5;
+  string change_description = 6;
+  repeated string approved_by = 7;
+  string rejected_by = 8;
+  string rejection_reason = 9;
+  bytes change_payload = 10; // JSON of the proposed flag state change
+  int64 created_at = 11;
+  int64 updated_at = 12;
+}
+
+// AuditEntry is a single append-only event in the audit log.
+// prev_hash Merkle-links this entry to the previous one for the same flag.
+message AuditEntry {
+  string id = 1;
+  string flag_key = 2;
+  string environment = 3;
+  string actor = 4;
+  string event_type = 5;
+  bytes prev_state = 6;  // JSON
+  bytes new_state = 7;   // JSON
+  string ip_address = 8;
+  string prev_hash = 9;  // sha256(prev_entry.id + prev_entry.created_at)
+  int64 created_at = 10;
+}
+
+// BlastRadiusResponse is computed before every production flag flip.
+// Mandatory display — engineers must acknowledge before proceeding.
+message BlastRadiusResponse {
+  RiskScore risk_score = 1;
+  double traffic_pct_affected = 2;
+  int32 dependent_flags_count = 3;
+  repeated string dependent_flag_keys = 4;
+  repeated string affected_services = 5;
+  double historical_error_rate_delta = 6; // mean delta over last 10 flips
+  string justification_required = 7; // non-empty when BLOCKED
+}
+
+message BreakGlassToken {
+  string id = 1;
+  string token = 2;
+  string scope = 3;       // "all-flags" | "payment-flags" | "auth-flags"
+  string created_by = 4;
+  int64 expires_at = 5;
+  bool used = 6;
+  int64 used_at = 7;
+  string used_by = 8;
+  string incident_ref = 9;
+}
+
+message ProjectHealthResponse {
+  string project_id = 1;
+  int32 total_flags = 2;
+  int32 stale_flags = 3;       // at 100% for 30+ days
+  int32 orphaned_flags = 4;    // owner not in active IdP accounts
+  int32 undocumented_flags = 5; // no description
+  int32 inventory_used = 6;
+  int32 inventory_limit = 7;
+  double health_score = 8;     // 0.0 - 1.0
+}
+
+message GetBlastRadiusRequest {
+  string flag_key = 1;
+  string environment = 2;
+  int32 new_rollout_pct = 3;
+  bool new_enabled = 4;
+}
+
+message CreateChangeRequestRequest {
+  string flag_key = 1;
+  string environment = 2;
+  string requested_by = 3;
+  string change_description = 4;
+  bytes change_payload = 5;
+}
+
+message ApproveChangeRequestRequest {
+  string id = 1;
+  string approved_by = 2;
+}
+
+message RejectChangeRequestRequest {
+  string id = 1;
+  string rejected_by = 2;
+  string reason = 3;
+}
+
+message ListChangeRequestsRequest {
+  string flag_key = 1;
+  string environment = 2;
+  ChangeRequestStatus status_filter = 3;
+  int32 limit = 4;
+}
+
+message ListChangeRequestsResponse {
+  repeated ChangeRequest requests = 1;
+  int32 total = 2;
+}
+
+message ListAuditLogRequest {
+  string flag_key = 1;
+  string environment = 2;
+  int64 from = 3;
+  int64 to = 4;
+  int32 limit = 5;
+  string page_token = 6;
+}
+
+message ListAuditLogResponse {
+  repeated AuditEntry entries = 1;
+  string next_page_token = 2;
+}
+
+message CreateBreakGlassTokenRequest {
+  string scope = 1;
+  string created_by = 2;
+  int64 expires_at = 3;
+  string incident_ref = 4;
+}
+
+message UseBreakGlassTokenRequest {
+  string token = 1;
+  string used_by = 2;
+  string action_description = 3;
+}
+
+message UseBreakGlassTokenResponse {
+  bool valid = 1;
+  string scope = 2;
+  string audit_entry_id = 3;
+}
+
+message GetProjectHealthRequest {
+  string project_id = 1;
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@tombstone/react",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npx vitest run"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "@tombstone/core": "0.1.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.0.0",
+    "@types/react": "^19.0.0",
+    "jsdom": "^25.0.0",
+    "typescript": "~5.8.2",
+    "vitest": "^2.0.0"
+  }
+}

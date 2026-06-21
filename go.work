@@ -1,0 +1,10 @@
+go 1.22
+
+use (
+	./services/ast-rewriter
+	./services/evaluator
+	./services/flag-api
+	./services/gateway
+	./services/gitops-sync
+	./services/marketplace
+)

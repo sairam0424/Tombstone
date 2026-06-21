@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package tombstone.v1.flags;
+
+option go_package = "github.com/tombstone/proto/v1/flags";
+
+// FlagsService: full flag CRUD, evaluation, and real-time streaming
+service FlagsService {
+  rpc GetFlag(GetFlagRequest) returns (Flag);
+  rpc ListFlags(ListFlagsRequest) returns (ListFlagsResponse);
+  rpc CreateFlag(CreateFlagRequest) returns (Flag);
+  rpc UpdateFlag(UpdateFlagRequest) returns (Flag);
+  rpc DeleteFlag(DeleteFlagRequest) returns (DeleteFlagResponse);
+  rpc EvaluateFlag(EvaluateFlagRequest) returns (EvaluateFlagResponse);
+  rpc StreamFlagUpdates(StreamSubscription) returns (stream FlagEvent);
+  rpc RollbackFlag(RollbackRequest) returns (RollbackResponse);
+}
+
+enum FlagType {
+  FLAG_TYPE_UNSPECIFIED = 0;
+  BOOLEAN = 1;
+  STRING = 2;
+  INTEGER = 3;
+  FLOAT = 4;
+  JSON = 5;
+}
+
+enum FlagState {
+  FLAG_STATE_UNSPECIFIED = 0;
+  DRAFT = 1;
+  ACTIVE = 2;
+  COMPLETE = 3;
+  ARCHIVED = 4;
+}
+
+// EvaluationReason explains why a flag returned its value.
+// Typed reasons allow SDKs to log and debug flag decisions.
+enum EvaluationReason {
+  REASON_UNSPECIFIED = 0;
+  OFF = 1;              // flag disabled in this environment
+  FALLTHROUGH = 2;      // no rule matched, rollout percentage applied
+  TARGET_MATCH = 3;     // individual user/org override matched
+  RULE_MATCH = 4;       // a targeting rule matched
+  PREREQUISITE_FAILED = 5; // a prerequisite flag is not in the required state
+  ERROR = 6;            // evaluation error (flag not found, cache miss)
+}
+
+message Flag {
+  string id = 1;
+  string key = 2;
+  string name = 3;
+  string description = 4;
+  FlagType type = 5;
+  FlagState state = 6;
+  string owner_id = 7;
+  string project_id = 8;
+  string safe_default = 9;
+  int64 created_at = 10;
+  int64 updated_at = 11;
+  int64 archived_at = 12;
+}
+
+message FlagEnvironmentState {
+  string flag_id = 1;
+  string flag_key = 2;
+  string environment = 3;
+  bool enabled = 4;
+  int32 rollout_pct = 5;
+  string safe_default = 6;
+  int64 updated_at = 7;
+}
+
+message TargetingRule {
+  string id = 1;
+  string attribute = 2;
+  string operator = 3;
+  repeated string values = 4;
+  string variation = 5;
+  int32 priority = 6;
+}
+
+// EvaluationContext is the caller-supplied context for flag evaluation.
+// user_id MUST be an opaque hash — never raw PII.
+message EvaluationContext {
+  string user_id = 1;
+  string org_id = 2;
+  map<string, string> attrs = 3;
+}
+
+message EvaluateFlagRequest {
+  string flag_key = 1;
+  EvaluationContext context = 2;
+  string environment = 3;
+}
+
+message EvaluateFlagResponse {
+  oneof value {
+    bool bool_value = 1;
+    string string_value = 2;
+    int64 int_value = 3;
+    double float_value = 4;
+    string json_value = 5;
+  }
+  EvaluationReason reason = 6;
+  bool from_cache = 7;
+}
+
+// FlagEvent is streamed via SSE to connected SDK instances.
+message FlagEvent {
+  string flag_key = 1;
+  bool enabled = 2;
+  int32 rollout_pct = 3;
+  string reason = 4;
+  int64 ts = 5;
+  string environment = 6;
+}
+
+message StreamSubscription {
+  string environment = 1;
+  repeated string flag_keys = 2; // empty = subscribe to all flags in environment
+}
+
+message FlagSnapshot {
+  string environment = 1;
+  repeated FlagEnvironmentState flags = 2;
+  string hash = 3;
+  int64 ts = 4;
+}
+
+message GetFlagRequest {
+  string key = 1;
+}
+
+message ListFlagsRequest {
+  string project_id = 1;
+  string environment = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+  string state_filter = 5; // ACTIVE, COMPLETE, ARCHIVED, DRAFT
+}
+
+message ListFlagsResponse {
+  repeated Flag flags = 1;
+  string next_page_token = 2;
+  int32 total = 3;
+}
+
+message CreateFlagRequest {
+  string key = 1;
+  string name = 2;
+  string description = 3;
+  FlagType type = 4;
+  string owner_id = 5;
+  string project_id = 6;
+  string safe_default = 7;
+}
+
+message UpdateFlagRequest {
+  string flag_key = 1;
+  string environment = 2;
+  bool enabled = 3;
+  int32 rollout_pct = 4;
+  string updated_by = 5;
+}
+
+message DeleteFlagRequest {
+  string key = 1;
+  string deleted_by = 2;
+}
+
+message DeleteFlagResponse {
+  bool tombstoned = 1;
+  string tombstoned_key = 2;
+}
+
+message RollbackRequest {
+  string flag_key = 1;
+  string environment = 2;
+  string reason = 3;
+  double error_rate = 4;
+  string triggered_by = 5; // "circuit_breaker" | "manual" | "slo_burn_rate"
+}
+
+message RollbackResponse {
+  bool success = 1;
+  string previous_state = 2;
+  int64 rolled_back_at = 3;
+  string incident_id = 4; // PagerDuty/OpsGenie incident ID if auto-created
+}

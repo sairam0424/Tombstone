@@ -1,0 +1,29 @@
+{
+  "name": "tombstone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.0.0",
+  "engines": {
+    "node": ">=18",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "packages/sdks/@tombstone/core",
+    "packages/sdks/@tombstone/react",
+    "packages/sdks/@tombstone/browser",
+    "workspace-cli",
+    "workspace-dashboard",
+    "workspace-mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.0.0",
+    "lint-staged": "^15.0.0",
+    "typescript": "~5.8.2"
+  }
+}
