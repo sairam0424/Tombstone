@@ -13,16 +13,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/transparency"
 )
 
 type FlagHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
 	logger *zap.Logger
+	rekor  *transparency.RekorClient
 }
 
-func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *FlagHandler {
-	return &FlagHandler{db: db, rdb: rdb, logger: logger}
+func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient) *FlagHandler {
+	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor}
 }
 
 type Flag struct {
@@ -335,7 +338,9 @@ func (h *FlagHandler) publishEvent(ctx context.Context, environment string, even
 	}
 }
 
-// writeAudit writes an append-only audit entry with Merkle hash linking
+// writeAudit writes an append-only audit entry with Merkle hash linking, then
+// asynchronously submits the entry hash to the Rekor transparency log (opt-in
+// via REKOR_ENABLED=true). The Rekor submission never blocks the caller.
 func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, eventType string, prev, curr any, ip string) {
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
@@ -353,12 +358,53 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 		prevHash = fmt.Sprintf("%x", hashBytes)
 	}
 
+	entryID := uuid.New().String()
 	_, err := h.db.ExecContext(ctx, `
 		INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, uuid.New().String(), flagKey, env, actor, eventType, prevJSON, currJSON, ip, prevHash)
+	`, entryID, flagKey, env, actor, eventType, prevJSON, currJSON, ip, prevHash)
 	if err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
+		return
+	}
+
+	// Asynchronously submit audit entry hash to Rekor transparency log.
+	// Captures only what it needs; ctx is deliberately not forwarded so that
+	// the goroutine outlives the HTTP request without inheriting its deadline.
+	if h.rekor != nil {
+		db := h.db
+		logger := h.logger
+		rekor := h.rekor
+		go func() {
+			// Build a serialisable snapshot of the audit entry for hashing.
+			entrySnapshot := map[string]any{
+				"id":         entryID,
+				"flag_key":   flagKey,
+				"environment": env,
+				"actor":      actor,
+				"event_type": eventType,
+				"prev_hash":  prevHash,
+			}
+			entryJSON, _ := json.Marshal(entrySnapshot)
+
+			rekorCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+
+			logID, logIndex, subErr := rekor.SubmitAuditEntry(rekorCtx, entryJSON)
+			if subErr != nil || logID == "" {
+				// SubmitAuditEntry already logs internally; nothing to do.
+				return
+			}
+
+			if _, updateErr := db.ExecContext(rekorCtx, `
+				UPDATE audit_log SET rekor_log_id=$1, rekor_log_index=$2 WHERE id=$3
+			`, logID, logIndex, entryID); updateErr != nil {
+				logger.Warn("rekor back-fill update failed",
+					zap.String("entry_id", entryID),
+					zap.Error(updateErr),
+				)
+			}
+		}()
 	}
 }
 
