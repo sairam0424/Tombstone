@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -200,11 +202,21 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 	key := chi.URLParam(r, "key")
 	env := chi.URLParam(r, "env")
 
+	// Inject flag state into the active trace span.
+	span := trace.SpanFromContext(r.Context())
+
 	var req UpdateEnvironmentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+
+	span.SetAttributes(
+		attribute.String("flag.key", key),
+		attribute.String("flag.environment", env),
+		attribute.Bool("flag.enabled", req.Enabled),
+		attribute.Int("flag.rollout_pct", req.RolloutPct),
+	)
 
 	actor := actorFromContext(r.Context())
 	if req.UpdatedBy == "" {
@@ -266,6 +278,16 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		req.Reason = "manual_kill_switch"
 	}
+
+	// Inject kill-switch state into the active trace span.
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("flag.key", key),
+		attribute.String("flag.environment", req.Environment),
+		attribute.Bool("flag.enabled", false),
+		attribute.Int("flag.rollout_pct", 0),
+		attribute.String("flag.kill_reason", req.Reason),
+	)
 
 	actor := actorFromContext(r.Context())
 	res, err := h.db.ExecContext(r.Context(), `

@@ -1,22 +1,39 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/marketplace/internal/api/v1"
 	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/tombstone/marketplace/internal/telemetry"
 	"github.com/tombstone/marketplace/internal/webhook"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync() //nolint:errcheck
+
+	initCtx := context.Background()
+
+	// Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+	shutdownTracer, err := telemetry.InitTracer(initCtx, "marketplace")
+	if err != nil {
+		logger.Fatal("init tracer", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -64,7 +81,8 @@ func main() {
 
 	addr := ":" + port
 	logger.Info("marketplace service starting", zap.String("addr", addr))
-	if err := http.ListenAndServe(addr, r); err != nil {
+	// Wrap the router with otelhttp for automatic HTTP trace spans.
+	if err := http.ListenAndServe(addr, otelhttp.NewHandler(r, "marketplace")); err != nil {
 		logger.Fatal("server error", zap.Error(err))
 	}
 }

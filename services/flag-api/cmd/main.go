@@ -15,15 +15,30 @@ import (
 	"github.com/go-chi/cors"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
 	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/telemetry"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
+
+	ctx := context.Background()
+
+	// Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+	shutdownTracer, err := telemetry.InitTracer(ctx, "flag-api")
+	if err != nil {
+		logger.Fatal("init tracer", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
 
 	// All connection strings MUST be supplied via environment variables.
 	// See infra/docker-compose.yml for local dev values.
@@ -59,7 +74,7 @@ func main() {
 		logger.Fatal("parse redis url", zap.Error(err))
 	}
 	rdb := redis.NewClient(opt)
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
+	if err := rdb.Ping(ctx).Err(); err != nil {
 		logger.Fatal("ping redis", zap.Error(err))
 	}
 
@@ -130,8 +145,9 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
+		Addr: ":" + port,
+		// Wrap the router with otelhttp for automatic HTTP trace spans.
+		Handler:      otelhttp.NewHandler(r, "flag-api"),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
@@ -150,7 +166,7 @@ func main() {
 
 	orphanCancel() // stop background orphan detector
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	_ = srv.Shutdown(shutdownCtx)
 }
