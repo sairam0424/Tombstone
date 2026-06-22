@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
 
 ROLLOUT_SCHEDULE = [1, 5, 10, 25, 50, 75, 100]
+
+_REDIS_KEY_PREFIX = "tombstone:thompson"
+_REDIS_TTL_SECONDS = 7_776_000  # 90 days
 
 _MIN_OBSERVATIONS: int = 50
 _SAMPLE_DRAWS: int = 1000
@@ -47,10 +58,117 @@ class ThompsonSamplingEngine:
         P(sampled_success_rate > 1 - error_threshold) >= confidence_threshold
 
     with at least `_MIN_OBSERVATIONS` total observations recorded.
+
+    Posteriors are written through to Redis on every update so that the engine
+    can be restored to its previous state after a service restart.
     """
 
     def __init__(self) -> None:
         self._posteriors: dict[str, FlagPosterior] = {}
+        self._redis: Any | None = None  # set via set_redis_client or load_all_from_redis
+
+    # ------------------------------------------------------------------
+    # Redis helpers
+    # ------------------------------------------------------------------
+
+    def set_redis_client(self, redis_client: Any) -> None:
+        """Attach a redis.asyncio client so write-through can fire on updates."""
+        self._redis = redis_client
+
+    @staticmethod
+    def _redis_key(flag_key: str, environment: str) -> str:
+        return f"{_REDIS_KEY_PREFIX}:{flag_key}:{environment}"
+
+    @staticmethod
+    def _serialize(posterior: FlagPosterior) -> str:
+        return json.dumps(
+            {
+                "alpha": posterior.alpha,
+                "beta": posterior.beta,
+                "observations": posterior.total_observations,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    async def _write_to_redis(self, posterior: FlagPosterior) -> None:
+        """Write-through: persist posterior to Redis.  Fails open on any error."""
+        if self._redis is None:
+            return
+        try:
+            key = self._redis_key(posterior.flag_key, posterior.environment)
+            payload = self._serialize(posterior)
+            await self._redis.set(key, payload, ex=_REDIS_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Thompson write-through to Redis failed (flag=%s env=%s): %s",
+                posterior.flag_key,
+                posterior.environment,
+                exc,
+            )
+
+    async def load_all_from_redis(self, redis_client: Any) -> None:
+        """Restore in-memory posteriors from Redis on service startup.
+
+        Uses SCAN to iterate over all tombstone:thompson:* keys.  Any Redis
+        error causes a warning and an empty in-memory state — the service will
+        still start successfully.
+        """
+        self._redis = redis_client
+        restored = 0
+        try:
+            cursor: int = 0
+            pattern = f"{_REDIS_KEY_PREFIX}:*"
+            while True:
+                cursor, keys = await redis_client.scan(
+                    cursor=cursor, match=pattern, count=200
+                )
+                for raw_key in keys:
+                    key_str = (
+                        raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+                    )
+                    # Key format: tombstone:thompson:{flag_key}:{environment}
+                    # flag_key itself may contain colons, so split from the right
+                    # to isolate environment (last segment) and flag_key (all middle segments).
+                    parts = key_str.split(":", 3)  # ['tombstone', 'thompson', flag_key, env]
+                    if len(parts) != 4:
+                        logger.warning("Skipping malformed Redis key: %s", key_str)
+                        continue
+                    _, _, flag_key, environment = parts
+
+                    raw_value = await redis_client.get(raw_key)
+                    if raw_value is None:
+                        continue
+                    try:
+                        data = json.loads(
+                            raw_value.decode() if isinstance(raw_value, bytes) else raw_value
+                        )
+                        posterior = FlagPosterior(
+                            flag_key=flag_key,
+                            environment=environment,
+                            current_rollout_pct=0,  # unknown at restore time; will be refreshed on next update
+                            alpha=float(data["alpha"]),
+                            beta=float(data["beta"]),
+                            total_observations=int(data["observations"]),
+                            autonomous_enabled=False,
+                        )
+                        internal_key = self._posterior_key(flag_key, environment)
+                        self._posteriors[internal_key] = posterior
+                        restored += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to deserialise Thompson posterior for key %s: %s",
+                            key_str,
+                            exc,
+                        )
+                if cursor == 0:
+                    break
+            logger.info("Restored %d Thompson posteriors from Redis", restored)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not restore Thompson posteriors from Redis — starting with empty "
+                "in-memory state. Cause: %s",
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -84,7 +202,7 @@ class ThompsonSamplingEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def update(
+    async def update(
         self,
         flag_key: str,
         environment: str,
@@ -97,6 +215,8 @@ class ThompsonSamplingEngine:
         Uses conjugate Bayesian update:
             alpha_new = alpha_old + successes
             beta_new  = beta_old  + failures
+
+        Writes through to Redis on every update (fails open).
         """
         if successes < 0 or failures < 0:
             raise ValueError("successes and failures must be non-negative")
@@ -116,6 +236,10 @@ class ThompsonSamplingEngine:
 
         key = self._posterior_key(flag_key, environment)
         self._posteriors[key] = updated
+
+        # Write-through: persist updated posterior to Redis (fails open)
+        await self._write_to_redis(updated)
+
         return updated
 
     def recommend(self, flag_key: str, environment: str) -> RolloutRecommendation:
