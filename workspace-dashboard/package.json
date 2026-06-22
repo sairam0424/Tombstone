@@ -11,12 +11,14 @@
     "lint": "eslint . --max-warnings=0"
   },
   "dependencies": {
+    "@types/recharts": "^1.8.29",
     "clsx": "^2.0.0",
     "d3": "^7.9.0",
     "date-fns": "^3.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.0.0"
+    "react-router-dom": "^7.0.0",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
