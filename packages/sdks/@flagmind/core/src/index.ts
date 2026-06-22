@@ -4,6 +4,7 @@ export { SSEStreamClient } from './streaming.js';
 export { FlagCache } from './cache.js';
 export { TombstoneProvider } from './openfeature.js';
 export type { ResolutionDetails, OpenFeatureEvaluationContext } from './openfeature.js';
+export { TombstoneTestClient } from './testing.js';
 
 export type {
   FlagType,
