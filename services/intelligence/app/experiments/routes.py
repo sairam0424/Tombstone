@@ -1,4 +1,6 @@
 import os
+import re
+from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -228,3 +230,106 @@ async def power_calculator(
             "power": power,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Warehouse import endpoint
+# ---------------------------------------------------------------------------
+
+# Disallowed DML/DDL keywords (injection guard — case-insensitive, word-boundary)
+_FORBIDDEN_SQL_PATTERN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|REPLACE|MERGE|UPSERT)\b",
+    re.IGNORECASE,
+)
+
+# Accepted connector identifiers for the warehouse-import endpoint
+VALID_IMPORT_CONNECTORS = frozenset({"bigquery", "snowflake", "databricks"})
+
+# Maximum rows returned in the sample preview
+_SAMPLE_SIZE = 5
+
+
+class WarehouseImportRequest(BaseModel):
+    connector: str
+    metric_sql: str
+    start: datetime
+    end: datetime
+
+    @field_validator("connector")
+    @classmethod
+    def validate_connector(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in VALID_IMPORT_CONNECTORS:
+            raise ValueError(
+                f"Invalid connector {v!r}. Must be one of: "
+                + ", ".join(sorted(VALID_IMPORT_CONNECTORS))
+            )
+        return v
+
+    @field_validator("metric_sql")
+    @classmethod
+    def validate_metric_sql(cls, v: str) -> str:
+        match = _FORBIDDEN_SQL_PATTERN.search(v)
+        if match:
+            raise ValueError(
+                f"metric_sql contains forbidden keyword {match.group(0)!r}. "
+                "Only SELECT aggregation queries are permitted."
+            )
+        return v
+
+
+class WarehouseImportResponse(BaseModel):
+    rows: int
+    columns: list[str]
+    sample: list[dict]
+
+
+def _build_connector(connector_name: str):
+    """
+    Instantiate the appropriate connector from environment variables.
+    Credentials are sourced from env — never passed in request bodies.
+    """
+    if connector_name == "bigquery":
+        from app.warehouse.bigquery import BigQueryConnector
+        return BigQueryConnector()
+
+    if connector_name == "snowflake":
+        from app.warehouse.snowflake import SnowflakeConnector
+        return SnowflakeConnector()
+
+    if connector_name == "databricks":
+        from app.warehouse.databricks import DatabricksConnector
+        return DatabricksConnector()
+
+    raise ValueError(f"Unknown connector: {connector_name!r}")
+
+
+@router.post("/{experiment_id}/warehouse-import", response_model=WarehouseImportResponse)
+async def warehouse_import(experiment_id: str, req: WarehouseImportRequest):
+    """
+    Pull aggregated experiment metrics from a data warehouse into Tombstone.
+
+    Zero-copy privacy guarantee: metric_sql must be a SELECT that returns only
+    aggregated columns (COUNT, AVG, SUM, etc.). DML/DDL keywords are rejected.
+    Raw user rows are never transmitted to Tombstone.
+    """
+    try:
+        connector = _build_connector(req.connector)
+    except (ImportError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        df = await connector.fetch_metric(req.metric_sql, req.start, req.end)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Warehouse query failed ({req.connector}): {exc}",
+        ) from exc
+
+    row_count = len(df)
+    columns = list(df.columns)
+    sample = df.head(_SAMPLE_SIZE).to_dict(orient="records")
+
+    return WarehouseImportResponse(rows=row_count, columns=columns, sample=sample)
