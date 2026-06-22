@@ -34,6 +34,11 @@ jobs:
           GOWORK: "off"
         run: go build ./...
 
+      - name: Generate build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: '${{ github.workspace }}/dist/**'
+
   python-intelligence:
     name: Python Intelligence Service
     runs-on: ubuntu-latest
