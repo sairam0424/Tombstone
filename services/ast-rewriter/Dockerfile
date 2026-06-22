@@ -11,7 +11,9 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /ast-rewriter ./cmd/main.go
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -o /ast-rewriter ./cmd/main.go
 
 # ---- runtime stage ----
 FROM alpine:3.20
