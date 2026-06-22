@@ -15,6 +15,7 @@ from app.integrations.webhook_receiver import router as webhooks_router
 from app.kafka.consumer import TelemetryConsumer
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
+from app.search.embedding_sync import EmbeddingSyncService
 from app.search.retriever import FlagSearchRetriever
 from app.stale.detector import StaleFlagDetector
 from app.telemetry.clickhouse_writer import ClickHouseWriter
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
         pagerduty_token=os.environ.get("PAGERDUTY_TOKEN", ""),
     )
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
+    app.state.embedding_sync = EmbeddingSyncService(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
     # Thompson Sampling engine for autonomous rollout
@@ -44,14 +46,16 @@ async def lifespan(app: FastAPI):
     else:
         app.state.clickhouse = ClickHouseWriter(host="localhost")  # unavailable but won't crash
 
-    # Start background Kafka consumer
+    # Start background Kafka consumer (also drives embedding sync on flag.changes)
     consumer = TelemetryConsumer(
         brokers=os.environ.get("KAFKA_BROKERS", "localhost:9092"),
         anomaly_detector=app.state.anomaly,
+        embedding_sync=app.state.embedding_sync,
     )
     consumer_task = asyncio.create_task(consumer.run())
 
     await app.state.searcher.initialize()
+    await app.state.embedding_sync.initialize()
 
     yield
 
@@ -61,6 +65,7 @@ async def lifespan(app: FastAPI):
         await consumer_task
     except asyncio.CancelledError:
         pass
+    await app.state.embedding_sync.close()
 
 
 app = FastAPI(title="Tombstone Intelligence", version="0.1.0", lifespan=lifespan)
