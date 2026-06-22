@@ -1,13 +1,20 @@
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from aiokafka import AIOKafkaConsumer
 
 from app.anomaly.detector import AnomalyDetector
 
+if TYPE_CHECKING:
+    from app.search.embedding_sync import EmbeddingSyncService
+
+logger = logging.getLogger(__name__)
 
 TOPIC_FLAG_EVALUATED = "tombstone.flag.evaluated"
+TOPIC_FLAG_CHANGES = "tombstone.flag.changes"
 GROUP_ID = "intelligence-anomaly"
 
 
@@ -22,21 +29,31 @@ class EvaluationEvent:
 
 class TelemetryConsumer:
     """
-    Consumes tombstone.flag.evaluated events from Kafka.
-    Feeds aggregated counts to the AnomalyDetector every 10 seconds.
+    Consumes tombstone.flag.evaluated and tombstone.flag.changes events from Kafka.
+
+    - tombstone.flag.evaluated  → feeds AnomalyDetector (error-rate windowing)
+    - tombstone.flag.changes    → triggers EmbeddingSyncService for created/updated flags
+
     Follows the Graph-Forge aiokafka pattern (manual commit, OTel headers).
     """
 
-    def __init__(self, brokers: str, anomaly_detector: AnomalyDetector):
+    def __init__(
+        self,
+        brokers: str,
+        anomaly_detector: AnomalyDetector,
+        embedding_sync: "EmbeddingSyncService | None" = None,
+    ):
         self._brokers = brokers
         self._detector = anomaly_detector
+        self._embedding_sync = embedding_sync
         self._consumer: AIOKafkaConsumer | None = None
         self._window: dict[str, dict] = {}  # flag_key:env -> {errors, total}
         self._flush_interval = 10  # seconds
 
     async def run(self) -> None:
+        topics = [TOPIC_FLAG_EVALUATED, TOPIC_FLAG_CHANGES]
         self._consumer = AIOKafkaConsumer(
-            TOPIC_FLAG_EVALUATED,
+            *topics,
             bootstrap_servers=self._brokers,
             group_id=GROUP_ID,
             enable_auto_commit=False,
@@ -47,7 +64,10 @@ class TelemetryConsumer:
         flush_task = asyncio.create_task(self._flush_loop())
         try:
             async for msg in self._consumer:
-                await self._handle(msg.value)
+                if msg.topic == TOPIC_FLAG_CHANGES:
+                    await self._handle_flag_change(msg.value)
+                else:
+                    await self._handle_evaluation(msg.value)
                 await self._consumer.commit()
         except asyncio.CancelledError:
             pass
@@ -55,7 +75,7 @@ class TelemetryConsumer:
             flush_task.cancel()
             await self._consumer.stop()
 
-    async def _handle(self, payload: dict) -> None:
+    async def _handle_evaluation(self, payload: dict) -> None:
         key = payload.get("flag_key", "")
         env = payload.get("environment", "production")
         window_key = f"{key}:{env}"
@@ -64,6 +84,23 @@ class TelemetryConsumer:
         self._window[window_key]["total"] += 1
         if payload.get("is_error", False):
             self._window[window_key]["errors"] += 1
+
+    async def _handle_flag_change(self, payload: dict) -> None:
+        """Sync embedding when a flag is created or updated."""
+        if self._embedding_sync is None:
+            return
+        event_type: str = payload.get("event_type", "")
+        flag_key: str = payload.get("flag_key", "")
+        if not flag_key or event_type not in {"flag.created", "flag.updated"}:
+            return
+        await self._embedding_sync.on_flag_event(
+            event_type=event_type,
+            flag_key=flag_key,
+            name=payload.get("name", ""),
+            description=payload.get("description", ""),
+            tags=payload.get("tags", []),
+        )
+        logger.debug("Embedding sync triggered for %s (event=%s)", flag_key, event_type)
 
     async def _flush_loop(self) -> None:
         while True:
