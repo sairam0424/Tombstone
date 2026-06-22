@@ -5,11 +5,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi import Request  # noqa: F401 — used in endpoint signatures below
 from app.anomaly.detector import AnomalyDetector
+from app.cleanup.routes import router as cleanup_router
 from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
+from app.integrations.webhook_receiver import router as webhooks_router
 from app.kafka.consumer import TelemetryConsumer
+from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
 from app.search.retriever import FlagSearchRetriever
 from app.stale.detector import StaleFlagDetector
@@ -68,11 +72,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-from fastapi import Request
-from app.integrations.webhook_receiver import router as webhooks_router
-from app.cleanup.routes import router as cleanup_router
-from app.rollout.routes import router as rollout_router
-
 app.include_router(experiments_router)
 app.include_router(webhooks_router)
 app.include_router(cleanup_router)
@@ -109,8 +108,10 @@ async def get_stale_flags(project_id: str = "00000000-0000-0000-0000-00000000000
 @app.post("/api/v1/dependency-graph")
 async def build_dependency_graph(request: Request, environment: str = "production", from_unix: int = 0, to_unix: int = 0):
     import time as t
-    if to_unix == 0: to_unix = int(t.time())
-    if from_unix == 0: from_unix = to_unix - 3600
+    if to_unix == 0:
+        to_unix = int(t.time())
+    if from_unix == 0:
+        from_unix = to_unix - 3600
     graph = await request.app.state.graph_builder.build(environment, from_unix, to_unix)
     return {
         "nodes": [{"flag_key": n.flag_key, "enabled": n.enabled, "rollout_pct": n.rollout_pct, "state": n.state, "owner_id": n.owner_id} for n in graph.nodes],
