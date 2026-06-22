@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _try_redis_connect(url: str):
-    """Create a redis.asyncio client; return None if unavailable."""
+    """Create a redis.asyncio client; return None if unavailable (fails open)."""
     try:
         import redis.asyncio as aioredis
         client = aioredis.from_url(url, decode_responses=False)
@@ -73,13 +73,25 @@ async def lifespan(app: FastAPI):
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
+    # Redis client — shared across all consumers (Thompson, future caches, etc.)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    redis_client = aioredis.from_url(redis_url, decode_responses=False)
+    app.state.redis = redis_client
+
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
 
-    # Redis — optional; dep graph falls back to DB scan if unavailable
+    # Redis — optional; fails open so service starts even if Redis is down
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     app.state.redis = await _try_redis_connect(redis_url)
+
+    # Restore Thompson posteriors from Redis (fails open)
+    if app.state.redis is not None:
+        try:
+            await app.state.rollout_engine.load_all_from_redis(app.state.redis)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
 
     # ClickHouse telemetry pipeline (optional)
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
