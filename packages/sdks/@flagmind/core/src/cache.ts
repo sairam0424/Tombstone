@@ -10,7 +10,11 @@ export class FlagCache {
   loadSnapshot(snapshot: FlagSnapshot): void {
     const next = new Map<string, FlagEnvironmentState>();
     for (const flag of snapshot.flags) {
-      next.set(flag.flagKey, { ...flag }); // spread = immutable copy
+      // Spread = immutable copy; default prerequisites to [] if absent
+      next.set(flag.flagKey, {
+        prerequisites: [],
+        ...flag,
+      });
     }
     this.memory = next;
     this.snapshot = { ...snapshot, flags: [...snapshot.flags] };
@@ -20,12 +24,13 @@ export class FlagCache {
   applyEvent(event: FlagEvent): void {
     const existing = this.memory.get(event.flagKey);
     if (!existing) return;
-    // Create new object — never mutate existing
+    // Create new object — never mutate existing; preserve prerequisites
     const updated: FlagEnvironmentState = {
       ...existing,
       enabled: event.enabled,
       rolloutPct: event.rolloutPct,
       updatedAt: event.ts,
+      prerequisites: existing.prerequisites ?? [],
     };
     const next = new Map(this.memory);
     next.set(event.flagKey, updated);
