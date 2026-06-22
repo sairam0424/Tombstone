@@ -73,8 +73,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: packages/sdks/@flagmind/core/package-lock.json
+          # No cache-dependency-path — package-lock.json generated on first npm install
 
       - name: npm install
         run: npm install
