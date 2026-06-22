@@ -323,15 +323,34 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"archived": true, "tombstoned": true, "key": key})
 }
 
-// publishEvent publishes a flag change event to Redis pub/sub
+// publishEvent writes a flag change event to Redis Streams (primary) and
+// Redis pub/sub (deprecated — kept for 1 release cycle; remove in v2.1).
 func (h *FlagHandler) publishEvent(ctx context.Context, environment string, event FlagEvent) {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
-	channel := fmt.Sprintf("stream:%s:updates", environment)
+
+	// Primary: Redis Streams — delivery guarantees + event history for late-joining SDKs.
+	streamKey := fmt.Sprintf("tombstone:stream:%s", environment)
+	if err := h.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		MaxLen: 10000, // retain last 10,000 events per stream
+		Approx: true,  // MAXLEN ~ (approximate, faster)
+		Values: map[string]interface{}{
+			"event":       "flag_updated",
+			"flag_key":    event.FlagKey,
+			"environment": environment,
+			"payload":     string(payload),
+		},
+	}).Err(); err != nil {
+		h.logger.Warn("redis xadd failed", zap.Error(err), zap.String("stream", streamKey))
+	}
+
+	// Deprecated: Redis pub/sub — remove in v2.1 once all consumers migrate to Streams.
+	channel := fmt.Sprintf("stream:%s:updates", environment) // deprecated: remove in v2.1
 	if err := h.rdb.Publish(ctx, channel, payload).Err(); err != nil {
-		h.logger.Warn("redis publish failed", zap.Error(err), zap.String("channel", channel))
+		h.logger.Warn("redis publish failed (deprecated)", zap.Error(err), zap.String("channel", channel))
 	}
 }
 
