@@ -64,6 +64,8 @@ func main() {
 	}
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
+	rateMw := middleware.NewRateLimitMiddleware()
+	defer rateMw.Stop()
 	flagH := v1.NewFlagHandler(db, rdb, logger)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
@@ -78,6 +80,7 @@ func main() {
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(rateMw.RateLimit)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
