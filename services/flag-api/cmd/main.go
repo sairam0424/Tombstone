@@ -68,6 +68,7 @@ func main() {
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
 	complianceH := v1.NewComplianceHandler(db, logger)
+	variationH := v1.NewVariationHandler(db, logger)
 
 	// Start background orphan detector (runs every 24 h, stops on shutdown).
 	orphanCtx, orphanCancel := context.WithCancel(context.Background())
@@ -98,6 +99,11 @@ func main() {
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
 		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 		r.Post("/flags/{key}/kill", flagH.KillSwitch)
+
+		r.Post("/flags/{key}/variations", variationH.AddVariation)
+		r.Get("/flags/{key}/variations", variationH.ListVariations)
+		r.Patch("/flags/{key}/variations/{id}", variationH.UpdateVariationWeight)
+		r.Delete("/flags/{key}/variations/{id}", variationH.DeleteVariation)
 
 		r.Get("/environments/snapshot", snapH.GetSnapshot)
 		r.Get("/audit", auditH.ListAuditLog)
