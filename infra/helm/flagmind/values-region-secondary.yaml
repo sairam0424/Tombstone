@@ -1,0 +1,23 @@
+# Secondary region — read replica flag-api, full gateway+evaluator
+global:
+  region: eu-west-1
+  isPrimary: false
+
+flag-api:
+  replicaCount: 2
+  env:
+    - name: IS_PRIMARY_REGION
+      value: "false"
+    - name: REGION
+      value: "eu-west-1"
+    - name: PRIMARY_API_URL
+      value: ""  # Set to primary region flag-api URL
+
+gateway:
+  replicaCount: 3
+
+evaluator:
+  replicaCount: 2
+
+intelligence:
+  enabled: false  # Only run intelligence in primary region (cost optimization)
