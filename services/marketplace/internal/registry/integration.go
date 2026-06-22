@@ -36,6 +36,12 @@ type Integration struct {
 	Status       IntegrationStatus `json:"status"`
 	Config       map[string]string `json:"config,omitempty"`
 	IsFirstParty bool              `json:"is_first_party"`
+	// Bidirectional indicates the integration supports inbound webhook delivery
+	// in addition to the standard outbound (Tombstone -> third-party) flow.
+	Bidirectional bool `json:"bidirectional,omitempty"`
+	// InboundEndpoint is the Tombstone-hosted path that accepts inbound payloads
+	// from the third-party service (populated only when Bidirectional is true).
+	InboundEndpoint string `json:"inbound_endpoint,omitempty"`
 }
 
 // firstPartyIntegrations defines the built-in catalog of integrations.
@@ -51,14 +57,16 @@ var firstPartyIntegrations = []Integration{
 		IsFirstParty: true,
 	},
 	{
-		ID:           "datadog",
-		Name:         "Datadog",
-		Description:  "Annotate Datadog dashboards with flag change events.",
-		Category:     "observability",
-		IconURL:      "https://assets.tombstone.io/integrations/datadog.svg",
-		Events:       []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagArchived},
-		Status:       StatusAvailable,
-		IsFirstParty: true,
+		ID:          "datadog",
+		Name:        "Datadog",
+		Description: "Annotate Datadog dashboards with flag change events and receive monitor alerts to auto-trigger blast radius checks and kill switches.",
+		Category:    "observability",
+		IconURL:     "https://assets.tombstone.io/integrations/datadog.svg",
+		Events:      []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagArchived},
+		Status:      StatusAvailable,
+		IsFirstParty:    true,
+		Bidirectional:   true,
+		InboundEndpoint: "/api/v1/marketplace/inbound/datadog",
 	},
 	{
 		ID:           "pagerduty",
@@ -163,16 +171,18 @@ func (r *Registry) Install(id, webhookURL string, config map[string]string) bool
 
 	// Immutable struct update — create a new Integration value.
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   webhookURL,
-		Events:       existing.Events,
-		Status:       StatusInstalled,
-		Config:       config,
-		IsFirstParty: existing.IsFirstParty,
+		ID:              existing.ID,
+		Name:            existing.Name,
+		Description:     existing.Description,
+		Category:        existing.Category,
+		IconURL:         existing.IconURL,
+		WebhookURL:      webhookURL,
+		Events:          existing.Events,
+		Status:          StatusInstalled,
+		Config:          config,
+		IsFirstParty:    existing.IsFirstParty,
+		Bidirectional:   existing.Bidirectional,
+		InboundEndpoint: existing.InboundEndpoint,
 	}
 	r.integrations[id] = updated
 	return true
@@ -190,16 +200,18 @@ func (r *Registry) Uninstall(id string) bool {
 	}
 
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   "",
-		Events:       existing.Events,
-		Status:       StatusAvailable,
-		Config:       nil,
-		IsFirstParty: existing.IsFirstParty,
+		ID:              existing.ID,
+		Name:            existing.Name,
+		Description:     existing.Description,
+		Category:        existing.Category,
+		IconURL:         existing.IconURL,
+		WebhookURL:      "",
+		Events:          existing.Events,
+		Status:          StatusAvailable,
+		Config:          nil,
+		IsFirstParty:    existing.IsFirstParty,
+		Bidirectional:   existing.Bidirectional,
+		InboundEndpoint: existing.InboundEndpoint,
 	}
 	r.integrations[id] = updated
 	return true
