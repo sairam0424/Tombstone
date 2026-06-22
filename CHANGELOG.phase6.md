@@ -1,0 +1,1 @@
+# Phase 6 — Enterprise Closure\n\nPhase 6A: Relay Proxy + OpenFeature + Full AST Rewrite\nPhase 6B: SAML/OIDC + Helm Charts + SCIM Orphan Detection\nPhase 6C: ClickHouse Telemetry + AI Ship Recommendation + Autonomous Rollout UI\n
