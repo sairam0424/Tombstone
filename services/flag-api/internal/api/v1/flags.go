@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/middleware"
 )
 
 type FlagHandler struct {
@@ -363,18 +365,15 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 }
 
 // actorFromContext reads the actor identity set by the auth middleware.
-// The middleware uses middleware.ContextKeyActor which is of type contextKey("actor").
-// We import it indirectly via the package-level variable injected into main.go.
+// Uses middleware.ContextKeyActor directly — the same variable the middleware
+// uses when calling context.WithValue. Matching the EXACT variable (not just
+// value) is required because Go context.Value lookup uses dynamic type identity.
 func actorFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(ActorContextKey).(string); ok {
+	if v, ok := ctx.Value(middleware.ContextKeyActor).(string); ok {
 		return v
 	}
 	return "unknown"
 }
-
-// ActorContextKey is the shared context key — must match middleware.ContextKeyActor exactly.
-// Both are struct{name string}{"actor"} so the key comparison works across packages.
-var ActorContextKey = struct{ name string }{"actor"}
 
 func ipFromRequest(r *http.Request) string {
 	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {

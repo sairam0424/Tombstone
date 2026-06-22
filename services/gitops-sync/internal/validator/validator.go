@@ -9,7 +9,9 @@ import (
 )
 
 // Naming convention: team.service.feature (dot-notation, all lowercase, no spaces)
-var keyPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(.[a-z][a-z0-9-]*)*$`)
+// NOTE: the dot MUST be escaped (\.) — an unescaped dot matches any character,
+// allowing invalid keys like "teamXservice" to pass validation.
+var keyPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$`)
 
 type ValidationError struct {
     FlagKey string

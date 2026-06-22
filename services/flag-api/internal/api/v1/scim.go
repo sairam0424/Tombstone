@@ -2,10 +2,10 @@ package v1
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -331,15 +331,17 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 }
 
 // SCIMAuthMiddleware returns HTTP middleware that validates Bearer token auth
-// for SCIM endpoints. When SCIM_TOKEN env var is empty, all requests pass
-// through (dev mode).
+// for SCIM endpoints. FAILS CLOSED: if token is empty the middleware rejects
+// all requests with 503 rather than allowing unauthenticated access.
+// Set SCIM_TOKEN env var before registering these routes.
 func SCIMAuthMiddleware(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			envToken := os.Getenv("SCIM_TOKEN")
-			if envToken == "" {
-				// Dev mode: no token configured, allow all requests.
-				next.ServeHTTP(w, r)
+			if token == "" {
+				// No token configured — fail closed. SCIM endpoints are
+				// inaccessible until SCIM_TOKEN is set in the environment.
+				writeSCIMError(w, http.StatusServiceUnavailable,
+					"SCIM not configured: set SCIM_TOKEN environment variable")
 				return
 			}
 
@@ -350,13 +352,8 @@ func SCIMAuthMiddleware(token string) func(http.Handler) http.Handler {
 			}
 
 			provided := strings.TrimPrefix(authHeader, "Bearer ")
-			// Use the token passed at router setup time if non-empty,
-			// otherwise fall back to the env var re-read at request time.
-			expected := token
-			if expected == "" {
-				expected = envToken
-			}
-			if provided != expected {
+			// Use constant-time comparison to prevent timing side-channel attacks.
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 				writeSCIMError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
