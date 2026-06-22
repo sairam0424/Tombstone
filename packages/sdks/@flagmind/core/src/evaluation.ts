@@ -4,7 +4,6 @@ import type {
   TargetingRule,
   EvaluationContext,
   EvaluationResult,
-  EvaluationReason,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -105,9 +104,7 @@ export class EvaluationEngine {
       return hashV2(flagKey, userId) < rolloutPct / 100;
     }
 
-    // v1: MurmurHash3 path — unchanged for backward compat
-    const hash = murmurhash.v3(flagKey + userId) >>> 0;
-    return (hash % 100) < rolloutPct;
+    return hashV1(flagKey, userId) * 100 < rolloutPct;
   }
 
   private evaluateRule(rule: TargetingRule, context: EvaluationContext): boolean {
