@@ -19,6 +19,7 @@ import (
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
 	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/transparency"
 )
 
 func main() {
@@ -63,8 +64,10 @@ func main() {
 		logger.Fatal("ping redis", zap.Error(err))
 	}
 
+	rekorClient := transparency.NewRekorClient()
+
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
-	flagH := v1.NewFlagHandler(db, rdb, logger)
+	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
 	complianceH := v1.NewComplianceHandler(db, logger)
