@@ -1,11 +1,9 @@
-import math
-from dataclasses import dataclass
 
 import numpy as np
 from scipy import stats  # type: ignore[import]
 
 from app.experiments.models import (
-    ExperimentDefinition, ExperimentResult, MetricResult, VariantStats,
+    ExperimentDefinition, MetricResult, VariantStats,
 )
 
 

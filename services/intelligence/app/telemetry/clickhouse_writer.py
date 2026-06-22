@@ -1,7 +1,6 @@
 import asyncio
 import importlib
 import logging
-import os
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

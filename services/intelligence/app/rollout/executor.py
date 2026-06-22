@@ -95,7 +95,6 @@ class RolloutExecutor:
                     posterior = self._engine.get_posterior(rec.flag_key, rec.environment)
                     if posterior is not None:
                         from app.rollout.thompson import FlagPosterior
-                        from app.rollout.thompson import _posterior_key  # type: ignore[attr-defined]
 
                         # Rebuild the posterior with the updated percentage (immutable)
                         key = f"{rec.flag_key}:{rec.environment}"

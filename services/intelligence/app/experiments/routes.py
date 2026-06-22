@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 
 from app.experiments.analyzer import ExperimentAnalyzer
-from app.experiments.models import ExperimentDefinition, ExperimentMetric, ExperimentResult
+from app.experiments.models import ExperimentDefinition
 from app.warehouse.connector import get_connector
 
 router = APIRouter(prefix="/api/v1/experiments", tags=["experiments"])
