@@ -7,6 +7,48 @@ import type {
   EvaluationReason,
 } from './types.js';
 
+// ---------------------------------------------------------------------------
+// Hash v2: double-FNV32a with 10,000-unit weight
+// Fixes parallel-experiment bias present in v1's MurmurHash3 / 100-bucket scheme.
+// Reference: GrowthBook hash v2 — 2-1 adversarially verified.
+// ---------------------------------------------------------------------------
+
+const FNV_PRIME = 16777619;
+const FNV_OFFSET = 2166136261;
+
+/** FNV-32a over a UTF-16 string (char-by-char, unsigned 32-bit). */
+function fnv32a(str: string): number {
+  let hash = FNV_OFFSET >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, FNV_PRIME) >>> 0; // keep unsigned 32-bit
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Hash v2: double-FNV32a — applies FNV-32a twice (outer over decimal string of
+ * inner result) then maps to [0, 1) with 10,000-unit precision.
+ * @param seed  - typically the flag key
+ * @param value - typically the user id
+ */
+function hashV2(seed: string, value: string): number {
+  const inner = fnv32a(seed + value);
+  const outer = fnv32a(String(inner));
+  return (outer % 10000) / 10000;
+}
+
+/**
+ * Hash v1 (legacy): MurmurHash3 unsigned 32-bit with 100-bucket modulus.
+ * Kept unchanged — all existing flags that omit hashVersion use this path.
+ */
+function hashV1(flagKey: string, userId: string): number {
+  const h = murmurhash.v3(flagKey + userId) >>> 0;
+  return (h % 100) / 100;
+}
+
+// ---------------------------------------------------------------------------
+
 export class EvaluationEngine {
   evaluate<T>(
     flagState: FlagEnvironmentState | undefined,
@@ -36,18 +78,34 @@ export class EvaluationEngine {
       }
     }
 
-    // MurmurHash-based percentage rollout
-    if (this.isInRollout(flagKey, context.userId, flagState.rolloutPct)) {
+    // Percentage rollout — hash version determines bucketing algorithm
+    if (this.isInRollout(flagKey, context.userId, flagState.rolloutPct, flagState.hashVersion ?? 1)) {
       return { value: true as unknown as T, reason: 'FALLTHROUGH', fromCache: true, flagKey };
     }
 
     return { value: defaultValue, reason: 'FALLTHROUGH', fromCache: true, flagKey };
   }
 
-  // Consistent assignment: same userId always gets same result for a given flag
-  private isInRollout(flagKey: string, userId: string, rolloutPct: number): boolean {
+  /**
+   * Consistent assignment: same userId always gets the same result for a given flag.
+   *
+   * hashVersion 1 (default, backward compat): MurmurHash3 % 100 < rolloutPct
+   * hashVersion 2 (new experiments):          double-FNV32a, 10,000-bucket, compare to rolloutPct/100
+   */
+  private isInRollout(
+    flagKey: string,
+    userId: string,
+    rolloutPct: number,
+    hashVersion: 1 | 2 = 1,
+  ): boolean {
     if (rolloutPct === 100) return true;
     if (rolloutPct === 0) return false;
+
+    if (hashVersion === 2) {
+      return hashV2(flagKey, userId) < rolloutPct / 100;
+    }
+
+    // v1: MurmurHash3 path — unchanged for backward compat
     const hash = murmurhash.v3(flagKey + userId) >>> 0;
     return (hash % 100) < rolloutPct;
   }

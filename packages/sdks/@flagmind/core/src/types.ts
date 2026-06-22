@@ -20,6 +20,13 @@ export interface FlagEnvironmentState {
   rolloutPct: number;
   safeDefault: string;
   updatedAt: number;
+  /**
+   * Hash algorithm version for rollout bucketing.
+   * 1 (default) = MurmurHash3, 100-bucket modulus — backward compatible.
+   * 2 = double-FNV32a, 10,000-bucket modulus — fixes parallel-experiment bias.
+   * Existing flags without this field implicitly use v1.
+   */
+  hashVersion?: 1 | 2;
 }
 
 export interface TargetingRule {
