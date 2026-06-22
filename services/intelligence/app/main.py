@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +22,8 @@ from app.stale.detector import StaleFlagDetector
 from app.telemetry.clickhouse_writer import ClickHouseWriter
 from app.telemetry.routes import router as telemetry_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,9 +36,20 @@ async def lifespan(app: FastAPI):
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
+    # Redis client — shared across all consumers (Thompson, future caches, etc.)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    redis_client = aioredis.from_url(redis_url, decode_responses=False)
+    app.state.redis = redis_client
+
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
+
+    # Restore Thompson posteriors from Redis (fails open — service starts even if Redis is down)
+    try:
+        await app.state.rollout_engine.load_all_from_redis(redis_client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
 
     # ClickHouse telemetry pipeline (optional)
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
