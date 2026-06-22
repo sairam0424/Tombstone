@@ -7,4 +7,5 @@ use (
 	./services/gateway
 	./services/gitops-sync
 	./services/marketplace
+	./services/tombstone-operator
 )
