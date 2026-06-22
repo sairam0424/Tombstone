@@ -45,6 +45,20 @@ enum EvaluationReason {
   ERROR = 6;            // evaluation error (flag not found, cache miss)
 }
 
+// ParentCondition represents a prerequisite that must be satisfied before a flag
+// is evaluated. Mirrors the GrowthBook ParentConditions gate pattern.
+//
+// gate=true  (default): if the prerequisite is not in the required variation,
+//   block the entire feature — serve safe_default and set reason=PREREQUISITE_FAILED.
+// gate=false:           if the prerequisite is not in the required variation,
+//   skip only the current targeting rule and continue to the next one.
+message ParentCondition {
+  string flag_key = 1;
+  string required_variation = 2;
+  bool gate = 3;
+  int32 priority = 4;
+}
+
 message Flag {
   string id = 1;
   string key = 2;
@@ -58,6 +72,7 @@ message Flag {
   int64 created_at = 10;
   int64 updated_at = 11;
   int64 archived_at = 12;
+  repeated ParentCondition prerequisites = 13;
 }
 
 message FlagEnvironmentState {
