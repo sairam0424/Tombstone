@@ -12,6 +12,20 @@ export type RuleOperator =
   | 'LT' | 'LTE' | 'GT' | 'GTE'
   | 'CONTAINS' | 'PREFIX' | 'SUFFIX';
 
+export interface FlagPrerequisite {
+  /** The flag key that must be evaluated before this flag. */
+  flagKey: string;
+  /** The variation value the prerequisite flag must resolve to. */
+  requiredVariation: string;
+  /**
+   * When true: if the prerequisite fails the ENTIRE feature is blocked
+   * (returns PREREQUISITE_FAILED with the safeDefault).
+   * When false: only the current rule is skipped; evaluation continues
+   * to the next step.
+   */
+  gate: boolean;
+}
+
 export interface FlagEnvironmentState {
   flagId: string;
   flagKey: string;
@@ -20,6 +34,10 @@ export interface FlagEnvironmentState {
   rolloutPct: number;
   safeDefault: string;
   updatedAt: number;
+  /** Explicit list of userIds that always receive the flag's "on" variation. */
+  targetList?: string[];
+  /** Zero or more prerequisite flags that must pass before this flag is served. */
+  prerequisites?: FlagPrerequisite[];
 }
 
 export interface TargetingRule {
@@ -43,6 +61,13 @@ export interface EvaluationResult<T = boolean> {
   reason: EvaluationReason;
   fromCache: boolean;
   flagKey: string;
+  /** Set when reason is RULE_MATCH — the id of the matched targeting rule. */
+  ruleId?: string;
+  /**
+   * Index of the resolved variation within the flag's variation list.
+   * Undefined for boolean flags where the variation is implicit.
+   */
+  variationIndex?: number;
 }
 
 export interface FlagSnapshot {
