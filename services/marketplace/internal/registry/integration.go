@@ -26,16 +26,18 @@ const (
 
 // Integration describes a third-party or first-party webhook integration.
 type Integration struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name"`
-	Description  string            `json:"description"`
-	Category     string            `json:"category"`
-	IconURL      string            `json:"icon_url"`
-	WebhookURL   string            `json:"webhook_url,omitempty"`
-	Events       []EventType       `json:"events"`
-	Status       IntegrationStatus `json:"status"`
-	Config       map[string]string `json:"config,omitempty"`
-	IsFirstParty bool              `json:"is_first_party"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description"`
+	Category          string            `json:"category"`
+	IconURL           string            `json:"icon_url"`
+	WebhookURL        string            `json:"webhook_url,omitempty"`
+	Events            []EventType       `json:"events"`
+	Status            IntegrationStatus `json:"status"`
+	Config            map[string]string `json:"config,omitempty"`
+	IsFirstParty      bool              `json:"is_first_party"`
+	Bidirectional     bool              `json:"bidirectional,omitempty"`
+	InboundEndpoints  []string          `json:"inbound_endpoints,omitempty"`
 }
 
 // firstPartyIntegrations defines the built-in catalog of integrations.
@@ -43,7 +45,7 @@ var firstPartyIntegrations = []Integration{
 	{
 		ID:           "slack",
 		Name:         "Slack",
-		Description:  "Send flag change notifications to Slack channels.",
+		Description:  "Interactive Slack app: Block Kit notifications, /tombstone slash commands, and kill switch buttons.",
 		Category:     "notifications",
 		IconURL:      "https://assets.tombstone.io/integrations/slack.svg",
 		Events:       []EventType{EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback},
@@ -163,16 +165,18 @@ func (r *Registry) Install(id, webhookURL string, config map[string]string) bool
 
 	// Immutable struct update — create a new Integration value.
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   webhookURL,
-		Events:       existing.Events,
-		Status:       StatusInstalled,
-		Config:       config,
-		IsFirstParty: existing.IsFirstParty,
+		ID:               existing.ID,
+		Name:             existing.Name,
+		Description:      existing.Description,
+		Category:         existing.Category,
+		IconURL:          existing.IconURL,
+		WebhookURL:       webhookURL,
+		Events:           existing.Events,
+		Status:           StatusInstalled,
+		Config:           config,
+		IsFirstParty:     existing.IsFirstParty,
+		Bidirectional:    existing.Bidirectional,
+		InboundEndpoints: existing.InboundEndpoints,
 	}
 	r.integrations[id] = updated
 	return true
@@ -190,16 +194,18 @@ func (r *Registry) Uninstall(id string) bool {
 	}
 
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   "",
-		Events:       existing.Events,
-		Status:       StatusAvailable,
-		Config:       nil,
-		IsFirstParty: existing.IsFirstParty,
+		ID:               existing.ID,
+		Name:             existing.Name,
+		Description:      existing.Description,
+		Category:         existing.Category,
+		IconURL:          existing.IconURL,
+		WebhookURL:       "",
+		Events:           existing.Events,
+		Status:           StatusAvailable,
+		Config:           nil,
+		IsFirstParty:     existing.IsFirstParty,
+		Bidirectional:    existing.Bidirectional,
+		InboundEndpoints: existing.InboundEndpoints,
 	}
 	r.integrations[id] = updated
 	return true
@@ -216,6 +222,37 @@ func (r *Registry) Register(i Integration) bool {
 	}
 	i.IsFirstParty = false
 	r.integrations[i.ID] = i
+	return true
+}
+
+// MarkBidirectional upgrades an integration's metadata to reflect bidirectional capability,
+// setting Bidirectional: true and recording the inbound endpoint paths.
+// This is called at startup for first-party integrations that support inbound webhooks.
+// Returns false if the integration does not exist.
+func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, ok := r.integrations[id]
+	if !ok {
+		return false
+	}
+
+	updated := Integration{
+		ID:               existing.ID,
+		Name:             existing.Name,
+		Description:      existing.Description,
+		Category:         existing.Category,
+		IconURL:          existing.IconURL,
+		WebhookURL:       existing.WebhookURL,
+		Events:           existing.Events,
+		Status:           existing.Status,
+		Config:           existing.Config,
+		IsFirstParty:     existing.IsFirstParty,
+		Bidirectional:    true,
+		InboundEndpoints: inboundEndpoints,
+	}
+	r.integrations[id] = updated
 	return true
 }
 
