@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,19 @@ import (
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
 	"github.com/tombstone/flag-api/internal/middleware"
 )
+
+func buildAllowedOrigins() []string {
+	env := os.Getenv("ALLOWED_ORIGINS")
+	if env == "" {
+		// Safe default for local development
+		return []string{"http://localhost:3000", "http://localhost:8081", "http://127.0.0.1:3000"}
+	}
+	origins := strings.Split(env, ",")
+	for i, o := range origins {
+		origins[i] = strings.TrimSpace(o)
+	}
+	return origins
+}
 
 func main() {
 	logger, _ := zap.NewProduction()
@@ -64,10 +78,12 @@ func main() {
 	}
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
+	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
 	complianceH := v1.NewComplianceHandler(db, logger)
+	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
 
 	// Start background orphan detector (runs every 24 h, stops on shutdown).
 	orphanCtx, orphanCancel := context.WithCancel(context.Background())
@@ -78,8 +94,10 @@ func main() {
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
+	// Build CORS allowlist from environment. Default: localhost for dev.
+	allowedOrigins := buildAllowedOrigins()
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins: []string{"*"},
+		AllowedOrigins: allowedOrigins,
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 	}))
@@ -91,6 +109,7 @@ func main() {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
+		r.Use(rbacMw.LoadRole)
 
 		r.Get("/flags", flagH.ListFlags)
 		r.Post("/flags", flagH.CreateFlag)
@@ -105,6 +124,10 @@ func main() {
 		r.Get("/compliance/evidence", complianceH.GetEvidence)
 		r.Get("/compliance/controls", complianceH.GetControls)
 		r.Get("/compliance/export", complianceH.ExportAuditLog)
+
+		r.Post("/break-glass/tokens", breakGlassH.CreateToken)
+		r.Post("/break-glass/use", breakGlassH.UseToken)
+		r.Get("/break-glass/tokens", breakGlassH.ListTokens)
 	})
 
 	scimToken := os.Getenv("SCIM_TOKEN")

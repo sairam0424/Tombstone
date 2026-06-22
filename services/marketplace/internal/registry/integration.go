@@ -116,15 +116,42 @@ var firstPartyIntegrations = []Integration{
 type Registry struct {
 	mu           sync.RWMutex
 	integrations map[string]Integration
+	store        Store
 }
 
 // NewRegistry creates a Registry seeded with all first-party integrations.
-func NewRegistry() *Registry {
+// If store is nil a MemoryStore (no-op) is used, preserving backward compatibility.
+// On startup, any persisted installations are loaded from the store and merged
+// into the in-memory catalog.
+func NewRegistry(store Store) *Registry {
+	if store == nil {
+		store = &MemoryStore{}
+	}
 	r := &Registry{
 		integrations: make(map[string]Integration, len(firstPartyIntegrations)),
+		store:        store,
 	}
 	for _, i := range firstPartyIntegrations {
 		r.integrations[i.ID] = i
+	}
+	// Restore persisted installations so webhooks survive restarts.
+	if installed, err := store.GetInstalled(); err == nil {
+		for _, persisted := range installed {
+			if base, ok := r.integrations[persisted.ID]; ok {
+				r.integrations[persisted.ID] = Integration{
+					ID:           base.ID,
+					Name:         base.Name,
+					Description:  base.Description,
+					Category:     base.Category,
+					IconURL:      base.IconURL,
+					WebhookURL:   persisted.WebhookURL,
+					Events:       base.Events,
+					Status:       StatusInstalled,
+					Config:       persisted.Config,
+					IsFirstParty: base.IsFirstParty,
+				}
+			}
+		}
 	}
 	return r
 }
@@ -175,6 +202,8 @@ func (r *Registry) Install(id, webhookURL string, config map[string]string) bool
 		IsFirstParty: existing.IsFirstParty,
 	}
 	r.integrations[id] = updated
+	// Persist the installation; ignore the error — in-memory state is already updated.
+	_ = r.store.Upsert(updated)
 	return true
 }
 
@@ -202,6 +231,8 @@ func (r *Registry) Uninstall(id string) bool {
 		IsFirstParty: existing.IsFirstParty,
 	}
 	r.integrations[id] = updated
+	// Remove the persisted installation record; ignore the error.
+	_ = r.store.Delete(id)
 	return true
 }
 

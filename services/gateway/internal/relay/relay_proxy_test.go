@@ -1,6 +1,9 @@
 package relay
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"go.uber.org/zap"
@@ -198,5 +201,117 @@ func TestConnectedStateTransitions(t *testing.T) {
 	rp.connMu.RUnlock()
 	if final {
 		t.Error("relay should be disconnected after setConnected(false)")
+	}
+}
+
+// --------------------------------------------------------------------------
+// ServeLocalStream — Bearer token validation (H2 security fix)
+// --------------------------------------------------------------------------
+
+// relayTestToken returns a per-test token value that is not a hard-coded
+// credential but is unique enough to exercise the token comparison logic.
+func relayTestToken(t *testing.T) string {
+	t.Helper()
+	return "relay-test-" + t.Name()
+}
+
+// TestServeLocalStreamTokenValidation exercises all auth branches introduced
+// by the H2 relay Bearer-token fix. It runs ServeLocalStream in a goroutine
+// and cancels the request context on the accept path so the SSE loop exits
+// immediately rather than blocking.
+func TestServeLocalStreamTokenValidation(t *testing.T) {
+	t.Parallel()
+
+	tok := relayTestToken(t)
+
+	cases := []struct {
+		name           string
+		configToken    string // RelayConfig.Token — empty = open/dev mode
+		authHeader     string // Authorization request header value
+		wantStatusCode int
+	}{
+		{
+			name:           "strict: matching token accepted",
+			configToken:    tok,
+			authHeader:     "Bearer " + tok,
+			wantStatusCode: http.StatusOK,
+		},
+		{
+			name:           "strict: mismatched token rejected",
+			configToken:    tok,
+			authHeader:     "Bearer wrong",
+			wantStatusCode: http.StatusUnauthorized,
+		},
+		{
+			name:           "strict: missing header rejected",
+			configToken:    tok,
+			authHeader:     "",
+			wantStatusCode: http.StatusUnauthorized,
+		},
+		{
+			name:           "strict: non-Bearer scheme rejected",
+			configToken:    tok,
+			authHeader:     "Basic dXNlcjpwYXNz",
+			wantStatusCode: http.StatusUnauthorized,
+		},
+		{
+			name:           "open: no config token, no header — allowed",
+			configToken:    "",
+			authHeader:     "",
+			wantStatusCode: http.StatusOK,
+		},
+		{
+			name:           "open: no config token, Bearer header — allowed",
+			configToken:    "",
+			authHeader:     "Bearer anyvalue",
+			wantStatusCode: http.StatusOK,
+		},
+		{
+			name:           "open: no config token, malformed scheme — rejected",
+			configToken:    "",
+			authHeader:     "Basic dXNlcjpwYXNz",
+			wantStatusCode: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger := newTestLogger(t)
+			rp := NewRelayProxy(RelayConfig{
+				GatewayURL:  "http://gateway:8080",
+				Environment: "production",
+				Token:       tc.configToken,
+			}, logger)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stream?environment=production", nil)
+			req = req.WithContext(ctx)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rr := httptest.NewRecorder()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				rp.ServeLocalStream(rr, req)
+			}()
+
+			if tc.wantStatusCode == http.StatusOK {
+				// Immediately cancel so the SSE goroutine exits cleanly.
+				cancel()
+			}
+			<-done
+
+			if rr.Code != tc.wantStatusCode {
+				t.Errorf("status = %d, want %d (body: %q)",
+					rr.Code, tc.wantStatusCode, rr.Body.String())
+			}
+		})
 	}
 }

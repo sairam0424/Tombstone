@@ -1,22 +1,11 @@
 import type { EvaluationContext, EvaluationResult, FlagEnvironmentState } from './types.js';
+import { murmur3_32 } from './murmurhash3.js';
 
-// FNV-1a 32-bit hash — deterministic, Web API safe, no external deps.
-// Note: For full MurmurHash3 parity with other SDKs, use wasm-murmurhash in production.
-// FNV-1a produces different buckets than MurmurHash3; use this only for edge deployments
-// where the slight inconsistency with server-side evaluation is acceptable.
-function fnv1a32(str: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash = (hash * 0x01000193) >>> 0; // unsigned 32-bit
-  }
-  return hash >>> 0;
-}
-
+// MurmurHash3 unsigned 32-bit — matches all other Tombstone SDKs
 function isInRollout(flagKey: string, userId: string, rolloutPct: number): boolean {
   if (rolloutPct >= 100) return true;
   if (rolloutPct <= 0) return false;
-  const bucket = fnv1a32(flagKey + userId) % 100;
+  const bucket = murmur3_32(flagKey + userId) % 100;
   return bucket < rolloutPct;
 }
 

@@ -142,9 +142,16 @@ func (rp *RelayProxy) Start(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
+	if rp.config.Token == "" {
+		rp.logger.Warn("RELAY_TOKEN not set: relay is running without Bearer token validation; " +
+			"any process that can reach the relay port will receive the full flag snapshot — " +
+			"set RELAY_TOKEN in production to restrict access")
+	}
+
 	rp.logger.Info("relay proxy starting",
 		zap.String("port", rp.config.effectivePort()),
-		zap.String("upstream", rp.config.GatewayURL))
+		zap.String("upstream", rp.config.GatewayURL),
+		zap.Bool("token_auth_enabled", rp.config.Token != ""))
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("relay local server: %w", err)
@@ -338,13 +345,28 @@ func (rp *RelayProxy) ServeLocalStream(w http.ResponseWriter, r *http.Request) {
 		environment = "production"
 	}
 
-	// Accept Bearer tokens forwarded by the SDK without enforcing them locally
-	// (the upstream already validated them when the relay connected).
-	// We still require the header to be present so clients know they need auth.
+	// Validate the Bearer token supplied by the local SDK client.
+	// When config.Token is set every request must present a matching token.
+	// When config.Token is empty the relay runs in open/dev mode (no enforcement).
 	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
-		return
+	if rp.config.Token != "" {
+		// Strict mode: token must be present and must match exactly.
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
+			return
+		}
+		provided := strings.TrimPrefix(authHeader, "Bearer ")
+		if provided != rp.config.Token {
+			http.Error(w, `{"error":"invalid Bearer token"}`, http.StatusUnauthorized)
+			return
+		}
+	} else {
+		// Dev/compat mode: no token configured — still require the header format
+		// so SDK clients are aware they should pass auth, but do not reject them.
+		if authHeader != "" && !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, `{"error":"malformed Authorization header; expected Bearer scheme"}`, http.StatusUnauthorized)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

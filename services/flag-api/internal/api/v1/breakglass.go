@@ -10,6 +10,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/middleware"
 )
 
 type BreakGlassHandler struct {
@@ -43,6 +45,12 @@ func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) 
 	expiresIn := req.ExpiresInH
 	if expiresIn <= 0 {
 		expiresIn = 4
+	}
+
+	role := middleware.RoleFromContext(r.Context())
+	if role != middleware.RoleAdmin {
+		writeError(w, http.StatusForbidden, "break-glass token creation requires ADMIN role")
+		return
 	}
 
 	actor := actorFromContext(r.Context())

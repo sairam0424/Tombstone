@@ -154,6 +154,15 @@ func (r *RBACMiddleware) hasPermission(role Role, resource, action string) bool 
 	return false
 }
 
+// RoleFromContext retrieves the role stored by LoadRole middleware from context.
+// Returns RoleViewer if no role is present (least privilege default).
+func RoleFromContext(ctx context.Context) Role {
+	if v, ok := ctx.Value(ContextKeyRole).(Role); ok {
+		return v
+	}
+	return RoleViewer
+}
+
 // actorFromContext retrieves the authenticated actor identifier from context.
 // Uses the same contextKey type and ContextKeyActor constant defined in auth.go.
 func actorFromContext(ctx context.Context) string {
