@@ -10,7 +10,11 @@ export type EvaluationReason =
 export type RuleOperator =
   | 'IN' | 'NOT_IN' | 'EQ' | 'NEQ'
   | 'LT' | 'LTE' | 'GT' | 'GTE'
-  | 'CONTAINS' | 'PREFIX' | 'SUFFIX';
+  | 'CONTAINS' | 'PREFIX' | 'SUFFIX'
+  | 'REGEX'
+  | 'SEMVER_GTE' | 'SEMVER_LTE'
+  | 'GEO_COUNTRY' | 'GEO_REGION'
+  | 'DATE_BEFORE' | 'DATE_AFTER';
 
 export interface FlagEnvironmentState {
   flagId: string;
@@ -31,11 +35,18 @@ export interface TargetingRule {
   priority: number;
 }
 
+// GeoContext — geographic identifiers for GEO_COUNTRY/GEO_REGION operators
+export interface GeoContext {
+  country?: string;
+  region?: string;
+}
+
 // EvaluationContext — userId MUST be an opaque hash, never raw PII
 export interface EvaluationContext {
   userId: string;
   orgId?: string;
   attrs?: Record<string, string>;
+  geo?: GeoContext;
 }
 
 export interface EvaluationResult<T = boolean> {

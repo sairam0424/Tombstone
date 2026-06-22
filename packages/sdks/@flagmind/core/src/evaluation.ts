@@ -7,6 +7,19 @@ import type {
   EvaluationReason,
 } from './types.js';
 
+// Pure-TS semver comparator — no external dependency.
+// Returns positive if a > b, negative if a < b, zero if equal.
+// Only handles MAJOR.MINOR.PATCH (pre-release/build metadata ignored).
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 export class EvaluationEngine {
   evaluate<T>(
     flagState: FlagEnvironmentState | undefined,
@@ -53,6 +66,16 @@ export class EvaluationEngine {
   }
 
   private evaluateRule(rule: TargetingRule, context: EvaluationContext): boolean {
+    // GEO operators resolve values from context.geo, not attrs
+    if (rule.operator === 'GEO_COUNTRY') {
+      const country = (context.geo?.country ?? '').toUpperCase();
+      return (rule.values as string[]).map(v => v.toUpperCase()).includes(country);
+    }
+    if (rule.operator === 'GEO_REGION') {
+      const region = (context.geo?.region ?? '').toUpperCase();
+      return (rule.values as string[]).map(v => v.toUpperCase()).includes(region);
+    }
+
     let contextValue: string | undefined;
     if (rule.attribute === 'userId') {
       contextValue = context.userId;
@@ -78,6 +101,20 @@ export class EvaluationEngine {
       case 'LTE':      return parseFloat(value) <= parseFloat(ruleValues[0] ?? '0');
       case 'GT':       return parseFloat(value) > parseFloat(ruleValues[0] ?? '0');
       case 'GTE':      return parseFloat(value) >= parseFloat(ruleValues[0] ?? '0');
+      case 'REGEX':
+        try {
+          return new RegExp(String(ruleValues[0])).test(value);
+        } catch {
+          return false;
+        }
+      case 'SEMVER_GTE':
+        return compareSemver(value, String(ruleValues[0])) >= 0;
+      case 'SEMVER_LTE':
+        return compareSemver(value, String(ruleValues[0])) <= 0;
+      case 'DATE_BEFORE':
+        return new Date(value) < new Date(String(ruleValues[0]));
+      case 'DATE_AFTER':
+        return new Date(value) > new Date(String(ruleValues[0]));
       default:         return false;
     }
   }
