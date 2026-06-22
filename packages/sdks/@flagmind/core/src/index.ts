@@ -17,4 +17,5 @@ export type {
   FlagEvent,
   TombstoneClientConfig,
   RuleOperator,
+  OperatorType,
 } from './types.js';
