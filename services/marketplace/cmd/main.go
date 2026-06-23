@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/marketplace/internal/api/v1"
+	"github.com/tombstone/marketplace/internal/integrations"
 	"github.com/tombstone/marketplace/internal/registry"
 	"github.com/tombstone/marketplace/internal/telemetry"
 	"github.com/tombstone/marketplace/internal/webhook"
@@ -41,6 +42,11 @@ func main() {
 		port = "8086"
 	}
 
+	flagAPIURL := os.Getenv("FLAG_API_URL")
+	if flagAPIURL == "" {
+		flagAPIURL = "http://flag-api:8081"
+	}
+
 	// Redis is optional — if unavailable the registry operates in ephemeral mode.
 	var rdb *redis.Client
 	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
@@ -65,9 +71,20 @@ func main() {
 
 	reg := registry.NewRegistry(rdb, logger)
 	reg.LoadFromRedis(context.Background())
-
 	dispatcher := webhook.NewDispatcher(reg, logger)
 	handler := v1.NewHandler(reg, dispatcher, logger)
+
+	// Interactive Slack app — requires SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET.
+	slackBotToken := os.Getenv("SLACK_BOT_TOKEN")
+	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
+	slackApp := integrations.NewSlackApp(slackBotToken, slackSigningSecret, flagAPIURL)
+	inboundHandler := v1.NewInboundHandler(slackApp, logger)
+
+	// Update Slack integration metadata to reflect bidirectional capability.
+	reg.MarkBidirectional("slack", []string{
+		"/api/v1/marketplace/slack/commands",
+		"/api/v1/marketplace/slack/actions",
+	})
 
 	r := chi.NewRouter()
 
@@ -77,9 +94,12 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Accept", "Authorization", "Content-Type", "X-Request-ID",
+			"X-Slack-Request-Timestamp", "X-Slack-Signature",
+		},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))

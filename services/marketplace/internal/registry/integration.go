@@ -59,7 +59,7 @@ var firstPartyIntegrations = []Integration{
 	{
 		ID:           "slack",
 		Name:         "Slack",
-		Description:  "Send flag change notifications to Slack channels.",
+		Description:  "Interactive Slack app: Block Kit notifications, /tombstone slash commands, and kill switch buttons.",
 		Category:     "notifications",
 		IconURL:      "https://assets.tombstone.io/integrations/slack.svg",
 		Events:       []EventType{EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback},
@@ -286,6 +286,37 @@ func (r *Registry) Register(i Integration) bool {
 	i.IsFirstParty = false
 	r.integrations[i.ID] = i
 	r.persistToRedis(i.ID, i)
+	return true
+}
+
+// MarkBidirectional upgrades an integration's metadata to reflect bidirectional capability,
+// setting Bidirectional: true and recording the inbound endpoint paths.
+// This is called at startup for first-party integrations that support inbound webhooks.
+// Returns false if the integration does not exist.
+func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, ok := r.integrations[id]
+	if !ok {
+		return false
+	}
+
+	updated := Integration{
+		ID:               existing.ID,
+		Name:             existing.Name,
+		Description:      existing.Description,
+		Category:         existing.Category,
+		IconURL:          existing.IconURL,
+		WebhookURL:       existing.WebhookURL,
+		Events:           existing.Events,
+		Status:           existing.Status,
+		Config:           existing.Config,
+		IsFirstParty:     existing.IsFirstParty,
+		Bidirectional:    true,
+		InboundEndpoints: inboundEndpoints,
+	}
+	r.integrations[id] = updated
 	return true
 }
 
