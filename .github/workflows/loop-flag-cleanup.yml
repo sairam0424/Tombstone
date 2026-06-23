@@ -1,0 +1,28 @@
+name: Loop — Flag Cleanup
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily at 02:00 UTC
+  workflow_dispatch:        # allow manual trigger for testing
+
+jobs:
+  flag-cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Only run when TOMBSTONE_INTELLIGENCE_URL secret is configured
+    if: vars.TOMBSTONE_INTELLIGENCE_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run flag cleanup collector
+        env:
+          INTELLIGENCE_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          PROJECT_ID: ${{ vars.TOMBSTONE_PROJECT_ID || '00000000-0000-0000-0000-000000000001' }}
+        run: bash scripts/loop-flag-cleanup.sh
+
+      - name: Commit metrics + signals if changed
+        run: |
+          git config user.name "tombstone-loop[bot]"
+          git config user.email "loop@tombstone.io"
+          git add domains/flag-cleanup/metrics/ signals/ LOG.md
+          git diff --cached --quiet || (git commit -m "chore(loop): flag-cleanup run ${{ github.run_id }}" && git push origin HEAD:develop)

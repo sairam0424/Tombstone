@@ -1,6 +1,6 @@
 # Tombstone MCP Server
 
-Use Tombstone feature-flag management from any MCP-compatible AI coding assistant (Claude Code, Cursor, VS Code Copilot, etc.).
+**v2.0.1** — Use Tombstone feature-flag management from any MCP-compatible AI coding assistant (Claude Code, Cursor, VS Code Copilot, etc.).
 
 ## Setup
 
@@ -12,7 +12,9 @@ npm install
 npm run build
 ```
 
-### 2. Add to `.claude/settings.json`
+### 2. Configure your AI assistant
+
+#### Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
 
 ```json
 {
@@ -21,7 +23,41 @@ npm run build
       "command": "node",
       "args": ["/absolute/path/to/Tombstone/workspace-mcp/dist/index.js"],
       "env": {
-        "TOMBSTONE_API_URL": "http://localhost:8000",
+        "TOMBSTONE_API_URL": "http://localhost:8081",
+        "TOMBSTONE_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}
+```
+
+#### Cursor (`.cursor/mcp.json` in project root or `~/.cursor/mcp.json` globally)
+
+```json
+{
+  "mcpServers": {
+    "tombstone": {
+      "command": "node",
+      "args": ["/absolute/path/to/Tombstone/workspace-mcp/dist/index.js"],
+      "env": {
+        "TOMBSTONE_API_URL": "http://localhost:8081",
+        "TOMBSTONE_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}
+```
+
+#### Claude Code (`.claude/settings.json`)
+
+```json
+{
+  "mcpServers": {
+    "tombstone": {
+      "command": "node",
+      "args": ["/absolute/path/to/Tombstone/workspace-mcp/dist/index.js"],
+      "env": {
+        "TOMBSTONE_API_URL": "http://localhost:8081",
         "TOMBSTONE_TOKEN": "your-api-token-here"
       }
     }
@@ -38,7 +74,7 @@ Or use `npx` after publishing to npm:
       "command": "npx",
       "args": ["-y", "@tombstone/mcp"],
       "env": {
-        "TOMBSTONE_API_URL": "http://localhost:8000",
+        "TOMBSTONE_API_URL": "http://localhost:8081",
         "TOMBSTONE_TOKEN": "your-api-token-here"
       }
     }
@@ -46,23 +82,67 @@ Or use `npx` after publishing to npm:
 }
 ```
 
+### Transport
+
+v2.0.1 uses **Streamable HTTP** (the current MCP standard transport). The endpoint is:
+
+```
+POST /api/mcp/mcp
+```
+
+Legacy SSE transport is not supported. Ensure your MCP client is on a version that supports Streamable HTTP.
+
 ### Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `TOMBSTONE_API_URL` | Yes | Base URL of the Tombstone API (e.g. `http://localhost:8000`) |
+| `TOMBSTONE_API_URL` | Yes | Base URL of the Tombstone API (e.g. `http://localhost:8081`) |
 | `TOMBSTONE_TOKEN` | Yes | Bearer token for authentication (also accepted as `TOMBSTONE_API_TOKEN`) |
 
 ## Available Tools
 
+All 8 tools are available as of v2.0.1. Tools marked **v2** were added in v2.0.0.
+
 | Tool | Description | Key Parameters |
 |---|---|---|
-| `tombstone_get_flag` | Get current state and metadata of a flag | `key` (dot-notation) |
-| `tombstone_kill_switch` | Immediately disable a flag | `key`, `reason` (min 10 chars) |
-| `tombstone_blast_radius` | Compute risk score before flipping a flag | `key`, `targetState` (bool) |
-| `tombstone_list_stale_flags` | List flags untouched beyond a threshold | `days` (default 30), `limit` (default 20) |
+| `tombstone_get_flag` | Fetch flag metadata by key | `key` (dot-notation) |
+| `tombstone_kill_switch` | Emergency disable a flag immediately | `key`, `reason` (min 10 chars) |
+| `tombstone_blast_radius` | Risk analysis before flipping a flag (returns BLOCKED / HIGH / MEDIUM / LOW) | `key`, `targetState` (bool) |
+| `tombstone_list_stale_flags` | List cleanup candidates by inactivity window | `days` (default 30), `limit` (default 20) |
 | `tombstone_create_flag` | Create a new feature flag | `key` (dot-notation), `description` |
-| `tombstone_search_flags` | NLP search across all flags | `q` (free-text query) |
+| `tombstone_search_flags` | **v2** — NLP semantic search across all flags (pgvector-powered) | `q` (free-text query) |
+| `tombstone_generate_cleanup_pr` | **v2** — Generate a PR spec for dead-code removal via ast-rewriter | `key`, `repo` (optional) |
+| `tombstone_openfeature_setup` | **v2** — Setup instructions for the OpenFeature SDK | `language` (`typescript` or `python`) |
+
+### Tool Details
+
+#### `tombstone_get_flag`
+Returns current state, metadata, owner, rollout percentage, and recent audit entries for a flag.
+
+#### `tombstone_kill_switch`
+Immediately sets a flag to `false` and writes an audit log entry. The `reason` field must be at least 10 characters — enforced to prevent blank emergency actions from appearing in incident timelines.
+
+#### `tombstone_blast_radius`
+Computes the risk tier before you flip a flag. Returns one of:
+- `BLOCKED` — active circuit breaker or pending incident correlation; flip refused
+- `HIGH` — affects >10% of traffic or has recent rollback history
+- `MEDIUM` — moderate exposure, proceed with caution
+- `LOW` — safe to flip
+
+#### `tombstone_list_stale_flags`
+Returns flags that have not been evaluated or modified within the configured window. Useful for scheduling cleanup sprints. The `days` parameter controls the inactivity threshold (default: 30).
+
+#### `tombstone_create_flag`
+Creates a new flag in the disabled state. Keys must use dot-notation (`team.feature.variant`). Returns the new flag's full metadata.
+
+#### `tombstone_search_flags` (v2)
+Uses pgvector semantic embeddings (generated by the `intelligence` service) to find flags matching a natural-language query. More useful than a key prefix search when you don't know the exact flag name — e.g. "all payment-related flags that were disabled last month".
+
+#### `tombstone_generate_cleanup_pr` (v2)
+Given a tombstoned or stale flag key, generates a structured PR spec describing every code site that references the flag and the AST rewrites needed to remove the dead branch. Uses the `ast-rewriter` engine in the `intelligence` service. Returns a spec you can pipe into your PR workflow or hand to a code agent.
+
+#### `tombstone_openfeature_setup` (v2)
+Returns step-by-step setup instructions for wiring the Tombstone gateway into an [OpenFeature](https://openfeature.dev/) provider. Pass `language: "typescript"` or `language: "python"` to get language-specific code snippets.
 
 ## Usage Examples
 
@@ -74,3 +154,20 @@ Ask your AI assistant:
 - "List all stale flags untouched for more than 60 days"
 - "Create a flag `search.semantic.v1` owned by the search team"
 - "Search for all payment-related flags that were recently disabled"
+- "Generate a cleanup PR spec for the tombstoned `payments.old-checkout` flag"
+- "Show me how to set up OpenFeature with Tombstone in TypeScript"
+
+## Changelog
+
+### v2.0.1
+- Fix: Streamable HTTP transport endpoint path corrected to `/api/mcp/mcp`
+- Fix: `TOMBSTONE_API_URL` default updated to port `8081` (flag-api)
+
+### v2.0.0
+- Added `tombstone_search_flags` — pgvector-powered NLP semantic search
+- Added `tombstone_generate_cleanup_pr` — ast-rewriter-based dead-code PR spec generation
+- Added `tombstone_openfeature_setup` — OpenFeature provider setup for TypeScript and Python
+- Migrated transport from legacy SSE to Streamable HTTP (`/api/mcp/mcp`)
+
+### v1.0.0
+- Initial release: `tombstone_get_flag`, `tombstone_kill_switch`, `tombstone_blast_radius`, `tombstone_list_stale_flags`, `tombstone_create_flag`, `tombstone_search_flags`

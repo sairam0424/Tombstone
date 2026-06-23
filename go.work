@@ -1,10 +1,11 @@
-go 1.25.0
+go 1.22.0
 
 use (
 	./services/ast-rewriter
 	./services/evaluator
+	./services/flag-api
 	./services/gateway
 	./services/gitops-sync
 	./services/marketplace
-	/Users/sairamugge/Desktop/Not-Humans-World/Tombstone/.claude/worktrees/wf_8ccf5578-d4c-4/services/flag-api
+	./services/tombstone-operator
 )
