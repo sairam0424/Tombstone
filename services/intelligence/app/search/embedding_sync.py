@@ -10,12 +10,12 @@ import asyncio
 import logging
 
 import asyncpg
-from sentence_transformers import SentenceTransformer
+
+from app.search.embedding_model import EmbeddingModel
 
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 50
-_MODEL_NAME = "BAAI/bge-m3"
 
 
 # ---------------------------------------------------------------------------
@@ -29,22 +29,21 @@ async def sync_flag_embedding(
     description: str,
     tags: list[str],
     db_pool: asyncpg.Pool,
-    model: SentenceTransformer,
+    model: EmbeddingModel,
 ) -> None:
-    """Generate a BGE-M3 embedding for the flag and persist it to PostgreSQL.
+    """Generate an embedding for the flag and persist it to PostgreSQL.
 
     The text fed to the encoder is:  ``<name> <description> <tag1> <tag2> …``
 
-    This function is intentionally synchronous-CPU-bound for the encode step
-    (run_in_executor) and async for the DB write so it integrates cleanly into
-    the asyncio event loop.
+    Uses the injected EmbeddingModel protocol — works with LocalEmbeddingModel
+    (SentenceTransformer) or BedrockEmbeddingModel (AWS Titan V2) transparently.
     """
     text = f"{name} {description} {' '.join(tags)}"
-    loop = asyncio.get_event_loop()
-    embedding: list[float] = await loop.run_in_executor(
-        None,
-        lambda: model.encode(text, normalize_embeddings=True).tolist(),
-    )
+    vecs = await model.embed([text])
+    embedding = vecs[0] if vecs and vecs[0] else None
+    if embedding is None:
+        logger.warning("sync_flag_embedding: empty vector for flag %s — skipping update", flag_key)
+        return
 
     await db_pool.execute(
         "UPDATE flags SET embedding = $1::vector WHERE key = $2",
@@ -63,34 +62,37 @@ class EmbeddingSyncService:
     """Manages embedding lifecycle for all flags.
 
     Usage (from main.py lifespan):
-        sync_svc = EmbeddingSyncService(db_url=os.environ["DB_URL"])
-        await sync_svc.initialize()          # loads model + fires backfill
+        sync_svc = EmbeddingSyncService(db_url=os.environ["DB_URL"], embedding_model=model)
+        await sync_svc.initialize()          # initializes model + fires backfill
         # ... yield ...
         await sync_svc.close()
 
     The Kafka consumer (or webhook handler) calls:
         await sync_svc.on_flag_event(event_type, flag_key, name, description, tags)
+
+    Pass embedding_model=None to disable embedding sync entirely (lexical-only mode).
     """
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, embedding_model: EmbeddingModel | None = None) -> None:
         self._db_url = db_url
         self._pool: asyncpg.Pool | None = None
-        self._model: SentenceTransformer | None = None
+        self._embedding_model: EmbeddingModel | None = embedding_model
 
     async def initialize(self) -> None:
-        """Load the BGE-M3 model and start the background backfill task."""
+        """Initialize the DB pool, the embedding model, and start the background backfill task."""
         self._pool = await asyncpg.create_pool(self._db_url)
-        try:
-            loop = asyncio.get_event_loop()
-            self._model = await loop.run_in_executor(
-                None, lambda: SentenceTransformer(_MODEL_NAME)
-            )
-            logger.info("EmbeddingSyncService: BGE-M3 model loaded")
-        except Exception as exc:
-            logger.warning(
-                "EmbeddingSyncService: model load failed (%s) — embedding sync disabled", exc
-            )
-            self._model = None
+        if self._embedding_model is not None:
+            try:
+                await self._embedding_model.initialize()
+                logger.info("EmbeddingSyncService: embedding model initialized")
+            except Exception as exc:
+                logger.warning(
+                    "EmbeddingSyncService: model initialization failed (%s) — embedding sync disabled", exc
+                )
+                self._embedding_model = None
+                return
+        else:
+            logger.warning("EmbeddingSyncService: no embedding model — embedding sync disabled")
             return
 
         asyncio.create_task(self._backfill())
@@ -114,7 +116,7 @@ class EmbeddingSyncService:
         """Handle flag.created and flag.updated events."""
         if event_type not in {"flag.created", "flag.updated"}:
             return
-        if self._model is None or self._pool is None:
+        if self._embedding_model is None or self._pool is None:
             return
         try:
             await sync_flag_embedding(
@@ -123,7 +125,7 @@ class EmbeddingSyncService:
                 description=description,
                 tags=tags,
                 db_pool=self._pool,
-                model=self._model,
+                model=self._embedding_model,
             )
         except Exception as exc:
             logger.warning(
@@ -138,9 +140,9 @@ class EmbeddingSyncService:
         """Backfill embeddings for flags that have embedding IS NULL.
 
         Processes flags in batches of _BATCH_SIZE to avoid hammering the DB
-        or CPU.  Each batch is embedded sequentially (model.encode is CPU-bound).
+        or CPU.  Each batch is embedded sequentially.
         """
-        if self._pool is None or self._model is None:
+        if self._pool is None or self._embedding_model is None:
             return
 
         rows = await self._pool.fetch(
@@ -169,7 +171,7 @@ class EmbeddingSyncService:
                         description=row["description"],
                         tags=[],
                         db_pool=self._pool,
-                        model=self._model,
+                        model=self._embedding_model,
                     )
                 except Exception as exc:
                     logger.warning(
