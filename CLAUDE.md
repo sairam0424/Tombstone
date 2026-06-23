@@ -151,6 +151,7 @@ make gen-proto      # Regenerate Go stubs from .proto files
 | `services/flag-api/internal/transparency/rekor.go` | Rekor transparency log integration (fail-open) |
 | `services/flag-api/policies/flags.rego` | OPA RBAC policy (hot-reload) |
 | `services/intelligence/app/anomaly/ensemble.py` | 3-model ensemble: Z-score + Isolation Forest + EWMA |
+| `services/intelligence/app/anomaly/rule_generator.py` | Argos 3-agent LLM pipeline (Phase 3.2): `POST /api/v1/intelligence/generate-rule?flag_key=<key>` — requires `ANTHROPIC_API_KEY`; output stored as `signals/rule-candidate-{flag}-{date}.md` with `status: pending-approval` |
 | `services/intelligence/app/rollout/linucb.py` | LinUCB contextual bandit (Redis-persisted matrices) |
 | `services/intelligence/app/experiments/cuped.py` | CUPED variance reduction (20–40%) |
 | `services/intelligence/app/experiments/collision.py` | Experiment collision detection (Jaccard overlap) |
