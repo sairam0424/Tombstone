@@ -12,6 +12,7 @@
     "packages/sdks/@tombstone/core",
     "packages/sdks/@tombstone/react",
     "packages/sdks/@tombstone/browser",
+    "packages/sdk-wasm",
     "workspace-cli",
     "workspace-dashboard",
     "workspace-mcp"

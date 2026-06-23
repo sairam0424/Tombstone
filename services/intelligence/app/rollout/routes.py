@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import Annotated
+import datetime
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.rollout.linucb import LinUCBBandit, _MIN_LINUCB_OBS
 from app.rollout.thompson import (
+    ROLLOUT_SCHEDULE,
     FlagPosterior,
     RolloutRecommendation,
     ThompsonSamplingEngine,
@@ -13,6 +16,13 @@ from app.rollout.thompson import (
 
 
 router = APIRouter(prefix="/api/v1/rollout", tags=["rollout"])
+
+_LINUCB_ALPHA = 1.0
+_LINUCB_D = 5
+
+# Module-level bandit instance — replaced by the one on app.state at startup
+# (routes use app.state.linucb_bandit injected during lifespan)
+
 
 
 # ------------------------------------------------------------------
@@ -63,6 +73,31 @@ class RecommendationResponse(BaseModel):
     reason: str
 
 
+class ContextualRecommendRequest(BaseModel):
+    environment: str = Field(default="production", description="Target environment")
+    rollout_pct: float = Field(
+        ..., ge=0.0, le=100.0, description="Current rollout percentage (0-100)"
+    )
+    error_rate: float = Field(
+        ..., ge=0.0, le=1.0, description="Current error rate fraction (0.0-1.0)"
+    )
+    request_count: int = Field(
+        ..., ge=0, description="Request count in the observation window"
+    )
+
+
+class ContextualRecommendResponse(BaseModel):
+    flag_key: str
+    environment: str
+    arm: int = Field(description="0=control/hold, 1=treatment/advance")
+    ucb_score: float
+    recommendation: Literal["advance", "hold", "rollback"]
+    suggested_pct: int
+    n_observations: int
+    engine_used: Literal["linucb", "thompson"]
+    reason: str
+
+
 # ------------------------------------------------------------------
 # Dependency: retrieve the shared ThompsonSamplingEngine from app.state
 # ------------------------------------------------------------------
@@ -79,6 +114,19 @@ def _get_engine(request: Request) -> ThompsonSamplingEngine:
 
 
 EngineDep = Annotated[ThompsonSamplingEngine, Depends(_get_engine)]
+
+
+def _get_linucb(request: Request) -> LinUCBBandit:
+    bandit: LinUCBBandit | None = getattr(request.app.state, "linucb_bandit", None)
+    if bandit is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LinUCB bandit not initialised — check lifespan startup",
+        )
+    return bandit
+
+
+LinUCBDep = Annotated[LinUCBBandit, Depends(_get_linucb)]
 
 
 # ------------------------------------------------------------------
@@ -125,7 +173,7 @@ async def enable_autonomous_rollout(
 ) -> PosteriorResponse:
     """Opt a flag-environment pair into autonomous rollout mode."""
     # Ensure posterior exists with the supplied current percentage before enabling
-    engine.update(
+    await engine.update(
         flag_key=body.flag_key,
         environment=body.environment,
         successes=0,
@@ -157,7 +205,7 @@ async def feed_telemetry(
     engine: EngineDep,
 ) -> RecommendationResponse:
     """Feed a telemetry window into the Beta posterior and return the current recommendation."""
-    engine.update(
+    await engine.update(
         flag_key=body.flag_key,
         environment=body.environment,
         successes=body.successes,
@@ -192,3 +240,130 @@ async def get_posterior(
             detail=f"No posterior found for {flag_key}:{environment}",
         )
     return _posterior_to_response(posterior)
+
+
+@router.post(
+    "/{flag_key}/contextual-recommend",
+    response_model=ContextualRecommendResponse,
+    status_code=200,
+)
+async def contextual_recommend(
+    flag_key: str,
+    body: ContextualRecommendRequest,
+    engine: EngineDep,
+    bandit: LinUCBDep,
+) -> ContextualRecommendResponse:
+    """Context-aware rollout recommendation using LinUCB contextual bandit.
+
+    Falls back to Thompson Sampling when fewer than 50 observations are
+    available for this flag-environment pair.
+
+    Body:
+        environment      — target environment (default: production)
+        rollout_pct      — current rollout percentage 0-100
+        error_rate       — current error rate fraction 0.0-1.0
+        request_count    — request count in the observation window
+
+    Returns:
+        arm              — 0=hold/control, 1=advance/treatment
+        ucb_score        — raw UCB score (higher = more confident in arm choice)
+        recommendation   — "advance" | "hold" | "rollback"
+        suggested_pct    — suggested next rollout percentage
+        n_observations   — total observations recorded for this flag
+        engine_used      — "linucb" or "thompson" (fallback)
+        reason           — human-readable explanation
+    """
+    env = body.environment
+    n_obs = bandit.n_observations(flag_key, env)
+
+    # ------------------------------------------------------------------
+    # Fallback path: insufficient LinUCB observations — use Thompson
+    # ------------------------------------------------------------------
+    if n_obs < _MIN_LINUCB_OBS:
+        rec = engine.recommend(flag_key, env)
+        current_pct = int(body.rollout_pct)
+
+        if rec.should_advance:
+            recommendation: Literal["advance", "hold", "rollback"] = "advance"
+            suggested_pct = rec.recommended_pct
+        else:
+            recommendation = "hold"
+            suggested_pct = current_pct
+
+        return ContextualRecommendResponse(
+            flag_key=flag_key,
+            environment=env,
+            arm=1 if rec.should_advance else 0,
+            ucb_score=round(rec.confidence, 6),
+            recommendation=recommendation,
+            suggested_pct=suggested_pct,
+            n_observations=n_obs,
+            engine_used="thompson",
+            reason=(
+                f"LinUCB needs {_MIN_LINUCB_OBS} observations ({n_obs} so far); "
+                f"delegating to Thompson Sampling. {rec.reason}"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # LinUCB path: use context-aware arm selection
+    # ------------------------------------------------------------------
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    context = bandit._context_vector(  # noqa: SLF001
+        rollout_pct=body.rollout_pct,
+        error_rate=body.error_rate,
+        request_count=body.request_count,
+        hour=now.hour,
+        day=now.weekday(),
+    )
+
+    arm, ucb_score = bandit.select_arm(flag_key, env, context)
+    current_pct = int(body.rollout_pct)
+
+    # Determine recommendation from arm + error rate heuristic
+    _ROLLBACK_ERROR_THRESHOLD = 0.10
+    if body.error_rate >= _ROLLBACK_ERROR_THRESHOLD:
+        recommendation = "rollback"
+        # Find the previous schedule step
+        prev_pct = 0
+        for pct in ROLLOUT_SCHEDULE:
+            if pct < current_pct:
+                prev_pct = pct
+        suggested_pct = prev_pct
+        reason = (
+            f"LinUCB arm={arm} (ucb={ucb_score:.4f}) overridden: "
+            f"error_rate={body.error_rate:.3f} >= {_ROLLBACK_ERROR_THRESHOLD} rollback threshold; "
+            f"suggesting rollback from {current_pct}% to {suggested_pct}%"
+        )
+    elif arm == 1:
+        recommendation = "advance"
+        # Find the next schedule step above current_pct
+        next_pct = current_pct
+        for pct in ROLLOUT_SCHEDULE:
+            if pct > current_pct:
+                next_pct = pct
+                break
+        suggested_pct = next_pct
+        reason = (
+            f"LinUCB selected treatment arm (ucb={ucb_score:.4f}); "
+            f"advancing rollout from {current_pct}% to {suggested_pct}%"
+        )
+    else:
+        recommendation = "hold"
+        suggested_pct = current_pct
+        reason = (
+            f"LinUCB selected control arm (ucb={ucb_score:.4f}); "
+            f"holding rollout at {current_pct}%"
+        )
+
+    return ContextualRecommendResponse(
+        flag_key=flag_key,
+        environment=env,
+        arm=arm,
+        ucb_score=round(ucb_score, 6),
+        recommendation=recommendation,
+        suggested_pct=suggested_pct,
+        n_observations=n_obs,
+        engine_used="linucb",
+        reason=reason,
+    )

@@ -7,10 +7,29 @@ export type EvaluationReason =
   | 'RULE_MATCH'
   | 'PREREQUISITE_FAILED'
   | 'ERROR';
+
+/** Full operator set for targeting rule evaluation. */
 export type RuleOperator =
   | 'IN' | 'NOT_IN' | 'EQ' | 'NEQ'
   | 'LT' | 'LTE' | 'GT' | 'GTE'
-  | 'CONTAINS' | 'PREFIX' | 'SUFFIX';
+  | 'CONTAINS' | 'PREFIX' | 'SUFFIX'
+  | 'REGEX'
+  | 'SEMVER_GTE' | 'SEMVER_LTE'
+  | 'GEO_COUNTRY' | 'GEO_REGION'
+  | 'DATE_BEFORE' | 'DATE_AFTER';
+
+/** Alias — identical to RuleOperator. Both names exported for compatibility. */
+export type OperatorType = RuleOperator;
+
+export interface FlagPrerequisite {
+  flagKey: string;
+  requiredVariation: string;
+  /**
+   * true  → if prerequisite fails, block entire feature (PREREQUISITE_FAILED)
+   * false → if prerequisite fails, skip current rule and continue evaluation
+   */
+  gate: boolean;
+}
 
 export interface FlagEnvironmentState {
   flagId: string;
@@ -20,22 +39,46 @@ export interface FlagEnvironmentState {
   rolloutPct: number;
   safeDefault: string;
   updatedAt: number;
+  hashVersion?: 1 | 2;
+  /** Explicit list of userIds that always receive the flag's "on" variation. */
+  targetList?: string[];
+  /** Targeting rules attached to this flag. Default: []. */
+  targetingRules?: TargetingRule[];
+  /** Prerequisite flags that must pass before this flag is served. */
+  prerequisites?: FlagPrerequisite[];
 }
 
 export interface TargetingRule {
   id: string;
+  ruleType: 'USER' | 'ORG' | 'SEGMENT' | 'CUSTOM';
+  /**
+   * Dot-notation attribute path on EvaluationContext.
+   * Examples: "userId", "orgId", "geo.country"
+   */
   attribute: string;
-  operator: RuleOperator;
-  values: string[];
+  operator: OperatorType;
+  values: unknown[];
   variation: string;
+  /** Lower = higher priority. Evaluated ascending (0 before 10). */
   priority: number;
 }
 
-// EvaluationContext — userId MUST be an opaque hash, never raw PII
+// GeoContext — geographic identifiers for GEO_COUNTRY/GEO_REGION operators
+export interface GeoContext {
+  country?: string;
+  region?: string;
+}
+
+/**
+ * EvaluationContext — userId MUST be an opaque hash, never raw PII.
+ */
 export interface EvaluationContext {
-  userId: string;
+  userId?: string;
   orgId?: string;
+  device?: string;
+  geo?: { country?: string; region?: string };
   attrs?: Record<string, string>;
+  [key: string]: unknown;
 }
 
 export interface EvaluationResult<T = boolean> {
@@ -43,6 +86,10 @@ export interface EvaluationResult<T = boolean> {
   reason: EvaluationReason;
   fromCache: boolean;
   flagKey: string;
+  /** Set when reason is RULE_MATCH — id of the matched targeting rule. */
+  ruleId?: string;
+  /** Index of the resolved variation within the flag's variation list. */
+  variationIndex?: number;
 }
 
 export interface FlagSnapshot {
@@ -64,16 +111,10 @@ export interface FlagEvent {
 export interface TombstoneClientConfig {
   sdkKey: string;
   environment: string;
-  /** Base URL for gateway service. Default: http://localhost:8080 */
   gatewayUrl?: string;
-  /** Base URL for flag-api service. Default: http://localhost:8081 */
   apiUrl?: string;
-  /** Mandatory defaults — returned when flag is not in cache or service is unreachable */
   defaults: Record<string, unknown>;
-  /** Initial reconnect interval in ms. Doubles on each retry up to maxReconnectMs. */
   reconnectIntervalMs?: number;
-  /** Maximum reconnect backoff in ms. Default: 30000 */
   maxReconnectMs?: number;
-  /** Fraction of evaluations to emit as telemetry. 0.0–1.0. Default: 0.01 */
   telemetrySampleRate?: number;
 }
