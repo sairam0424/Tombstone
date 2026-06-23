@@ -25,9 +25,9 @@
   },
   "engines": { "node": ">=18" },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && npx mocha 'dist/tests/**/*.test.js'",
-    "test:watch": "tsc -w"
+    "test:watch": "tsc -p tsconfig.build.json -w"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.0",
