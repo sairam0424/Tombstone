@@ -42,6 +42,7 @@ func New() *schema.Provider {
 		ResourcesMap: map[string]*schema.Resource{
 			"tombstone_flag":             resources.ResourceFlag(),
 			"tombstone_flag_environment": resources.ResourceFlagEnvironment(),
+			"tombstone_region":           resources.ResourceRegion(),
 		},
 		DataSourcesMap: map[string]*schema.Resource{
 			"tombstone_flags": datasources.DataSourceFlags(),
