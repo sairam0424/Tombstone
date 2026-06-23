@@ -22,6 +22,7 @@ import (
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
 	"github.com/tombstone/flag-api/internal/telemetry"
+	"github.com/tombstone/flag-api/internal/transparency"
 )
 
 func main() {
