@@ -1,0 +1,367 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: featureflags.tombstone.io
+  labels:
+    app.kubernetes.io/name: tombstone-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: tombstone.io
+  names:
+    kind: FeatureFlag
+    listKind: FeatureFlagList
+    plural: featureflags
+    singular: featureflag
+    shortNames:
+      - ff
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Key
+          type: string
+          jsonPath: .spec.key
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: LastSynced
+          type: string
+          jsonPath: .status.lastSynced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            FeatureFlag is a Kubernetes custom resource that mirrors the Tombstone
+            YAML GitOps schema, enabling declarative flag management.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - key
+              properties:
+                key:
+                  type: string
+                  description: >
+                    Unique identifier for the flag in the Tombstone API.
+                    Must be lowercase, start with a letter, and contain only
+                    letters, digits, underscores, hyphens, and dots.
+                  pattern: '^[a-z][a-z0-9_.\-]{0,253}$'
+                type:
+                  type: string
+                  description: Value type used by the evaluation engine.
+                  enum: [BOOLEAN, STRING, INTEGER, FLOAT, JSON]
+                  default: BOOLEAN
+                safeDefault:
+                  type: string
+                  description: >
+                    Fallback value served to callers when evaluation fails
+                    or the flag cannot be reached.
+                  default: "false"
+                owner:
+                  type: string
+                  description: Team or individual responsible for this flag.
+                tags:
+                  type: array
+                  description: Free-form labels for search and grouping.
+                  maxItems: 20
+                  items:
+                    type: string
+                environments:
+                  type: object
+                  description: >
+                    Per-environment rollout configuration. Keys are environment
+                    names (e.g. "production", "staging").
+                  additionalProperties:
+                    type: object
+                    required:
+                      - enabled
+                      - rolloutPct
+                    properties:
+                      enabled:
+                        type: boolean
+                        description: Whether the flag is active in this environment.
+                        default: false
+                      rolloutPct:
+                        type: integer
+                        description: >
+                          Percentage of traffic (0-100) that receives the flag's
+                          active value.
+                        minimum: 0
+                        maximum: 100
+                        default: 0
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+                        maxLength: 32768
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        pattern: '^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$|^$'
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      type:
+                        type: string
+                        maxLength: 316
+                        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$'
+                lastSynced:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last successful sync.
+                flagId:
+                  type: string
+                  description: UUID assigned by the flag-api after first creation.
+                phase:
+                  type: string
+                  description: Latest reconcile outcome.
+                  enum: [Pending, Synced, Error]
+                  default: Pending
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flaginvironments.tombstone.io
+  labels:
+    app.kubernetes.io/name: tombstone-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: tombstone.io
+  names:
+    kind: FlagEnvironment
+    listKind: FlagEnvironmentList
+    plural: flaginvironments
+    singular: flaginvironment
+    shortNames:
+      - fenv
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Env
+          type: string
+          jsonPath: .spec.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            FlagEnvironment represents a named deployment environment and its
+            default behaviour within the Tombstone flag system.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Canonical environment name (e.g. "production").
+                defaultRolloutPct:
+                  type: integer
+                  description: Default rollout percentage for flags that don't override it.
+                  minimum: 0
+                  maximum: 100
+                  default: 0
+                safeguards:
+                  type: object
+                  description: Blast-radius gating for this environment.
+                  properties:
+                    maxRolloutPct:
+                      type: integer
+                      description: Maximum rollout percentage allowed in this environment.
+                      minimum: 1
+                      maximum: 100
+                      default: 100
+                    requireApproval:
+                      type: boolean
+                      description: Force Pending status until out-of-band approval.
+                      default: false
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+                      reason:
+                        type: string
+                      status:
+                        type: string
+                      type:
+                        type: string
+                phase:
+                  type: string
+                  enum: [Pending, Synced, Error]
+                  default: Pending
+                envId:
+                  type: string
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flagpolicies.tombstone.io
+  labels:
+    app.kubernetes.io/name: tombstone-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: tombstone.io
+  names:
+    kind: FlagPolicy
+    listKind: FlagPolicyList
+    plural: flagpolicies
+    singular: flagpolicy
+    shortNames:
+      - fpol
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Violations
+          type: integer
+          jsonPath: .status.violatingFlags[*]
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            FlagPolicy defines governance rules (blast-radius limits, ownership,
+            stale-flag TTLs) that the operator enforces against matching flags.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                selector:
+                  type: object
+                  description: >
+                    Label selector to match FeatureFlag resources. An empty
+                    selector matches all flags in the namespace.
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - key
+                          - operator
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                maxStaleDays:
+                  type: integer
+                  description: Days a flag can remain unchanged before review.
+                  minimum: 1
+                maxBlastRadiusPct:
+                  type: integer
+                  description: Maximum rollout percentage allowed by this policy.
+                  minimum: 1
+                  maximum: 100
+                requireOwner:
+                  type: boolean
+                  description: Enforce that every matched flag has a non-empty owner.
+                  default: true
+                requireTags:
+                  type: boolean
+                  description: Enforce that every matched flag has at least one tag.
+                  default: false
+            status:
+              type: object
+              properties:
+                violatingFlags:
+                  type: array
+                  description: Flags currently violating this policy.
+                  items:
+                    type: string
+                lastEvaluated:
+                  type: string
+                  format: date-time
+                phase:
+                  type: string
+                  enum: [Compliant, Violation, Error]
+                  default: Compliant
