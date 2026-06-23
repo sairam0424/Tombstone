@@ -163,6 +163,12 @@ CREATE TABLE IF NOT EXISTS service_tokens (
     revoked_at  TIMESTAMPTZ
 );
 
+-- Migration 008: pgvector embeddings for semantic search
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS embedding vector(768);
+CREATE INDEX IF NOT EXISTS idx_flags_embedding
+  ON flags USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100);
+
 -- Seed default project
 INSERT INTO projects (id, name, slug)
 VALUES ('00000000-0000-0000-0000-000000000001', 'Default', 'default')
