@@ -123,6 +123,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_env_ts ON audit_log(environment, created_at
 CREATE OR REPLACE RULE no_audit_update AS ON UPDATE TO audit_log DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE no_audit_delete AS ON DELETE TO audit_log DO INSTEAD NOTHING;
 
+-- Migration 009: Rekor transparency log integration
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS rekor_log_id TEXT;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS rekor_log_index BIGINT;
+
 -- Change requests (four-eyes approval)
 CREATE TABLE IF NOT EXISTS change_requests (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
