@@ -149,6 +149,16 @@ export class EvaluationEngine {
   // ─── Step 4: rule matching ─────────────────────────────────────────────────
 
   private matchesRule(rule: TargetingRule, context: EvaluationContext): boolean {
+    // GEO operators resolve values from context.geo, not the generic attribute path
+    if (rule.operator === 'GEO_COUNTRY') {
+      const country = (context.geo?.country ?? '').toUpperCase();
+      return (rule.values as string[]).map(v => String(v).toUpperCase()).includes(country);
+    }
+    if (rule.operator === 'GEO_REGION') {
+      const region = (context.geo?.region ?? '').toUpperCase();
+      return (rule.values as string[]).map(v => String(v).toUpperCase()).includes(region);
+    }
+
     const raw = this.resolveAttribute(rule.attribute, context);
     if (raw === undefined || raw === null) return false;
     return this.applyOperator(rule.operator, raw, rule.values);

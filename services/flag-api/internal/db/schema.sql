@@ -82,11 +82,26 @@ CREATE TABLE IF NOT EXISTS targeting_rules (
     environment TEXT NOT NULL,
     rule_type   TEXT NOT NULL CHECK (rule_type IN ('USER','ORG','SEGMENT','CUSTOM')),
     attribute   TEXT NOT NULL,
-    operator    TEXT NOT NULL CHECK (operator IN ('IN','NOT_IN','EQ','NEQ','LT','LTE','GT','GTE','CONTAINS','PREFIX','SUFFIX')),
+    operator    TEXT NOT NULL CHECK (operator IN (
+                  'IN','NOT_IN','EQ','NEQ','LT','LTE','GT','GTE','CONTAINS','PREFIX','SUFFIX',
+                  'REGEX','SEMVER_GTE','SEMVER_LTE','GEO_COUNTRY','GEO_REGION','DATE_BEFORE','DATE_AFTER'
+                )),
     values      JSONB NOT NULL DEFAULT '[]',
     variation   TEXT NOT NULL,
     priority    INTEGER NOT NULL DEFAULT 0
 );
+
+-- Migration 007: multivariate flag variations
+CREATE TABLE IF NOT EXISTS flag_variations (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flag_id     UUID NOT NULL REFERENCES flags(id) ON DELETE CASCADE,
+  key         TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  weight      INT NOT NULL CHECK (weight >= 0 AND weight <= 10000),
+  description TEXT,
+  UNIQUE(flag_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_flag_variations_flag_id ON flag_variations(flag_id);
 
 -- Append-only audit log with Merkle chain
 CREATE TABLE IF NOT EXISTS audit_log (
