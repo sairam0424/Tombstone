@@ -4,6 +4,7 @@ import { FlagHealthBadge } from '../../components/FlagHealthBadge.js';
 import { CircuitBreakerStatus } from '../../components/CircuitBreakerStatus.js';
 import { AutonomousRolloutToggle } from '../../components/AutonomousRolloutToggle.js';
 
+
 interface FlagEnvState {
   flag_id: string;
   flag_key: string;
@@ -126,7 +127,15 @@ export default function FlagDetail() {
             <p className="text-gray-400 mt-1">{flag.name}</p>
             {flag.description && <p className="text-gray-500 text-sm mt-1">{flag.description}</p>}
           </div>
-          <FlagHealthBadge state={flag.state} />
+          <div className="flex items-center gap-3">
+            <Link
+              to={`/flags/${flag.key}/slo`}
+              className="px-3 py-1 rounded text-xs font-medium border border-blue-700 text-blue-400 hover:bg-blue-900/20 transition-colors"
+            >
+              View SLO →
+            </Link>
+            <FlagHealthBadge state={flag.state} />
+          </div>
         </div>
         <div className="flex gap-4 mt-3 text-xs text-gray-500">
           <span>Type: <span className="text-gray-300">{flag.flag_type}</span></span>

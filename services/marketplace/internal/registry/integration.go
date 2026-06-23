@@ -46,6 +46,12 @@ type Integration struct {
 	Status       IntegrationStatus `json:"status"`
 	Config       map[string]string `json:"config,omitempty"`
 	IsFirstParty bool              `json:"is_first_party"`
+	// Bidirectional indicates the integration supports inbound webhook delivery
+	// in addition to the standard outbound (Tombstone -> third-party) flow.
+	Bidirectional bool `json:"bidirectional,omitempty"`
+	// InboundEndpoint is the Tombstone-hosted path that accepts inbound payloads
+	// from the third-party service (populated only when Bidirectional is true).
+	InboundEndpoint string `json:"inbound_endpoint,omitempty"`
 }
 
 // firstPartyIntegrations defines the built-in catalog of integrations.
@@ -53,7 +59,7 @@ var firstPartyIntegrations = []Integration{
 	{
 		ID:           "slack",
 		Name:         "Slack",
-		Description:  "Send flag change notifications to Slack channels.",
+		Description:  "Interactive Slack app: Block Kit notifications, /tombstone slash commands, and kill switch buttons.",
 		Category:     "notifications",
 		IconURL:      "https://assets.tombstone.io/integrations/slack.svg",
 		Events:       []EventType{EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback},
@@ -61,14 +67,16 @@ var firstPartyIntegrations = []Integration{
 		IsFirstParty: true,
 	},
 	{
-		ID:           "datadog",
-		Name:         "Datadog",
-		Description:  "Annotate Datadog dashboards with flag change events.",
-		Category:     "observability",
-		IconURL:      "https://assets.tombstone.io/integrations/datadog.svg",
-		Events:       []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagArchived},
-		Status:       StatusAvailable,
-		IsFirstParty: true,
+		ID:          "datadog",
+		Name:        "Datadog",
+		Description: "Annotate Datadog dashboards with flag change events and receive monitor alerts to auto-trigger blast radius checks and kill switches.",
+		Category:    "observability",
+		IconURL:     "https://assets.tombstone.io/integrations/datadog.svg",
+		Events:      []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagArchived},
+		Status:      StatusAvailable,
+		IsFirstParty:    true,
+		Bidirectional:   true,
+		InboundEndpoint: "/api/v1/marketplace/inbound/datadog",
 	},
 	{
 		ID:           "pagerduty",
@@ -218,16 +226,18 @@ func (r *Registry) Install(id, webhookURL string, config map[string]string) bool
 
 	// Immutable struct update — create a new Integration value.
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   webhookURL,
-		Events:       existing.Events,
-		Status:       StatusInstalled,
-		Config:       config,
-		IsFirstParty: existing.IsFirstParty,
+		ID:              existing.ID,
+		Name:            existing.Name,
+		Description:     existing.Description,
+		Category:        existing.Category,
+		IconURL:         existing.IconURL,
+		WebhookURL:      webhookURL,
+		Events:          existing.Events,
+		Status:          StatusInstalled,
+		Config:          config,
+		IsFirstParty:    existing.IsFirstParty,
+		Bidirectional:   existing.Bidirectional,
+		InboundEndpoint: existing.InboundEndpoint,
 	}
 	r.integrations[id] = updated
 	r.persistToRedis(id, updated)
@@ -246,16 +256,18 @@ func (r *Registry) Uninstall(id string) bool {
 	}
 
 	updated := Integration{
-		ID:           existing.ID,
-		Name:         existing.Name,
-		Description:  existing.Description,
-		Category:     existing.Category,
-		IconURL:      existing.IconURL,
-		WebhookURL:   "",
-		Events:       existing.Events,
-		Status:       StatusAvailable,
-		Config:       nil,
-		IsFirstParty: existing.IsFirstParty,
+		ID:              existing.ID,
+		Name:            existing.Name,
+		Description:     existing.Description,
+		Category:        existing.Category,
+		IconURL:         existing.IconURL,
+		WebhookURL:      "",
+		Events:          existing.Events,
+		Status:          StatusAvailable,
+		Config:          nil,
+		IsFirstParty:    existing.IsFirstParty,
+		Bidirectional:   existing.Bidirectional,
+		InboundEndpoint: existing.InboundEndpoint,
 	}
 	r.integrations[id] = updated
 	r.deleteFromRedis(id)
@@ -274,6 +286,46 @@ func (r *Registry) Register(i Integration) bool {
 	i.IsFirstParty = false
 	r.integrations[i.ID] = i
 	r.persistToRedis(i.ID, i)
+	return true
+}
+
+// firstOf returns the first element of a slice, or empty string if the slice is empty.
+func firstOf(ss []string) string {
+	if len(ss) > 0 {
+		return ss[0]
+	}
+	return ""
+}
+
+// MarkBidirectional upgrades an integration's metadata to reflect bidirectional capability,
+// setting Bidirectional: true and recording the inbound endpoint paths.
+// This is called at startup for first-party integrations that support inbound webhooks.
+// Returns false if the integration does not exist.
+func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool {
+	// inboundEndpoints[0] used as the single InboundEndpoint field; further endpoints ignored
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, ok := r.integrations[id]
+	if !ok {
+		return false
+	}
+
+	updated := Integration{
+		ID:               existing.ID,
+		Name:             existing.Name,
+		Description:      existing.Description,
+		Category:         existing.Category,
+		IconURL:          existing.IconURL,
+		WebhookURL:       existing.WebhookURL,
+		Events:           existing.Events,
+		Status:           existing.Status,
+		Config:           existing.Config,
+		IsFirstParty:     existing.IsFirstParty,
+		Bidirectional:    true,
+		InboundEndpoint:  firstOf(inboundEndpoints),
+	}
+	r.integrations[id] = updated
 	return true
 }
 

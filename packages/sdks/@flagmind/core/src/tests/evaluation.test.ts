@@ -82,7 +82,7 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
     const result = engine.evaluate(activeFlag(100), [
       { id: 'r2', ruleType: 'CUSTOM', attribute: 'geo.country', operator: 'IN', values: ['US', 'CA'], variation: 'us-variant', priority: 5 }
     ], geoCtx, false, 'test-flag');
-    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.reason, 'RULE_MATCH');
     assert.equal(result.value, 'us-variant');
   });
 
@@ -90,7 +90,7 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
     const result = engine.evaluate(activeFlag(100), [
       { id: 'r3', ruleType: 'USER', attribute: 'userId', operator: 'EQ', values: ['user-abc'], variation: 'user-variant', priority: 1 }
     ], ctx, false, 'test-flag');
-    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.reason, 'RULE_MATCH');
     assert.equal(result.value, 'user-variant');
   });
 
@@ -100,7 +100,7 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
       { id: 'r-high', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'high-prio', priority: 1 },
       { id: 'r-low', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'low-prio', priority: 10 },
     ], ctx, false, 'test-flag');
-    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.reason, 'RULE_MATCH');
     assert.equal(result.value, 'high-prio');
   });
 
@@ -109,7 +109,7 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
     const result = engine.evaluate(activeFlag(100), [
       { id: 'r4', ruleType: 'CUSTOM', attribute: 'score', operator: 'GTE', values: [90], variation: 'premium', priority: 5 }
     ], numCtx, false, 'test-flag');
-    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.reason, 'RULE_MATCH');
     assert.equal(result.value, 'premium');
   });
 
@@ -233,7 +233,7 @@ describe('Step 4 — Rule matching', () => {
   it('RULE_MATCH: IN operator, ruleId is set', () => {
     const flag = activeFlag(100);
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'rule-pro', attribute: 'plan', operator: 'IN', values: ['pro', 'enterprise'], variation: 'v2', priority: 10 },
+      { id: 'rule-pro', ruleType: 'USER', attribute: 'plan', operator: 'IN', values: ['pro', 'enterprise'], variation: 'v2', priority: 10 },
     ]);
     assert.equal(r.reason, 'RULE_MATCH');
     assert.equal(r.value, 'v2');
@@ -243,18 +243,18 @@ describe('Step 4 — Rule matching', () => {
   it('higher priority rule wins', () => {
     const flag = activeFlag(100);
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'low', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'low-var', priority: 1 },
-      { id: 'high', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'high-var', priority: 99 },
+      { id: 'low-prio', ruleType: 'USER', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'low-prio-var', priority: 99 },
+      { id: 'high-prio', ruleType: 'USER', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'high-prio-var', priority: 1 },
     ]);
     assert.equal(r.reason, 'RULE_MATCH');
-    assert.equal(r.value, 'high-var');
-    assert.equal(r.ruleId, 'high');
+    assert.equal(r.value, 'high-prio-var');  // priority 1 wins over 99 (lower = higher priority)
+    assert.equal(r.ruleId, 'high-prio');
   });
 
   it('RULE_MATCH: EQ operator', () => {
     const flag = activeFlag(100);
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'r-org', attribute: 'orgId', operator: 'EQ', values: ['org-1'], variation: 'org-enabled', priority: 5 },
+      { id: 'r-org', ruleType: 'USER', attribute: 'orgId', operator: 'EQ', values: ['org-1'], variation: 'org-enabled', priority: 5 },
     ]);
     assert.equal(r.reason, 'RULE_MATCH');
     assert.equal(r.value, 'org-enabled');
@@ -264,7 +264,7 @@ describe('Step 4 — Rule matching', () => {
     const ctxPrefix: EvaluationContext = { userId: 'user-abc', attrs: { email: 'admin@acme.com' } };
     const flag = activeFlag(100);
     const r = engine.evaluateWithDetail('test-flag', ctxPrefix, false, singleCache(flag), [
-      { id: 'r-prefix', attribute: 'email', operator: 'PREFIX', values: ['admin@'], variation: 'admin-view', priority: 5 },
+      { id: 'r-prefix', ruleType: 'USER', attribute: 'email', operator: 'PREFIX', values: ['admin@'], variation: 'admin-view', priority: 5 },
     ]);
     assert.equal(r.reason, 'RULE_MATCH');
     assert.equal(r.value, 'admin-view');
@@ -273,7 +273,7 @@ describe('Step 4 — Rule matching', () => {
   it('falls through when no rule matches', () => {
     const flag = activeFlag(100);
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'r1', attribute: 'plan', operator: 'EQ', values: ['enterprise'], variation: 'ent', priority: 5 },
+      { id: 'r1', ruleType: 'USER', attribute: 'plan', operator: 'EQ', values: ['enterprise'], variation: 'ent', priority: 5 },
     ]);
     assert.equal(r.reason, 'FALLTHROUGH');
   });
@@ -325,7 +325,7 @@ describe('Short-circuit ordering', () => {
       targetList: ['user-abc'],
     });
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'r1', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'rule-var', priority: 99 },
+      { id: 'r1', ruleType: 'USER', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'rule-var', priority: 99 },
     ]);
     // userId hit in targetList (Step 3) before rule (Step 4)
     assert.equal(r.reason, 'TARGET_MATCH');
@@ -334,7 +334,7 @@ describe('Short-circuit ordering', () => {
   it('Step 4 fires before Step 5 (rule match beats rollout)', () => {
     const flag = activeFlag(0); // 0% rollout would normally return default
     const r = engine.evaluateWithDetail('test-flag', ctx, false, singleCache(flag), [
-      { id: 'r1', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'matched', priority: 5 },
+      { id: 'r1', ruleType: 'USER', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'matched', priority: 5 },
     ]);
     assert.equal(r.reason, 'RULE_MATCH');
     assert.equal(r.value, 'matched');

@@ -9,16 +9,31 @@ import (
     "time"
 
     "github.com/go-chi/chi/v5"
+    "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
     "go.uber.org/zap"
 
     "github.com/tombstone/gitops-sync/internal/parser"
     "github.com/tombstone/gitops-sync/internal/syncer"
+    "github.com/tombstone/gitops-sync/internal/telemetry"
     "github.com/tombstone/gitops-sync/internal/validator"
 )
 
 func main() {
     logger, _ := zap.NewProduction()
     defer logger.Sync()
+
+    initCtx := context.Background()
+
+    // Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+    shutdownTracer, err := telemetry.InitTracer(initCtx, "gitops-sync")
+    if err != nil {
+        logger.Fatal("init tracer", zap.Error(err))
+    }
+    defer func() {
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        _ = shutdownTracer(shutdownCtx)
+    }()
 
     flagAPIURL := os.Getenv("FLAG_API_URL")
     if flagAPIURL == "" { logger.Fatal("FLAG_API_URL required") }
@@ -82,7 +97,13 @@ func main() {
         _ = json.NewEncoder(w).Encode(result)
     })
 
-    srv := &http.Server{Addr: ":" + port, Handler: r, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
+    srv := &http.Server{
+        Addr:    ":" + port,
+        // Wrap the router with otelhttp for automatic HTTP trace spans.
+        Handler: otelhttp.NewHandler(r, "gitops-sync"),
+        ReadTimeout:  30 * time.Second,
+        WriteTimeout: 30 * time.Second,
+    }
     logger.Info("gitops-sync starting", zap.String("port", port))
     if err := srv.ListenAndServe(); err != nil {
         logger.Fatal("server error", zap.Error(err))

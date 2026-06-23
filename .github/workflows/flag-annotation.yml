@@ -1,0 +1,69 @@
+name: Flag Blast Radius Check
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "**.ts"
+      - "**.tsx"
+      - "**.js"
+      - "**.py"
+      - "**.go"
+      - "**.rb"
+      - "**.java"
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  flag-check:
+    name: Tombstone Flag Blast Radius
+    runs-on: ubuntu-latest
+    # Only run if TOMBSTONE_API_URL repository variable is configured.
+    # This prevents false failures on forks or fresh clones where the secret
+    # has not been set up yet.
+    if: vars.TOMBSTONE_API_URL != ''
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          # Fetch both the PR head and its parent so git diff HEAD~1 works.
+          # NOTE: ref is NOT supplied here — Actions already checks out the merge
+          # commit for pull_request events, so there is no ref-injection risk.
+          fetch-depth: 2
+
+      # Security note: ALL ${{ }} expressions are bound to env: vars and never
+      # interpolated directly into run: shell commands, preventing injection.
+      #
+      # Expression safety audit:
+      #   vars.*                    — repo admin-controlled variables: trusted
+      #   secrets.*                 — never echoed, only passed as env values
+      #   secrets.GITHUB_TOKEN      — scoped to this job's permissions block
+      #   github.event.pr.number    — GitHub API guarantees this is an integer;
+      #                               validated as numeric in the step below
+      - name: Validate PR number
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: PR_NUMBER is not a valid integer: '${PR_NUMBER}'" >&2
+            exit 1
+          fi
+
+      - name: Check flag blast radius
+        env:
+          # Repository variable (Settings → Variables → Repository variables)
+          TOMBSTONE_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          # Repository secret (Settings → Secrets → Repository secrets)
+          TOMBSTONE_TOKEN: ${{ secrets.TOMBSTONE_TOKEN }}
+          # Target environment — override via repo variable if needed
+          TOMBSTONE_ENVIRONMENT: ${{ vars.TOMBSTONE_ENVIRONMENT || 'production' }}
+          # Minimum risk level to annotate: LOW | MEDIUM | HIGH | BLOCKED
+          MIN_RISK: ${{ vars.TOMBSTONE_MIN_RISK || 'MEDIUM' }}
+          # Provided automatically by GitHub Actions for the repo's GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Integer — validated as numeric in the preceding step
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/pr-flag-check.sh

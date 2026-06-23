@@ -15,6 +15,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	"github.com/tombstone/evaluator/internal/blast"
@@ -22,11 +23,25 @@ import (
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
+	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
+
+	initCtx := context.Background()
+
+	// Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+	shutdownTracer, err := telemetry.InitTracer(initCtx, "evaluator")
+	if err != nil {
+		logger.Fatal("init tracer", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
 
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
@@ -136,9 +151,14 @@ func main() {
 		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
 	})
 
+	// Per-flag SLO dashboard endpoint
+	sloHandler := apiv1.NewHandler(rdb, breaker, logger)
+	r.Get("/api/v1/flags/{key}/slo", sloHandler.HandleFlagSLO)
+
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
+		Addr: ":" + port,
+		// Wrap the router with otelhttp for automatic HTTP trace spans.
+		Handler:      otelhttp.NewHandler(r, "evaluator"),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
