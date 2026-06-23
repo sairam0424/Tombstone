@@ -1,6 +1,8 @@
 """Inbound webhook receivers for PagerDuty and OpsGenie alert events."""
 
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -82,9 +84,27 @@ async def receive_pagerduty(request: Request) -> dict[str, Any]:
             created_at,
         )
 
-        # TODO: invoke app.state.correlator.correlate() when request.app.state
-        #       exposes the correlator to this router; stub returns True for now.
-        correlation_triggered = True
+        # Parse incident start time; fall back to current time if unparseable.
+        try:
+            incident_start_unix = int(
+                datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            )
+        except (ValueError, AttributeError):
+            incident_start_unix = int(time.time())
+
+        try:
+            service = incident.get("service", {}).get("name", "unknown")
+            await request.app.state.correlator.correlate(
+                incident_id=incident_id,
+                affected_service=service,
+                incident_start_unix=incident_start_unix,
+            )
+            correlation_triggered = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Correlation failed for PagerDuty incident %s: %s", incident_id, exc
+            )
+            correlation_triggered = False
 
         processed.append(
             {
@@ -149,8 +169,21 @@ async def receive_opsgenie(request: Request) -> dict[str, Any]:
 
     logger.info("OpsGenie %s received: alert_id=%s", action, alert_id)
 
-    # TODO: invoke app.state.correlator.correlate() once router has app context
-    correlation_triggered = True
+    # OpsGenie webhooks do not carry a creation timestamp; use current time.
+    incident_start_unix = int(time.time())
+
+    try:
+        await request.app.state.correlator.correlate(
+            incident_id=alert_id,
+            affected_service=alert.get("message", "unknown"),
+            incident_start_unix=incident_start_unix,
+        )
+        correlation_triggered = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Correlation failed for OpsGenie alert %s: %s", alert_id, exc
+        )
+        correlation_triggered = False
 
     return {
         "alert_id": alert_id,

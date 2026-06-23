@@ -83,6 +83,7 @@ func main() {
 	rekorClient := transparency.NewRekorClient()
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
+	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware()
 	defer rateMw.Stop()
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
@@ -91,6 +92,7 @@ func main() {
 	complianceH := v1.NewComplianceHandler(db, logger)
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
+	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -120,13 +122,17 @@ func main() {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
+		r.Use(rbacMw.LoadRole)
 
 		r.Get("/flags", flagH.ListFlags)
 		r.Post("/flags", flagH.CreateFlag)
 		r.Get("/flags/{key}", flagH.GetFlag)
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
 		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
-		r.Post("/flags/{key}/kill", flagH.KillSwitch)
+
+		// Kill-switch: restricted to OWNER and ADMIN only (flags:kill_switch permission).
+		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+			Post("/flags/{key}/kill", flagH.KillSwitch)
 
 		// Flag prerequisites (GrowthBook ParentConditions pattern)
 		r.Post("/flags/{key}/prerequisites", prereqH.AddPrerequisite)
@@ -144,6 +150,18 @@ func main() {
 		r.Get("/compliance/evidence", complianceH.GetEvidence)
 		r.Get("/compliance/controls", complianceH.GetControls)
 		r.Get("/compliance/export", complianceH.ExportAuditLog)
+
+		// Break-glass endpoints: all require elevated roles.
+		// CreateToken and ListTokens require ADMIN (admin:admin permission).
+		// UseToken requires OWNER or ADMIN (flags:kill_switch permission covers emergency use).
+		r.Route("/break-glass", func(r chi.Router) {
+			r.With(rbacMw.RequirePermission("admin", "admin")).
+				Post("/tokens", breakGlassH.CreateToken)
+			r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+				Post("/use", breakGlassH.UseToken)
+			r.With(rbacMw.RequirePermission("admin", "admin")).
+				Get("/tokens", breakGlassH.ListTokens)
+		})
 	})
 
 	scimToken := os.Getenv("SCIM_TOKEN")
