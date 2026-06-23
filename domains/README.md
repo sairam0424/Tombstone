@@ -1,3 +1,7 @@
+---
+kind: schema-readme
+---
+
 # domains/ — loops
 
 Each subfolder is one **loop**: a thread of work with a charter, a cadence, and (optionally)
