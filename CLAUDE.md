@@ -169,7 +169,8 @@ make gen-proto      # Regenerate Go stubs from .proto files
 - **Tombstoning:** Archived flag keys are permanent in `flag_tombstones`. `flags.key` reuse is blocked at DB constraint AND service layer.
 - **OPA:** Policy-as-code RBAC via Rego files in `services/flag-api/policies/`. Hot-reload on file change — no restart needed.
 - **Rekor:** Transparency log writes are fail-open and async. Do not add synchronous Rekor blocking to hot paths.
-- **Redis Streams:** Gateway uses consumer groups for SSE fan-out. Use `XACK` after successful delivery; failed messages stay in PEL for retry.
+- **Redis Streams:** `tombstone:stream:{environment}` — gateway `XREADGROUP` consumers read from here. Legacy pub/sub `stream:{env}:updates` still active (remove in v2.1).
+- **Consumer group:** `gateway-workers` — each gateway instance is a named consumer `gateway-{hostname}`. Use `XACK` after successful delivery; failed messages stay in PEL for retry. Last 10,000 events retained per stream (approximate trim).
 - **Contract vectors:** Evaluation correctness is pinned against LD-verified 5-step pipeline contract tests. Changes to `evaluation.ts` or `@tombstone/eval` must pass all 108 + 41 contract tests.
 - **Kill switch / break-glass:** Gated by `RequirePermission`. Never bypass in hot paths — circuit breaker handles auto-rollback.
 - **Conventional Commits:** `type(scope)` — scopes: `flag-api`, `gateway`, `evaluator`, `intelligence`, `sdk`, `dashboard`, `cli`, `proto`, `infra`, `operator`, `marketplace`, `ast-rewriter`
