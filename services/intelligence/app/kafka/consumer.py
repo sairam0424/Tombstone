@@ -33,9 +33,13 @@ class EventConsumer(ABC):
         ...
 
     @abstractmethod
-    def __aiter__(self):
-        """Yield (topic: str, payload: dict) tuples."""
+    async def run(self) -> None:
+        """Run the consumer loop until cancelled."""
         ...
+
+    def __aiter__(self):  # type: ignore[override]
+        """Protocol compliance — run() drives consumption; aiter is unused."""
+        return iter([])
 
 
 class KafkaEventConsumer(EventConsumer):
