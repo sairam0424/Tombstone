@@ -9,6 +9,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- Redis Streams (`XADD`/`XREADGROUP`) alongside pub/sub for flag event delivery (Phase 4.1)
+  - Stream key: `tombstone:stream:{environment}`, consumer group: `gateway-workers`
+  - Consumer name per gateway instance: `gateway-{hostname}`
+  - Event history: last 10,000 events per stream retained (approximate trim)
+  - Legacy pub/sub still active for backward compat — removal tracked for v2.1
+
 ---
 
 ## [2.0.1] - 2026-06-23
