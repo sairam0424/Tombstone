@@ -12,7 +12,11 @@ export type EvaluationReason =
 export type RuleOperator =
   | 'IN' | 'NOT_IN' | 'EQ' | 'NEQ'
   | 'LT' | 'LTE' | 'GT' | 'GTE'
-  | 'CONTAINS' | 'PREFIX' | 'SUFFIX';
+  | 'CONTAINS' | 'PREFIX' | 'SUFFIX'
+  | 'REGEX'
+  | 'SEMVER_GTE' | 'SEMVER_LTE'
+  | 'GEO_COUNTRY' | 'GEO_REGION'
+  | 'DATE_BEFORE' | 'DATE_AFTER';
 
 /** Alias — identical to RuleOperator. Both names exported for compatibility. */
 export type OperatorType = RuleOperator;
@@ -57,6 +61,12 @@ export interface TargetingRule {
   variation: string;
   /** Lower = higher priority. Evaluated ascending (0 before 10). */
   priority: number;
+}
+
+// GeoContext — geographic identifiers for GEO_COUNTRY/GEO_REGION operators
+export interface GeoContext {
+  country?: string;
+  region?: string;
 }
 
 /**
