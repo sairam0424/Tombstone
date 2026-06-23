@@ -1,65 +1,102 @@
 # Tombstone — Branch Strategy
 
+## Current State (v2.0.1)
+
+| Branch | Status | HEAD |
+|--------|--------|------|
+| main | production (v2.0.1) | Merge pull request #40 from sairam0424/feature/v2-complete-integration |
+| develop | integration (in sync with main) | same as main |
+
+All `v2-phase/*` branches have been merged and closed. The v2.0.1 release ships
+the full platform: 8 services (flag-api, gateway, evaluator, intelligence,
+gitops-sync, ast-rewriter, marketplace, tombstone-operator), the v2 5-step
+evaluation engine, ensemble anomaly detection, the MCP server, all SDKs
+(@tombstone/core, @tombstone/react, @tombstone/edge, @tombstone/eval, Python,
+Ruby, Java, .NET), Kubernetes operator, Helm multi-region charts, and SLSA
+Level 2 supply-chain hardening.
+
 ## Branch Structure
 
 ```
-main        <- Production releases (never commit directly)
-develop     <- Integration branch (all feature PRs merge here)
-feature/*   <- One branch per phase group
+main        <- Production releases only (tag: v2.0.1)
+develop     <- Integration branch — all PRs merge here first
+feature/*   <- One branch per feature or task, cut from develop
+hotfix/*    <- Emergency production fixes, cut from main
 ```
-
-## Current Branches
-
-| Branch | HEAD Commit | Status |
-|--------|------------|--------|
-| main | `948177f` feat: initial Tombstone codebase | active |
-| develop | `948177f` feat: initial Tombstone codebase | active (default) |
-
-Both branches are currently at the same commit. No `feature/*` branches exist yet.
-
-## Feature Branches -> Pull Requests
-
-| Branch | Scope | PR Target |
-|--------|-------|-----------|
-| feature/foundation-phase1-4 | Core services, SDKs, dashboard, CI | develop |
-| feature/phase5-ecosystem | Causal graph, multi-lang SDKs, warehouse, VS Code, marketplace | develop |
-| feature/phase6-enterprise-closure | Relay proxy, OpenFeature, SAML, Helm, ClickHouse, Tombstone rename | develop |
 
 ## Workflow
 
-1. Create feature branch from develop:
-   ```bash
-   git checkout develop && git checkout -b feature/my-task
-   ```
+### Feature development
 
-2. Make atomic conventional commits per component
+```bash
+# 1. Cut a feature branch from develop
+git checkout develop && git pull origin develop
+git checkout -b feature/<description>
 
-3. Push and open PR to develop:
-   ```bash
-   git push -u origin feature/my-task
-   gh pr create --base develop --title "feat: ..."
-   ```
+# 2. Make atomic conventional commits
+git commit -m "feat(flag-api): add scheduled-changes dry-run mode"
 
-4. After review, merge to develop via squash or merge commit
+# 3. Push and open PR against develop
+git push -u origin feature/<description>
+gh pr create --base develop --title "feat(<scope>): <description>"
 
-5. Release: develop -> main via PR when ready
+# 4. After review and CI green, merge to develop (squash or merge commit)
+```
 
-## Conventional Commit Types
+### Hotfix (production bug)
+
+```bash
+# 1. Cut hotfix branch from main
+git checkout main && git pull origin main
+git checkout -b hotfix/<description>
+
+# 2. Fix, commit, push
+git commit -m "fix(<scope>): <description>"
+git push -u origin hotfix/<description>
+
+# 3. PR to main, then backport to develop
+gh pr create --base main --title "fix(<scope>): <description>"
+# After main merge, open a second PR: hotfix/<description> -> develop
+```
+
+### Release
+
+```bash
+# develop -> main via PR when a release is ready
+gh pr create --base main --head develop --title "chore(release): vX.Y.Z"
+# After merge, tag main
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+## Conventional Commits
+
+Format: `type(scope): description`
 
 | Type | Use |
 |------|-----|
 | feat | New feature |
 | fix | Bug fix |
-| chore | Tooling, config, rename |
+| chore | Tooling, config, dependency updates |
 | refactor | Refactoring without behavior change |
 | test | Tests only |
 | docs | Documentation only |
 | ci | CI/CD changes |
 | perf | Performance improvement |
+| revert | Revert a prior commit |
 
 ## Scopes
 
 ```
 flag-api · gateway · evaluator · intelligence · gitops-sync · ast-rewriter
-marketplace · sdk · dashboard · mcp · cli · infra · helm · terraform · auth
+marketplace · operator · sdk · react · edge · eval · dashboard · mcp · cli
+proto · infra · helm · terraform · auth
 ```
+
+## Rules
+
+- Never commit directly to `main` or `develop`.
+- `develop` and `main` stay in sync after every release; no long-running divergence.
+- All feature branches are short-lived — merge within days, not weeks.
+- Hotfix branches are backported to `develop` immediately after merging to `main`.
+- Branch names use kebab-case: `feature/blast-radius-ui`, `hotfix/circuit-breaker-race`.
