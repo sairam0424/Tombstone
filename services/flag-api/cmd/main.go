@@ -22,6 +22,7 @@ import (
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
 	"github.com/tombstone/flag-api/internal/telemetry"
+	"github.com/tombstone/flag-api/internal/tlsutil"
 	"github.com/tombstone/flag-api/internal/transparency"
 )
 
@@ -194,10 +195,49 @@ func main() {
 		WriteTimeout: 15 * time.Second,
 	}
 
+	// mTLS: generate and write certs, then configure the server for mutual TLS.
+	// Falls back to plain HTTP when MTLS_ENABLED is not set (safe default for local dev).
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		certsDir := os.Getenv("CERTS_DIR")
+		if certsDir == "" {
+			certsDir = "/certs"
+		}
+		logger.Info("mTLS enabled — generating internal PKI certs", zap.String("certs_dir", certsDir))
+		caCert, _, err := tlsutil.GenerateCACert()
+		if err != nil {
+			logger.Fatal("generate CA cert", zap.Error(err))
+		}
+		serverCert, err := tlsutil.GenerateServiceCert(caCert, "flag-api")
+		if err != nil {
+			logger.Fatal("generate server cert", zap.Error(err))
+		}
+		clientCert, err := tlsutil.GenerateServiceCert(caCert, "client")
+		if err != nil {
+			logger.Fatal("generate client cert", zap.Error(err))
+		}
+		if err := tlsutil.WriteCerts(certsDir, caCert, serverCert, clientCert); err != nil {
+			logger.Fatal("write certs", zap.Error(err))
+		}
+		tlsCfg, err := tlsutil.LoadServerTLSConfig(certsDir)
+		if err != nil {
+			logger.Fatal("load server TLS config", zap.Error(err))
+		}
+		srv.TLSConfig = tlsCfg
+		logger.Info("flag-api mTLS configured — client certs written", zap.String("certs_dir", certsDir))
+	}
+
 	go func() {
 		logger.Info("flag-api starting", zap.String("port", port))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("server error", zap.Error(err))
+		var serveErr error
+		if os.Getenv("MTLS_ENABLED") == "true" {
+			// Certs are already loaded into srv.TLSConfig; empty strings tell ListenAndServeTLS
+			// to use the pre-configured TLSConfig rather than reading files from disk again.
+			serveErr = srv.ListenAndServeTLS("", "")
+		} else {
+			serveErr = srv.ListenAndServe()
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			logger.Fatal("server error", zap.Error(serveErr))
 		}
 	}()
 
