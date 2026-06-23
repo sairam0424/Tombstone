@@ -20,16 +20,18 @@ func NewAuditHandler(db *sql.DB, logger *zap.Logger) *AuditHandler {
 }
 
 type AuditEntry struct {
-	ID          string `json:"id"`
-	FlagKey     string `json:"flag_key"`
-	Environment string `json:"environment"`
-	Actor       string `json:"actor"`
-	EventType   string `json:"event_type"`
-	PrevState   any    `json:"prev_state"`
-	NewState    any    `json:"new_state"`
-	IPAddress   string `json:"ip_address"`
-	PrevHash    string `json:"prev_hash"`
-	CreatedAt   int64  `json:"created_at"`
+	ID           string  `json:"id"`
+	FlagKey      string  `json:"flag_key"`
+	Environment  string  `json:"environment"`
+	Actor        string  `json:"actor"`
+	EventType    string  `json:"event_type"`
+	PrevState    any     `json:"prev_state"`
+	NewState     any     `json:"new_state"`
+	IPAddress    string  `json:"ip_address"`
+	PrevHash     string  `json:"prev_hash"`
+	CreatedAt    int64   `json:"created_at"`
+	RekorLogID   string  `json:"rekor_log_id,omitempty"`
+	RekorLogIndex *int64 `json:"rekor_log_index,omitempty"`
 }
 
 // ListAuditLog handles GET /api/v1/audit
@@ -63,7 +65,8 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
 		       COALESCE(ip_address,''), COALESCE(prev_hash,''),
-		       EXTRACT(EPOCH FROM created_at)::bigint
+		       EXTRACT(EPOCH FROM created_at)::bigint,
+		       COALESCE(rekor_log_id,''), rekor_log_index
 		FROM audit_log
 		WHERE ($1='' OR flag_key=$1)
 		  AND ($2='' OR environment=$2)
@@ -84,7 +87,8 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 		var e AuditEntry
 		var prevRaw, newRaw string
 		if err := rows.Scan(&e.ID, &e.FlagKey, &e.Environment, &e.Actor, &e.EventType,
-			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt); err != nil {
+			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt,
+			&e.RekorLogID, &e.RekorLogIndex); err != nil {
 			writeError(w, http.StatusInternalServerError, "scan failed")
 			return
 		}

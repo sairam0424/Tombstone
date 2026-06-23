@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	"github.com/tombstone/ast-rewriter/internal/rewriter"
 	"github.com/tombstone/ast-rewriter/internal/scanner"
+	"github.com/tombstone/ast-rewriter/internal/telemetry"
 )
 
 // ---- request / response types ------------------------------------------------
@@ -180,6 +184,19 @@ func main() {
 	log, _ := zap.NewProduction()
 	defer log.Sync() //nolint:errcheck
 
+	initCtx := context.Background()
+
+	// Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+	shutdownTracer, err := telemetry.InitTracer(initCtx, "ast-rewriter")
+	if err != nil {
+		log.Fatal("init tracer", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8085"
@@ -197,7 +214,8 @@ func main() {
 	addr := ":" + port
 	log.Info("ast-rewriter starting", zap.String("addr", addr))
 
-	if err := http.ListenAndServe(addr, r); err != nil {
+	// Wrap the router with otelhttp for automatic HTTP trace spans.
+	if err := http.ListenAndServe(addr, otelhttp.NewHandler(r, "ast-rewriter")); err != nil {
 		log.Fatal("server error", zap.Error(err))
 	}
 }

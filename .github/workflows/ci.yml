@@ -11,6 +11,7 @@ jobs:
     name: Go Services (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace]
     steps:

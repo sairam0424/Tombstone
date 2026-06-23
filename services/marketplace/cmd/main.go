@@ -4,15 +4,19 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/marketplace/internal/api/v1"
+	"github.com/tombstone/marketplace/internal/integrations"
 	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/tombstone/marketplace/internal/telemetry"
 	"github.com/tombstone/marketplace/internal/webhook"
 )
 
@@ -20,9 +24,27 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync() //nolint:errcheck
 
+	initCtx := context.Background()
+
+	// Initialise OpenTelemetry. OTLP_ENDPOINT is optional — noop when unset.
+	shutdownTracer, err := telemetry.InitTracer(initCtx, "marketplace")
+	if err != nil {
+		logger.Fatal("init tracer", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8086"
+	}
+
+	flagAPIURL := os.Getenv("FLAG_API_URL")
+	if flagAPIURL == "" {
+		flagAPIURL = "http://flag-api:8081"
 	}
 
 	// Redis is optional — if unavailable the registry operates in ephemeral mode.
@@ -49,9 +71,23 @@ func main() {
 
 	reg := registry.NewRegistry(rdb, logger)
 	reg.LoadFromRedis(context.Background())
-
 	dispatcher := webhook.NewDispatcher(reg, logger)
 	handler := v1.NewHandler(reg, dispatcher, logger)
+
+	// Interactive Slack app — wired at runtime if SLACK_BOT_TOKEN is set.
+	// HTTP handlers added in a follow-up (services/marketplace/internal/api/v1/slack.go).
+	if slackToken := os.Getenv("SLACK_BOT_TOKEN"); slackToken != "" {
+		slackApp := integrations.NewSlackApp(
+			slackToken,
+			os.Getenv("SLACK_SIGNING_SECRET"),
+			flagAPIURL,
+		)
+		_ = slackApp // TODO: wire to /api/v1/marketplace/slack/* routes
+		reg.MarkBidirectional("slack", []string{
+			"/api/v1/marketplace/slack/commands",
+			"/api/v1/marketplace/slack/actions",
+		})
+	}
 
 	r := chi.NewRouter()
 
@@ -61,9 +97,12 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Accept", "Authorization", "Content-Type", "X-Request-ID",
+			"X-Slack-Request-Timestamp", "X-Slack-Signature",
+		},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -81,6 +120,14 @@ func main() {
 		r.Post("/register", handler.RegisterIntegration)
 		r.Post("/events", handler.TriggerEvent)
 
+		// Inbound webhook routes — external services post alerts here.
+		r.Route("/inbound", func(r chi.Router) {
+			// POST /api/v1/marketplace/inbound/datadog
+			// Receives Datadog monitor alerts; auto-triggers blast-radius check and
+			// optional kill switch for P1/P2 alerts with BLOCKED flags.
+			r.Post("/datadog", handler.HandleDatadogInbound)
+		})
+
 		r.Route("/{id}", func(r chi.Router) {
 			r.Get("/", handler.GetIntegration)
 			r.Delete("/", handler.UninstallIntegration)
@@ -90,7 +137,8 @@ func main() {
 
 	addr := ":" + port
 	logger.Info("marketplace service starting", zap.String("addr", addr))
-	if err := http.ListenAndServe(addr, r); err != nil {
+	// Wrap the router with otelhttp for automatic HTTP trace spans.
+	if err := http.ListenAndServe(addr, otelhttp.NewHandler(r, "marketplace")); err != nil {
 		logger.Fatal("server error", zap.Error(err))
 	}
 }

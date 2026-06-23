@@ -3,10 +3,14 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from aiokafka import AIOKafkaConsumer
 
 from app.anomaly.detector import AnomalyDetector
+
+if TYPE_CHECKING:
+    from app.search.embedding_sync import EmbeddingSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +39,9 @@ class TelemetryConsumer:
     """
     Consumes tombstone.flag.evaluated and tombstone.flag.changed events from Kafka.
 
-    - Feeds aggregated evaluation counts to AnomalyDetector every 10 seconds.
-    - On flag-change events, calls DependencyGraphBuilder.update_on_flag_change()
-      to maintain the Redis dep-graph sorted sets incrementally.
+    - tombstone.flag.evaluated  → feeds AnomalyDetector (error-rate windowing)
+    - tombstone.flag.changed    → triggers EmbeddingSyncService for created/updated flags
+                                  AND updates Redis dep-graph sorted sets incrementally
 
     Follows the Graph-Forge aiokafka pattern (manual commit, OTel headers).
     """
@@ -46,11 +50,13 @@ class TelemetryConsumer:
         self,
         brokers: str,
         anomaly_detector: AnomalyDetector,
+        embedding_sync: "EmbeddingSyncService | None" = None,
         graph_builder=None,
         redis_client=None,
     ):
         self._brokers = brokers
         self._detector = anomaly_detector
+        self._embedding_sync = embedding_sync
         self._graph_builder = graph_builder
         self._redis_client = redis_client
         self._consumer: AIOKafkaConsumer | None = None
@@ -74,7 +80,7 @@ class TelemetryConsumer:
                 if msg.topic == TOPIC_FLAG_CHANGED:
                     await self._handle_flag_change(msg.value)
                 else:
-                    await self._handle(msg.value)
+                    await self._handle_evaluation(msg.value)
                 await self._consumer.commit()
         except asyncio.CancelledError:
             pass
@@ -82,7 +88,7 @@ class TelemetryConsumer:
             flush_task.cancel()
             await self._consumer.stop()
 
-    async def _handle(self, payload: dict) -> None:
+    async def _handle_evaluation(self, payload: dict) -> None:
         key = payload.get("flag_key", "")
         env = payload.get("environment", "production")
         window_key = f"{key}:{env}"
@@ -93,40 +99,56 @@ class TelemetryConsumer:
             self._window[window_key]["errors"] += 1
 
     async def _handle_flag_change(self, payload: dict) -> None:
-        """Process a flag-change event and update the Redis dep-graph."""
-        if self._graph_builder is None or self._redis_client is None:
-            return
+        """Process a flag-change event.
 
-        event_type = payload.get("event_type", "")
-        if event_type not in FLAG_CHANGE_EVENT_TYPES:
-            return
-
-        flag_key = payload.get("flag_key") or payload.get("key", "")
+        Performs two independent operations:
+        1. Sync pgvector embedding when a flag is created or updated.
+        2. Update the Redis dep-graph sorted sets incrementally.
+        """
+        event_type: str = payload.get("event_type", "")
+        flag_key: str = payload.get("flag_key") or payload.get("key", "")
         environment = payload.get("environment", "production")
-        if not flag_key:
-            return
 
-        # changed_at: prefer explicit field, fall back to now
-        changed_at_raw = payload.get("changed_at") or payload.get("created_at")
-        if changed_at_raw:
+        # --- Embedding sync (pgvector search) ---
+        if self._embedding_sync is not None and flag_key and event_type in {"flag.created", "flag.updated"}:
             try:
-                changed_at = datetime.fromisoformat(str(changed_at_raw).replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                changed_at = datetime.now(tz=timezone.utc)
-        else:
-            changed_at = datetime.now(tz=timezone.utc)
+                await self._embedding_sync.on_flag_event(
+                    event_type=event_type,
+                    flag_key=flag_key,
+                    name=payload.get("name", ""),
+                    description=payload.get("description", ""),
+                    tags=payload.get("tags", []),
+                )
+                logger.debug("Embedding sync triggered for %s (event=%s)", flag_key, event_type)
+            except Exception as exc:
+                logger.warning("Embedding sync failed for %s: %s", flag_key, exc)
 
-        try:
-            await self._graph_builder.update_on_flag_change(
-                flag_key=flag_key,
-                environment=environment,
-                changed_at=changed_at,
-                redis_client=self._redis_client,
-            )
-        except Exception as exc:
-            logger.warning(
-                "dep graph incremental update failed for %s: %s", flag_key, exc
-            )
+        # --- Dep-graph incremental update (Redis sorted sets) ---
+        if self._graph_builder is not None and self._redis_client is not None:
+            if event_type not in FLAG_CHANGE_EVENT_TYPES or not flag_key:
+                return
+
+            # changed_at: prefer explicit field, fall back to now
+            changed_at_raw = payload.get("changed_at") or payload.get("created_at")
+            if changed_at_raw:
+                try:
+                    changed_at = datetime.fromisoformat(str(changed_at_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    changed_at = datetime.now(tz=timezone.utc)
+            else:
+                changed_at = datetime.now(tz=timezone.utc)
+
+            try:
+                await self._graph_builder.update_on_flag_change(
+                    flag_key=flag_key,
+                    environment=environment,
+                    changed_at=changed_at,
+                    redis_client=self._redis_client,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "dep graph incremental update failed for %s: %s", flag_key, exc
+                )
 
     async def _flush_loop(self) -> None:
         while True:

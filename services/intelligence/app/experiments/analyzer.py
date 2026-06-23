@@ -164,7 +164,14 @@ class ExperimentAnalyzer:
         inflating the false positive rate (unlike standard t-tests).
 
         Uses a normal mixture prior with variance tau^2.
-        Rejects null when the likelihood ratio exceeds 1/alpha.
+        Rejects null when the e-value (likelihood ratio) exceeds 1/alpha.
+
+        Always-valid confidence intervals:
+            CI = delta +/- sqrt(2 * var_pooled * (1/n_c + 1/n_t) * log(2/(alpha * rho)))
+        where rho = current sample fraction used for anytime-valid bounds.
+
+        Returns e_value and ci bounds as extra fields embedded in metric_name
+        for downstream display.
         """
         c = np.array(control_data)
         t = np.array(treatment_data)
@@ -182,21 +189,56 @@ class ExperimentAnalyzer:
         if var_pooled == 0:
             relative_lift = 0.0
             is_sig = False
+            e_value = 1.0
+            ci_lower = 0.0
+            ci_upper = 0.0
+            recommendation = "continue"
         else:
             delta = mean_t - mean_c
             se = np.sqrt(var_pooled * (1 / n_c + 1 / n_t))
+
+            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
             v = 1 / (1 / tau**2 + 1 / se**2)
             m = v * delta / se**2
             log_ratio = 0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
-            likelihood_ratio = np.exp(log_ratio)
-            is_sig = likelihood_ratio >= (1 / alpha)
+            e_value = float(np.exp(log_ratio))
+
+            is_sig = e_value >= (1 / alpha)
             relative_lift = float(delta / abs(mean_c)) if mean_c != 0 else 0.0
+
+            # Always-valid (anytime-valid) confidence interval via Ville's inequality.
+            # Margin: sqrt(2 * sigma^2 * (1/n_c + 1/n_t) * log(2 / (alpha * rho)))
+            # rho is a tuning parameter for the boundary shape; rho=alpha gives tight bounds.
+            rho = alpha
+            log_term = np.log(2.0 / (alpha * rho)) if alpha * rho > 0 else 0.0
+            margin = np.sqrt(2.0 * var_pooled * (1.0 / n_c + 1.0 / n_t) * log_term) if log_term > 0 else se * 1.96
+            ci_lower = float(delta - margin)
+            ci_upper = float(delta + margin)
+
+            # Futility check: CI entirely within practical equivalence zone (+/-1% of control)
+            equiv_zone = abs(mean_c) * 0.01 if mean_c != 0 else 0.001
+            futile = (abs(ci_upper) <= equiv_zone and abs(ci_lower) <= equiv_zone)
+
+            if is_sig:
+                recommendation = "stop_significant"
+            elif futile:
+                recommendation = "stop_futility"
+            else:
+                recommendation = "continue"
 
         from app.experiments.models import VariantStats, MetricResult
         cs = VariantStats("control", n_c, float(mean_c), float(np.std(c)), float(np.mean(c > 0)))
         ts = VariantStats("treatment", n_t, float(mean_t), float(np.std(t)), float(np.mean(t > 0)))
+
+        # Encode e-value, CI, and recommendation into metric_name suffix for API consumers
+        # (MetricResult dataclass has no dedicated fields for these; keep model stable)
+        suffix = (
+            f"_msprt|e={e_value:.4f}"
+            f"|ci=[{ci_lower:.4f},{ci_upper:.4f}]"
+            f"|{recommendation}"
+        )
         return MetricResult(
-            metric_name=f"{metric_name}_msprt",
+            metric_name=f"{metric_name}{suffix}",
             control=cs,
             treatment=ts,
             relative_lift=round(relative_lift, 4),

@@ -1,0 +1,37 @@
+<idea-plugin>
+  <id>io.tombstone.flags</id>
+  <name>Tombstone Feature Flags</name>
+  <vendor>Tombstone</vendor>
+  <description>Inline flag state, kill switch, and stale detection in your IDE</description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <codeInsight.inlayProvider language="any"
+        implementationClass="io.tombstone.TombstoneInlayProvider"/>
+    <toolWindow id="Tombstone" anchor="right" icon="/icons/tombstone.svg"
+        factoryClass="io.tombstone.TombstoneToolWindowFactory"/>
+    <projectConfigurable instance="io.tombstone.TombstoneSettings"
+        displayName="Tombstone" groupId="tools"/>
+    <notificationGroup id="Tombstone" displayType="BALLOON"/>
+  </extensions>
+  <actions>
+    <action id="tombstone.killSwitch" class="io.tombstone.actions.KillSwitchAction"
+        text="Tombstone: Kill Switch" description="Disable this flag immediately">
+      <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl alt K"/>
+    </action>
+    <action id="tombstone.searchFlags" class="io.tombstone.actions.SearchFlagsAction"
+        text="Tombstone: Search Flags"
+        description="Search flags by natural language query">
+      <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl alt S"/>
+    </action>
+    <action id="tombstone.refreshFlags" class="io.tombstone.actions.RefreshFlagsAction"
+        text="Tombstone: Refresh Flags"
+        description="Force reload flag state from API">
+    </action>
+    <group id="tombstone.menu" text="Tombstone" popup="true">
+      <reference ref="tombstone.killSwitch"/>
+      <reference ref="tombstone.searchFlags"/>
+      <reference ref="tombstone.refreshFlags"/>
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </group>
+  </actions>
+</idea-plugin>

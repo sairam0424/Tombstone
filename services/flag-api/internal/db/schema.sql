@@ -82,11 +82,26 @@ CREATE TABLE IF NOT EXISTS targeting_rules (
     environment TEXT NOT NULL,
     rule_type   TEXT NOT NULL CHECK (rule_type IN ('USER','ORG','SEGMENT','CUSTOM')),
     attribute   TEXT NOT NULL,
-    operator    TEXT NOT NULL CHECK (operator IN ('IN','NOT_IN','EQ','NEQ','LT','LTE','GT','GTE','CONTAINS','PREFIX','SUFFIX')),
+    operator    TEXT NOT NULL CHECK (operator IN (
+                  'IN','NOT_IN','EQ','NEQ','LT','LTE','GT','GTE','CONTAINS','PREFIX','SUFFIX',
+                  'REGEX','SEMVER_GTE','SEMVER_LTE','GEO_COUNTRY','GEO_REGION','DATE_BEFORE','DATE_AFTER'
+                )),
     values      JSONB NOT NULL DEFAULT '[]',
     variation   TEXT NOT NULL,
     priority    INTEGER NOT NULL DEFAULT 0
 );
+
+-- Migration 007: multivariate flag variations
+CREATE TABLE IF NOT EXISTS flag_variations (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flag_id     UUID NOT NULL REFERENCES flags(id) ON DELETE CASCADE,
+  key         TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  weight      INT NOT NULL CHECK (weight >= 0 AND weight <= 10000),
+  description TEXT,
+  UNIQUE(flag_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_flag_variations_flag_id ON flag_variations(flag_id);
 
 -- Append-only audit log with Merkle chain
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -107,6 +122,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_env_ts ON audit_log(environment, created_at
 -- Block UPDATE/DELETE on audit_log
 CREATE OR REPLACE RULE no_audit_update AS ON UPDATE TO audit_log DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE no_audit_delete AS ON DELETE TO audit_log DO INSTEAD NOTHING;
+
+-- Migration 009: Rekor transparency log integration
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS rekor_log_id TEXT;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS rekor_log_index BIGINT;
 
 -- Change requests (four-eyes approval)
 CREATE TABLE IF NOT EXISTS change_requests (
@@ -148,7 +167,28 @@ CREATE TABLE IF NOT EXISTS service_tokens (
     revoked_at  TIMESTAMPTZ
 );
 
+-- Migration 008: pgvector embeddings for semantic search
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS embedding vector(768);
+CREATE INDEX IF NOT EXISTS idx_flags_embedding
+  ON flags USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100);
+
 -- Seed default project
 INSERT INTO projects (id, name, slug)
 VALUES ('00000000-0000-0000-0000-000000000001', 'Default', 'default')
 ON CONFLICT DO NOTHING;
+
+-- Migration 006: flag prerequisites (GrowthBook ParentConditions pattern)
+-- gate=true  → prerequisite blocks the entire feature evaluation if not met
+-- gate=false → prerequisite only skips the current targeting rule if not met
+CREATE TABLE IF NOT EXISTS flag_prerequisites (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flag_id           UUID NOT NULL REFERENCES flags(id) ON DELETE CASCADE,
+  prereq_flag_key   TEXT NOT NULL,
+  required_variation TEXT NOT NULL DEFAULT 'true',
+  gate              BOOLEAN NOT NULL DEFAULT true,
+  priority          INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(flag_id, prereq_flag_key)
+);
+CREATE INDEX IF NOT EXISTS idx_flag_prerequisites_flag_id ON flag_prerequisites(flag_id);

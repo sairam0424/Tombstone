@@ -1,20 +1,40 @@
 {
-  "version": "1.0",
-  "description": "Cross-language MurmurHash3 parity vectors for Tombstone SDKs. All SDKs must produce identical bucket assignments for these inputs.",
-  "hash_algorithm": "MurmurHash3 unsigned 32-bit, seed=0",
-  "input_format": "concat(flag_key, user_id) as UTF-8 bytes",
+  "version": "1.1",
+  "description": "Cross-language parity vectors for Tombstone SDKs. hashVersion 1 = MurmurHash3 (legacy). hashVersion 2 = double-FNV32a, 10,000-bucket (parallel-experiment bias fix).",
+  "v1": {
+    "hash_algorithm": "MurmurHash3 unsigned 32-bit, seed=0",
+    "bucket_modulus": 100,
+    "input_format": "concat(flag_key, user_id) as UTF-8 bytes"
+  },
+  "v2": {
+    "hash_algorithm": "double-FNV32a unsigned 32-bit (FNV-1a, FNV prime=16777619, offset=2166136261)",
+    "bucket_modulus": 10000,
+    "input_format": "inner = fnv32a(concat(flag_key, user_id)); outer = fnv32a(decimal_string(inner)); bucket = (outer % 10000) / 10000"
+  },
   "vectors": [
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 100, "expected_in_cohort": true, "note": "100% always true"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 0, "expected_in_cohort": false, "note": "0% always false"},
-    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "rollout_pct": 50, "expected_in_cohort": false, "note": "bucket > 50"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 50, "expected_in_cohort": true, "note": "bucket < 50"},
-    {"flag_key": "payment-gateway-fee-display", "user_id": "user-abc-123", "rollout_pct": 50, "expected_in_cohort": true},
-    {"flag_key": "max-cart-items", "user_id": "user-abc-123", "rollout_pct": 75, "expected_in_cohort": true},
-    {"flag_key": "max-cart-items", "user_id": "user-xyz-789", "rollout_pct": 25, "expected_in_cohort": false},
-    {"flag_key": "a", "user_id": "b", "rollout_pct": 50, "expected_in_cohort": true, "note": "minimal key and user_id — hash stability check"},
-    {"flag_key": "checkout-v2", "user_id": "", "rollout_pct": 50, "expected_in_cohort": false, "note": "empty user_id — must not panic, hash input is flag_key only"},
-    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "rollout_pct": 1, "expected_in_cohort": false, "note": "deep dot-notation key with long path"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 99, "expected_in_cohort": true, "note": "bucket < 99 — confirms sub-100 boundary"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "rollout_pct": 1, "expected_in_cohort": false, "note": "rollout_pct=1 — nearly everyone excluded"}
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 100, "expected_in_cohort": true, "note": "100% always true"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 0, "expected_in_cohort": false, "note": "0% always false"},
+    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": false, "note": "bucket > 50"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": true, "note": "bucket < 50"},
+    {"flag_key": "payment-gateway-fee-display", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": true},
+    {"flag_key": "max-cart-items", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 75, "expected_in_cohort": true},
+    {"flag_key": "max-cart-items", "user_id": "user-xyz-789", "hash_version": 1, "rollout_pct": 25, "expected_in_cohort": false},
+    {"flag_key": "a", "user_id": "b", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": true, "note": "minimal key and user_id — hash stability check"},
+    {"flag_key": "checkout-v2", "user_id": "", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": false, "note": "empty user_id — must not panic, hash input is flag_key only"},
+    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 1, "expected_in_cohort": false, "note": "deep dot-notation key with long path"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 99, "expected_in_cohort": true, "note": "bucket < 99 — confirms sub-100 boundary"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 1, "expected_in_cohort": false, "note": "rollout_pct=1 — nearly everyone excluded"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 100, "expected_bucket": 0.343, "expected_in_cohort": true, "note": "100% always true — v2 bucket=0.343"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 0, "expected_bucket": 0.343, "expected_in_cohort": false, "note": "0% always false"},
+    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.2433, "expected_in_cohort": true, "note": "bucket 0.2433 < 0.50 — in cohort"},
+    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 30, "expected_bucket": 0.343, "expected_in_cohort": false, "note": "bucket 0.343 >= 0.30 — out of cohort"},
+    {"flag_key": "experiment.new-checkout", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.7994, "expected_in_cohort": false, "note": "bucket 0.7994 >= 0.50 — parallel experiment, different assignment than checkout-v2"},
+    {"flag_key": "experiment.new-checkout", "user_id": "user-xyz-789", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.4766, "expected_in_cohort": true, "note": "bucket 0.4766 < 0.50 — parallel experiment in cohort"},
+    {"flag_key": "checkout-v2", "user_id": "", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.9683, "expected_in_cohort": false, "note": "empty userId — must not panic, hash input is flag_key only"},
+    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 1, "expected_bucket": 0.0136, "expected_in_cohort": false, "note": "dot-notation key — bucket 0.0136 >= 0.01"},
+    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 2, "expected_bucket": 0.0136, "expected_in_cohort": true, "note": "dot-notation key — bucket 0.0136 < 0.02"},
+    {"flag_key": "a", "user_id": "b", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.6912, "expected_in_cohort": false, "note": "minimal key/userId — bucket 0.6912 >= 0.50"},
+    {"flag_key": "feature-flag-1", "user_id": "user-stable-1", "hash_version": 2, "rollout_pct": 25, "expected_bucket": 0.2896, "expected_in_cohort": false, "note": "bucket 0.2896 >= 0.25 — out of cohort"},
+    {"flag_key": "feature-flag-1", "user_id": "user-stable-2", "hash_version": 2, "rollout_pct": 75, "expected_bucket": 0.5784, "expected_in_cohort": true, "note": "bucket 0.5784 < 0.75 — in cohort"}
   ]
 }

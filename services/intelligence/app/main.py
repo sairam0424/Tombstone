@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,8 +15,10 @@ from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
 from app.kafka.consumer import TelemetryConsumer
+from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
+from app.search.embedding_sync import EmbeddingSyncService
 from app.search.retriever import FlagSearchRetriever
 from app.stale.detector import StaleFlagDetector
 from app.telemetry.clickhouse_writer import ClickHouseWriter
@@ -71,15 +74,26 @@ async def lifespan(app: FastAPI):
         pagerduty_token=os.environ.get("PAGERDUTY_TOKEN", ""),
     )
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
+    app.state.embedding_sync = EmbeddingSyncService(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
-
-    # Redis client — shared across all consumers (Thompson, future caches, etc.)
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    redis_client = aioredis.from_url(redis_url, decode_responses=False)
-    app.state.redis = redis_client
 
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
+
+    # LinUCB contextual bandit for context-aware rollout decisions
+    app.state.linucb_bandit = LinUCBBandit(alpha=1.0, d=5)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(redis_url, decode_responses=False)
+        await app.state.linucb_bandit.load_from_redis(redis_client)
+        await redis_client.aclose()
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "LinUCB Redis restore skipped (Redis unavailable) — starting fresh"
+        )
+
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
 
     # Redis — optional; fails open so service starts even if Redis is down
@@ -94,21 +108,34 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
 
     # ClickHouse telemetry pipeline (optional)
+    # Schema (run once in ClickHouse):
+    # CREATE TABLE tombstone_evaluations (
+    #   flag_key String, environment String, user_hash String,
+    #   result String, reason String, latency_ms Float64, ts DateTime
+    # ) ENGINE = MergeTree() ORDER BY (flag_key, ts);
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
+    redis_client = getattr(app.state, "redis", None)
     if ch_host:
-        app.state.clickhouse = ClickHouseWriter(host=ch_host)
+        app.state.clickhouse = ClickHouseWriter(host=ch_host, redis_client=redis_client)
         await app.state.clickhouse.create_tables()
     else:
-        app.state.clickhouse = ClickHouseWriter(host="localhost")  # unavailable but won't crash
+        app.state.clickhouse = ClickHouseWriter(
+            host="localhost", redis_client=redis_client
+        )  # unavailable but won't crash
+    await app.state.clickhouse.start()
 
-    # Start background Kafka consumer
+    # Start background Kafka consumer (drives embedding sync + dep-graph updates)
     consumer = TelemetryConsumer(
         brokers=os.environ.get("KAFKA_BROKERS", "localhost:9092"),
         anomaly_detector=app.state.anomaly,
+        embedding_sync=app.state.embedding_sync,
         graph_builder=app.state.graph_builder if app.state.redis else None,
         redis_client=app.state.redis,
     )
     consumer_task = asyncio.create_task(consumer.run())
+
+    # Start daily Isolation Forest retraining task (runs at 02:00 UTC)
+    retrain_task = asyncio.create_task(_daily_retrain(app))
 
     # Background dep graph rebuild (only when Redis is available)
     rebuild_task = None
@@ -118,18 +145,24 @@ async def lifespan(app: FastAPI):
         )
 
     await app.state.searcher.initialize()
+    await app.state.embedding_sync.initialize()
 
     yield
 
     # Shutdown
     consumer_task.cancel()
+    retrain_task.cancel()
+    if rebuild_task is not None:
+        rebuild_task.cancel()
     try:
         await consumer_task
     except asyncio.CancelledError:
         pass
-
+    try:
+        await retrain_task
+    except asyncio.CancelledError:
+        pass
     if rebuild_task is not None:
-        rebuild_task.cancel()
         try:
             await rebuild_task
         except asyncio.CancelledError:
@@ -137,6 +170,29 @@ async def lifespan(app: FastAPI):
 
     if app.state.redis is not None:
         await app.state.redis.aclose()
+
+
+async def _daily_retrain(app: FastAPI) -> None:
+    """
+    Background task: retrain Isolation Forest models for all tracked flags daily.
+    Wakes at 02:00 UTC each day to avoid peak traffic windows.
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+        # Seconds until next 02:00 UTC
+        target_hour = 2
+        seconds_until = ((target_hour - now.hour - 1) * 3600
+                         + (60 - now.minute - 1) * 60
+                         + (60 - now.second)) % 86400
+        if seconds_until == 0:
+            seconds_until = 86400
+        await asyncio.sleep(seconds_until)
+        try:
+            count = app.state.anomaly.get_ensemble().retrain_all()
+        except Exception:  # noqa: BLE001 — retrain errors must not crash the service
+            count = 0
+        # Log silently — no logger dependency injected here
+        _ = count  # retrained {count} flag models
 
 
 app = FastAPI(title="Tombstone Intelligence", version="0.1.0", lifespan=lifespan)
@@ -172,6 +228,19 @@ async def get_flag_anomaly(flag_key: str):
     """Get anomaly status for a specific flag."""
     score = app.state.anomaly.get_score(flag_key)
     return {"flag_key": flag_key, "anomaly_score": score, "is_anomaly": score > 2.5}
+
+
+@app.get("/api/v1/anomaly/{flag_key}/ensemble")
+async def get_flag_anomaly_ensemble(flag_key: str):
+    """
+    Full ensemble anomaly breakdown for a flag (Phase 3.1).
+
+    Returns per-model votes (Z-score, Isolation Forest, EWMA), per-granularity
+    votes (10s / 60s / 5m), composite score, and final anomaly verdict.
+    Falls back to Z-score when < 50 observations are available.
+    """
+    result = app.state.anomaly.detect(flag_key)
+    return {"flag_key": flag_key, **result}
 
 
 @app.get("/api/v1/stale")

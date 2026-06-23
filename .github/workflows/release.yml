@@ -1,0 +1,46 @@
+name: Release + Supply Chain Security
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write  # needed for keyless cosign signing
+  packages: write
+
+jobs:
+  sbom-and-sign:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package:
+          - path: packages/sdks/@flagmind/core
+            name: tombstone-core
+          - path: packages/sdks/@flagmind/react
+            name: tombstone-react
+          - path: packages/sdks/@flagmind/edge
+            name: tombstone-edge
+          - path: services/flag-api
+            name: tombstone-flag-api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install syft (SBOM generator)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM (CycloneDX)
+        run: syft ${{ matrix.package.path }} -o cyclonedx-json > ${{ matrix.package.name }}-sbom.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SBOM (keyless via GitHub OIDC)
+        run: cosign sign-blob --yes ${{ matrix.package.name }}-sbom.json --bundle ${{ matrix.package.name }}-sbom.bundle
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.package.name }}-sbom.json
+            ${{ matrix.package.name }}-sbom.bundle
