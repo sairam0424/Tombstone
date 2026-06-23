@@ -1,0 +1,26 @@
+name: Loop — Rollout Advisor
+on:
+  schedule:
+    - cron: '0 8 * * 1-5'   # weekdays at 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  rollout-advisor:
+    runs-on: ubuntu-latest
+    if: vars.TOMBSTONE_INTELLIGENCE_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run rollout advisor collector
+        env:
+          INTELLIGENCE_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          EVALUATOR_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
+        run: bash scripts/loop-rollout-advisor.sh
+
+      - name: Commit metrics + signals if changed
+        run: |
+          git config user.name "tombstone-loop[bot]"
+          git config user.email "loop@tombstone.io"
+          git add domains/rollout-advisor/metrics/ signals/ LOG.md
+          git diff --cached --quiet || git commit -m "chore(loop): rollout-advisor run ${{ github.run_id }}"
+          git push origin HEAD:develop || true
