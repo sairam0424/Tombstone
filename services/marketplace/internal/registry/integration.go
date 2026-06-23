@@ -1,14 +1,24 @@
 package registry
 
-import "sync"
+import (
+	"context"
+	"encoding/json"
+	"sync"
+
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+)
+
+// redisKey is the Redis hash that stores all persisted integrations.
+const redisKey = "tombstone:marketplace:integrations"
 
 // IntegrationStatus represents the installation state of an integration.
 type IntegrationStatus string
 
 const (
-	StatusAvailable  IntegrationStatus = "available"
-	StatusInstalled  IntegrationStatus = "installed"
-	StatusDisabled   IntegrationStatus = "disabled"
+	StatusAvailable IntegrationStatus = "available"
+	StatusInstalled IntegrationStatus = "installed"
+	StatusDisabled  IntegrationStatus = "disabled"
 )
 
 // EventType represents flag lifecycle events dispatched to webhooks.
@@ -113,20 +123,65 @@ var firstPartyIntegrations = []Integration{
 }
 
 // Registry holds all registered integrations (first-party + third-party).
+// The in-memory map is the read cache; Redis is the durable store.
 type Registry struct {
 	mu           sync.RWMutex
 	integrations map[string]Integration
+	rdb          *redis.Client
+	logger       *zap.Logger
 }
 
 // NewRegistry creates a Registry seeded with all first-party integrations.
-func NewRegistry() *Registry {
+// rdb may be nil — the registry will operate in ephemeral in-memory mode.
+func NewRegistry(rdb *redis.Client, logger *zap.Logger) *Registry {
 	r := &Registry{
 		integrations: make(map[string]Integration, len(firstPartyIntegrations)),
+		rdb:          rdb,
+		logger:       logger,
 	}
 	for _, i := range firstPartyIntegrations {
 		r.integrations[i.ID] = i
 	}
 	return r
+}
+
+// LoadFromRedis reads all persisted integrations from Redis and merges them
+// into the in-memory map. Entries that fail to unmarshal are logged and skipped.
+// Call this once at startup, before serving traffic.
+func (r *Registry) LoadFromRedis(ctx context.Context) {
+	if r.rdb == nil {
+		return
+	}
+
+	entries, err := r.rdb.HGetAll(ctx, redisKey).Result()
+	if err != nil {
+		r.logger.Warn("registry: failed to load from Redis",
+			zap.String("key", redisKey),
+			zap.Error(err),
+		)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	loaded := 0
+	for id, raw := range entries {
+		var i Integration
+		if err := json.Unmarshal([]byte(raw), &i); err != nil {
+			r.logger.Warn("registry: skipping malformed entry from Redis",
+				zap.String("id", id),
+				zap.Error(err),
+			)
+			continue
+		}
+		r.integrations[i.ID] = i
+		loaded++
+	}
+
+	r.logger.Info("registry: loaded integrations from Redis",
+		zap.Int("count", loaded),
+	)
 }
 
 // List returns a snapshot of all integrations.
@@ -175,6 +230,7 @@ func (r *Registry) Install(id, webhookURL string, config map[string]string) bool
 		IsFirstParty: existing.IsFirstParty,
 	}
 	r.integrations[id] = updated
+	r.persistToRedis(id, updated)
 	return true
 }
 
@@ -202,6 +258,7 @@ func (r *Registry) Uninstall(id string) bool {
 		IsFirstParty: existing.IsFirstParty,
 	}
 	r.integrations[id] = updated
+	r.deleteFromRedis(id)
 	return true
 }
 
@@ -216,6 +273,7 @@ func (r *Registry) Register(i Integration) bool {
 	}
 	i.IsFirstParty = false
 	r.integrations[i.ID] = i
+	r.persistToRedis(i.ID, i)
 	return true
 }
 
@@ -237,4 +295,43 @@ func (r *Registry) InstalledWebhooks(event EventType) []Integration {
 		}
 	}
 	return out
+}
+
+// persistToRedis marshals integration i and writes it to the Redis hash.
+// Must be called with r.mu held (write lock).
+func (r *Registry) persistToRedis(id string, i Integration) {
+	if r.rdb == nil {
+		return
+	}
+
+	raw, err := json.Marshal(i)
+	if err != nil {
+		r.logger.Error("registry: failed to marshal integration for Redis",
+			zap.String("id", id),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if err := r.rdb.HSet(context.Background(), redisKey, id, string(raw)).Err(); err != nil {
+		r.logger.Error("registry: failed to persist integration to Redis",
+			zap.String("id", id),
+			zap.Error(err),
+		)
+	}
+}
+
+// deleteFromRedis removes an integration entry from the Redis hash.
+// Must be called with r.mu held (write lock).
+func (r *Registry) deleteFromRedis(id string) {
+	if r.rdb == nil {
+		return
+	}
+
+	if err := r.rdb.HDel(context.Background(), redisKey, id).Err(); err != nil {
+		r.logger.Error("registry: failed to remove integration from Redis",
+			zap.String("id", id),
+			zap.Error(err),
+		)
+	}
 }

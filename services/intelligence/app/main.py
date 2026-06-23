@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -20,6 +21,46 @@ from app.stale.detector import StaleFlagDetector
 from app.telemetry.clickhouse_writer import ClickHouseWriter
 from app.telemetry.routes import router as telemetry_router
 
+logger = logging.getLogger(__name__)
+
+
+async def _try_redis_connect(url: str):
+    """Create a redis.asyncio client; return None if unavailable (fails open)."""
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(url, decode_responses=False)
+        await client.ping()
+        return client
+    except Exception as exc:
+        logger.warning("Redis unavailable (%s) — dep graph will use DB fallback", exc)
+        return None
+
+
+async def _depgraph_rebuild_background(builder: DependencyGraphBuilder, redis_client) -> None:
+    """Background task: rebuild dep graph on startup, then daily at 02:00 UTC."""
+    pool = await builder._get_pool()
+    try:
+        await builder.rebuild_all(pool, redis_client)
+    except Exception as exc:
+        logger.warning("dep graph initial rebuild failed: %s", exc)
+
+    while True:
+        now_ts = asyncio.get_event_loop().time()
+        import time as _t
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+        # Next 02:00 UTC
+        next_2am = now.replace(hour=2, minute=0, second=0, microsecond=0)
+        if next_2am <= now:
+            next_2am = next_2am + _dt.timedelta(days=1)
+        sleep_secs = (next_2am - now).total_seconds()
+        await asyncio.sleep(sleep_secs)
+        try:
+            pool = await builder._get_pool()
+            await builder.rebuild_all(pool, redis_client)
+        except Exception as exc:
+            logger.warning("dep graph scheduled rebuild failed: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,9 +73,25 @@ async def lifespan(app: FastAPI):
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
+    # Redis client — shared across all consumers (Thompson, future caches, etc.)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    redis_client = aioredis.from_url(redis_url, decode_responses=False)
+    app.state.redis = redis_client
+
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
+
+    # Redis — optional; fails open so service starts even if Redis is down
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    app.state.redis = await _try_redis_connect(redis_url)
+
+    # Restore Thompson posteriors from Redis (fails open)
+    if app.state.redis is not None:
+        try:
+            await app.state.rollout_engine.load_all_from_redis(app.state.redis)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
 
     # ClickHouse telemetry pipeline (optional)
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
@@ -48,8 +105,17 @@ async def lifespan(app: FastAPI):
     consumer = TelemetryConsumer(
         brokers=os.environ.get("KAFKA_BROKERS", "localhost:9092"),
         anomaly_detector=app.state.anomaly,
+        graph_builder=app.state.graph_builder if app.state.redis else None,
+        redis_client=app.state.redis,
     )
     consumer_task = asyncio.create_task(consumer.run())
+
+    # Background dep graph rebuild (only when Redis is available)
+    rebuild_task = None
+    if app.state.redis is not None:
+        rebuild_task = asyncio.create_task(
+            _depgraph_rebuild_background(app.state.graph_builder, app.state.redis)
+        )
 
     await app.state.searcher.initialize()
 
@@ -61,6 +127,16 @@ async def lifespan(app: FastAPI):
         await consumer_task
     except asyncio.CancelledError:
         pass
+
+    if rebuild_task is not None:
+        rebuild_task.cancel()
+        try:
+            await rebuild_task
+        except asyncio.CancelledError:
+            pass
+
+    if app.state.redis is not None:
+        await app.state.redis.aclose()
 
 
 app = FastAPI(title="Tombstone Intelligence", version="0.1.0", lifespan=lifespan)
@@ -119,9 +195,30 @@ async def build_dependency_graph(request: Request, environment: str = "productio
         "generated_at": graph.generated_at, "event_count": graph.event_count,
     }
 
+
 @app.get("/api/v1/dependency-graph/impact/{flag_key}")
 async def get_flag_impact(flag_key: str, request: Request, environment: str = "production", days: int = 30):
-    return await request.app.state.graph_builder.get_impact(flag_key, environment, days)
+    """Return co-changed flags for flag_key.
+
+    Uses Redis sorted-set O(log n) lookup when Redis is available and the key
+    is warm.  Falls back to the original O(n²) DB scan otherwise.
+    """
+    redis_client = request.app.state.redis
+    builder: DependencyGraphBuilder = request.app.state.graph_builder
+
+    if redis_client is not None:
+        fast_result = await builder.get_impact_fast(flag_key, redis_client)
+        if fast_result is not None:
+            return {
+                "flag_key": flag_key,
+                "environment": environment,
+                "source": "redis",
+                "co_changed_with": fast_result,
+            }
+        # Redis key absent (cold start) — fall through to DB
+        logger.info("dep graph Redis miss for %s — falling back to DB", flag_key)
+
+    return await builder.get_impact(flag_key, environment, days)
 
 
 @app.post("/api/v1/correlate")
