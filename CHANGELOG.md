@@ -277,7 +277,8 @@ Initial repository scaffolding. Project initialized as **FlagMind** before renam
 
 ---
 
-[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/sairam0424/Tombstone/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/sairam0424/Tombstone/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/sairam0424/Tombstone/compare/v0.1.0...v1.0.0
