@@ -9,6 +9,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- Argos-inspired 3-agent LLM anomaly rule generation (Phase 3.2)
+  - `POST /api/v1/intelligence/generate-rule` endpoint
+  - Detection Agent -> Repair Agent (syntax-validated) -> Review Agent (precision/recall)
+  - Requires `ANTHROPIC_API_KEY`; graceful 503 when absent
+  - Generated rules stored as `signals/rule-candidate-{flag}-{date}.md` with `status: pending-approval`, never auto-activated
+  - `services/intelligence/pyproject.toml` gains optional `llm` extra (`anthropic>=0.55.0`)
+
 ---
 
 ## [2.0.1] - 2026-06-23
