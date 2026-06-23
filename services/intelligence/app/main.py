@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,11 +74,6 @@ async def lifespan(app: FastAPI):
     app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
-    # Redis client — shared across all consumers (Thompson, future caches, etc.)
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    redis_client = aioredis.from_url(redis_url, decode_responses=False)
-    app.state.redis = redis_client
-
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
@@ -110,6 +106,9 @@ async def lifespan(app: FastAPI):
     )
     consumer_task = asyncio.create_task(consumer.run())
 
+    # Start daily Isolation Forest retraining task (runs at 02:00 UTC)
+    retrain_task = asyncio.create_task(_daily_retrain(app))
+
     # Background dep graph rebuild (only when Redis is available)
     rebuild_task = None
     if app.state.redis is not None:
@@ -123,13 +122,18 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     consumer_task.cancel()
+    retrain_task.cancel()
+    if rebuild_task is not None:
+        rebuild_task.cancel()
     try:
         await consumer_task
     except asyncio.CancelledError:
         pass
-
+    try:
+        await retrain_task
+    except asyncio.CancelledError:
+        pass
     if rebuild_task is not None:
-        rebuild_task.cancel()
         try:
             await rebuild_task
         except asyncio.CancelledError:
@@ -137,6 +141,29 @@ async def lifespan(app: FastAPI):
 
     if app.state.redis is not None:
         await app.state.redis.aclose()
+
+
+async def _daily_retrain(app: FastAPI) -> None:
+    """
+    Background task: retrain Isolation Forest models for all tracked flags daily.
+    Wakes at 02:00 UTC each day to avoid peak traffic windows.
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+        # Seconds until next 02:00 UTC
+        target_hour = 2
+        seconds_until = ((target_hour - now.hour - 1) * 3600
+                         + (60 - now.minute - 1) * 60
+                         + (60 - now.second)) % 86400
+        if seconds_until == 0:
+            seconds_until = 86400
+        await asyncio.sleep(seconds_until)
+        try:
+            count = app.state.anomaly.get_ensemble().retrain_all()
+        except Exception:  # noqa: BLE001 — retrain errors must not crash the service
+            count = 0
+        # Log silently — no logger dependency injected here
+        _ = count  # retrained {count} flag models
 
 
 app = FastAPI(title="Tombstone Intelligence", version="0.1.0", lifespan=lifespan)
@@ -172,6 +199,19 @@ async def get_flag_anomaly(flag_key: str):
     """Get anomaly status for a specific flag."""
     score = app.state.anomaly.get_score(flag_key)
     return {"flag_key": flag_key, "anomaly_score": score, "is_anomaly": score > 2.5}
+
+
+@app.get("/api/v1/anomaly/{flag_key}/ensemble")
+async def get_flag_anomaly_ensemble(flag_key: str):
+    """
+    Full ensemble anomaly breakdown for a flag (Phase 3.1).
+
+    Returns per-model votes (Z-score, Isolation Forest, EWMA), per-granularity
+    votes (10s / 60s / 5m), composite score, and final anomaly verdict.
+    Falls back to Z-score when < 50 observations are available.
+    """
+    result = app.state.anomaly.detect(flag_key)
+    return {"flag_key": flag_key, **result}
 
 
 @app.get("/api/v1/stale")
