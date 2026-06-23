@@ -23,6 +23,7 @@ import (
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
+	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 )
 
 func main() {
@@ -149,6 +150,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
 	})
+
+	// Per-flag SLO dashboard endpoint
+	sloHandler := apiv1.NewHandler(rdb, breaker, logger)
+	r.Get("/api/v1/flags/{key}/slo", sloHandler.HandleFlagSLO)
 
 	srv := &http.Server{
 		Addr: ":" + port,
