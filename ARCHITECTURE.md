@@ -53,10 +53,10 @@ These four domain loops are the primary workstreams for Tombstone's intelligence
 
 | Domain | Goal | Cadence | Collector |
 |---|---|---|---|
-| `flag-cleanup` | Eliminate stale flags before they become incidents | weekly | `flag-api /api/v1/stale` |
+| `flag-cleanup` | Eliminate stale flags before they become incidents | daily | `flag-api /api/v1/stale` |
 | `incident-response` | Correlate production incidents to causal flags; auto-rollback within SLO | on-trigger | `evaluator /api/v1/flags/{key}/slo` |
 | `rollout-advisor` | Maximize experiment velocity and minimize collision risk | daily | `intelligence /api/v1/anomaly/{key}` |
-| `governance` | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` |
+| `governance` (planned) | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` |
 
 ### Collectors (data sources)
 
@@ -64,7 +64,7 @@ Deterministic collectors write numeric data. Agents read and interpret.
 
 | Collector | Endpoint | Data written |
 |---|---|---|
-| stale-flag collector | `flag-api :8081/api/v1/stale` | list of flags not evaluated in >30 days |
+| stale-flag collector | `intelligence :8083/api/v1/stale` | list of flags not evaluated in >30 days |
 | SLO collector | `evaluator :8082/api/v1/flags/{key}/slo` | error rate, p99, circuit-breaker state |
 | anomaly collector | `intelligence :8083/api/v1/anomaly/{key}` | ensemble anomaly score, drift delta |
 | audit collector | `flag-api :8081/api/v1/audit` | approval lag, coverage gaps, tombstone count |

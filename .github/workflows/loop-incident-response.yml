@@ -13,6 +13,8 @@ on:
 jobs:
   incident-response:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: vars.TOMBSTONE_EVALUATOR_URL != ''
     steps:
       - uses: actions/checkout@v4
@@ -36,5 +38,4 @@ jobs:
           git config user.name "tombstone-loop[bot]"
           git config user.email "loop@tombstone.io"
           git add docs/ signals/ domains/incident-response/metrics/ LOG.md
-          git diff --cached --quiet || git commit -m "chore(loop): incident-response ${INPUT_FLAG_KEY} ${INPUT_RUN_ID}"
-          git push origin HEAD:develop || true
+          git diff --cached --quiet || (git commit -m "chore(loop): incident-response ${INPUT_FLAG_KEY} ${INPUT_RUN_ID}" && git push origin HEAD:develop)

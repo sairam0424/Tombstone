@@ -11,6 +11,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FLAG_KEY="${1:?Usage: loop-incident-response.sh <flag_key> <environment>}"
 ENVIRONMENT="${2:-production}"
+
+# Sanitize FLAG_KEY to prevent shell expansion in heredocs
+FLAG_KEY=$(printf '%s' "$FLAG_KEY" | tr -cd 'a-zA-Z0-9._-')
+ENVIRONMENT=$(printf '%s' "$ENVIRONMENT" | tr -cd 'a-zA-Z0-9._-')
+[ -z "$FLAG_KEY" ] && { printf "[loop-incident-response] ERROR: FLAG_KEY became empty after sanitization — check your input\n" >&2; exit 1; }
+
 DATE="$(date +%Y-%m-%d)"
 TS="$(date +%Y-%m-%dT%H:%M:%SZ)"
 

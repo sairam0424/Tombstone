@@ -7,6 +7,8 @@ on:
 jobs:
   flag-cleanup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Only run when TOMBSTONE_INTELLIGENCE_URL secret is configured
     if: vars.TOMBSTONE_INTELLIGENCE_URL != ''
     steps:
@@ -23,5 +25,4 @@ jobs:
           git config user.name "tombstone-loop[bot]"
           git config user.email "loop@tombstone.io"
           git add domains/flag-cleanup/metrics/ signals/ LOG.md
-          git diff --cached --quiet || git commit -m "chore(loop): flag-cleanup run ${{ github.run_id }}"
-          git push origin HEAD:develop || true
+          git diff --cached --quiet || (git commit -m "chore(loop): flag-cleanup run ${{ github.run_id }}" && git push origin HEAD:develop)

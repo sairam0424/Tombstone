@@ -43,8 +43,6 @@ log "Recommendations found: $REC_COUNT"
 
 mkdir -p "$(dirname "$METRICS_FILE")"
 mkdir -p "$SIGNALS_DIR"
-SIGNALS_CREATED=0
-SIGNALS_BLOCKED=0
 
 # --- 3. Process each recommendation ---
 echo "$RECS_JSON" | python3 -c "

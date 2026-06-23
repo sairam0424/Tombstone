@@ -100,3 +100,11 @@ proto · infra · helm · terraform · auth
 - All feature branches are short-lived — merge within days, not weeks.
 - Hotfix branches are backported to `develop` immediately after merging to `main`.
 - Branch names use kebab-case: `feature/blast-radius-ui`, `hotfix/circuit-breaker-race`.
+
+## Exceptions
+
+### Loop automation commits
+`tombstone-loop[bot]` automated commits to `develop` for loop metrics, signals, and post-mortem docs are permitted. These are append-only data writes (JSONL metrics, markdown signals, LOG.md entries) — not code changes. They bypass the feature-branch rule because:
+- They are triggered by events (circuit trips, daily crons), not human development
+- Each write is idempotent and append-only
+- They do NOT trigger CI runs on their own push (the `if:` guard prevents it)
