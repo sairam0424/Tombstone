@@ -33,3 +33,7 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 ## 2026-06-23 · Bootstrap loop-engineer knowledge base substrate · #harness #loop #infra
 What: Created signals/, docs/, domains/ scaffolding plus LOG.md and ARCHITECTURE.md for Loop-Engineer v2 integration.
 Refs: [signals/README.md](signals/README.md) (new), [docs/README.md](docs/README.md) (new), [domains/README.md](domains/README.md) (new), [ARCHITECTURE.md](ARCHITECTURE.md) (new)
+
+## 2026-06-23 · incident-response: test-flag · #loop #incident
+What: Circuit trip documented. Error rate: 0. Correlated: none.
+Refs: docs/incident-2026-06-23-test-flag.md (new), domains/incident-response/metrics/trips.jsonl (updated).

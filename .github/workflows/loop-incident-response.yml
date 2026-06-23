@@ -1,0 +1,40 @@
+name: Loop — Incident Response
+on:
+  workflow_dispatch:
+    inputs:
+      flag_key:
+        description: 'Flag key that tripped'
+        required: true
+      environment:
+        description: 'Environment (production/staging)'
+        required: false
+        default: 'production'
+
+jobs:
+  incident-response:
+    runs-on: ubuntu-latest
+    if: vars.TOMBSTONE_EVALUATOR_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Document incident
+        env:
+          EVALUATOR_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
+          INTELLIGENCE_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          FLAG_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          # Inputs bound as env vars — never interpolated directly into shell commands
+          INPUT_FLAG_KEY: ${{ github.event.inputs.flag_key }}
+          INPUT_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          bash scripts/loop-incident-response.sh "$INPUT_FLAG_KEY" "$INPUT_ENVIRONMENT"
+
+      - name: Commit incident doc
+        env:
+          INPUT_FLAG_KEY: ${{ github.event.inputs.flag_key }}
+          INPUT_RUN_ID: ${{ github.run_id }}
+        run: |
+          git config user.name "tombstone-loop[bot]"
+          git config user.email "loop@tombstone.io"
+          git add docs/ signals/ domains/incident-response/metrics/ LOG.md
+          git diff --cached --quiet || git commit -m "chore(loop): incident-response ${INPUT_FLAG_KEY} ${INPUT_RUN_ID}"
+          git push origin HEAD:develop || true
