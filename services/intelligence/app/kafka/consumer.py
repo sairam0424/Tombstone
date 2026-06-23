@@ -1,14 +1,25 @@
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from aiokafka import AIOKafkaConsumer
 
 from app.anomaly.detector import AnomalyDetector
 
+logger = logging.getLogger(__name__)
 
 TOPIC_FLAG_EVALUATED = "tombstone.flag.evaluated"
+TOPIC_FLAG_CHANGED = "tombstone.flag.changed"
 GROUP_ID = "intelligence-anomaly"
+
+# Event types that constitute a "flag change" for dep-graph purposes
+FLAG_CHANGE_EVENT_TYPES = frozenset({
+    "flag_environment_updated",
+    "kill_switch_activated",
+    "flag_created",
+})
 
 
 @dataclass
@@ -22,21 +33,34 @@ class EvaluationEvent:
 
 class TelemetryConsumer:
     """
-    Consumes tombstone.flag.evaluated events from Kafka.
-    Feeds aggregated counts to the AnomalyDetector every 10 seconds.
+    Consumes tombstone.flag.evaluated and tombstone.flag.changed events from Kafka.
+
+    - Feeds aggregated evaluation counts to AnomalyDetector every 10 seconds.
+    - On flag-change events, calls DependencyGraphBuilder.update_on_flag_change()
+      to maintain the Redis dep-graph sorted sets incrementally.
+
     Follows the Graph-Forge aiokafka pattern (manual commit, OTel headers).
     """
 
-    def __init__(self, brokers: str, anomaly_detector: AnomalyDetector):
+    def __init__(
+        self,
+        brokers: str,
+        anomaly_detector: AnomalyDetector,
+        graph_builder=None,
+        redis_client=None,
+    ):
         self._brokers = brokers
         self._detector = anomaly_detector
+        self._graph_builder = graph_builder
+        self._redis_client = redis_client
         self._consumer: AIOKafkaConsumer | None = None
         self._window: dict[str, dict] = {}  # flag_key:env -> {errors, total}
         self._flush_interval = 10  # seconds
 
     async def run(self) -> None:
+        topics = [TOPIC_FLAG_EVALUATED, TOPIC_FLAG_CHANGED]
         self._consumer = AIOKafkaConsumer(
-            TOPIC_FLAG_EVALUATED,
+            *topics,
             bootstrap_servers=self._brokers,
             group_id=GROUP_ID,
             enable_auto_commit=False,
@@ -47,7 +71,10 @@ class TelemetryConsumer:
         flush_task = asyncio.create_task(self._flush_loop())
         try:
             async for msg in self._consumer:
-                await self._handle(msg.value)
+                if msg.topic == TOPIC_FLAG_CHANGED:
+                    await self._handle_flag_change(msg.value)
+                else:
+                    await self._handle(msg.value)
                 await self._consumer.commit()
         except asyncio.CancelledError:
             pass
@@ -64,6 +91,42 @@ class TelemetryConsumer:
         self._window[window_key]["total"] += 1
         if payload.get("is_error", False):
             self._window[window_key]["errors"] += 1
+
+    async def _handle_flag_change(self, payload: dict) -> None:
+        """Process a flag-change event and update the Redis dep-graph."""
+        if self._graph_builder is None or self._redis_client is None:
+            return
+
+        event_type = payload.get("event_type", "")
+        if event_type not in FLAG_CHANGE_EVENT_TYPES:
+            return
+
+        flag_key = payload.get("flag_key") or payload.get("key", "")
+        environment = payload.get("environment", "production")
+        if not flag_key:
+            return
+
+        # changed_at: prefer explicit field, fall back to now
+        changed_at_raw = payload.get("changed_at") or payload.get("created_at")
+        if changed_at_raw:
+            try:
+                changed_at = datetime.fromisoformat(str(changed_at_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                changed_at = datetime.now(tz=timezone.utc)
+        else:
+            changed_at = datetime.now(tz=timezone.utc)
+
+        try:
+            await self._graph_builder.update_on_flag_change(
+                flag_key=flag_key,
+                environment=environment,
+                changed_at=changed_at,
+                redis_client=self._redis_client,
+            )
+        except Exception as exc:
+            logger.warning(
+                "dep graph incremental update failed for %s: %s", flag_key, exc
+            )
 
     async def _flush_loop(self) -> None:
         while True:
