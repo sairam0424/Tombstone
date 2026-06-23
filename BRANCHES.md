@@ -1,19 +1,21 @@
 # Tombstone — Branch Strategy
 
-## Current State (v2.0.1)
+## Current State (v2.1.0)
 
 | Branch | Status | HEAD |
 |--------|--------|------|
-| main | production (v2.0.1) | Merge pull request #40 from sairam0424/feature/v2-complete-integration |
+| main | production (v2.1.0) | Merge pull request #48 from sairam0424/feature/v2.1.0-complete (2026-06-24) |
 | develop | integration (in sync with main) | same as main |
 
-All `v2-phase/*` branches have been merged and closed. The v2.0.1 release ships
-the full platform: 8 services (flag-api, gateway, evaluator, intelligence,
-gitops-sync, ast-rewriter, marketplace, tombstone-operator), the v2 5-step
-evaluation engine, ensemble anomaly detection, the MCP server, all SDKs
-(@tombstone/core, @tombstone/react, @tombstone/edge, @tombstone/eval, Python,
-Ruby, Java, .NET), Kubernetes operator, Helm multi-region charts, and SLSA
-Level 2 supply-chain hardening.
+All `v2-phase/*` branches have been merged and closed. All v2.1.0 phases are
+complete. The v2.1.0 release ships the full platform: 8 services (flag-api,
+gateway, evaluator, intelligence, gitops-sync, ast-rewriter, marketplace,
+tombstone-operator), the v2 5-step evaluation engine, ensemble anomaly
+detection, the MCP server, all SDKs (@tombstone/core, @tombstone/react,
+@tombstone/edge, @tombstone/eval, Python, Ruby, Java, .NET), Kubernetes
+operator, Helm multi-region charts, SLSA Level 2 supply-chain hardening, and
+the Loop-Engineer governance harness (flag-cleanup, incident-response,
+rollout-advisor, governance loops).
 
 ## Branch Structure
 

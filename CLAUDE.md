@@ -213,9 +213,17 @@ Charter, backlog, and timeline live in `domains/<name>/README.md`.
 ### Active loops
 | Loop | Trigger | Script | What it does |
 |------|---------|--------|-------------|
-| flag-cleanup | daily 02:00 UTC | `scripts/loop-flag-cleanup.sh` | Detects stale flags, creates signals, metrics |
-| incident-response | circuit trip event | `scripts/loop-incident-response.sh <key> <env>` | Post-mortem doc + repeat-offender signal |
-| rollout-advisor | daily 08:00 UTC | `scripts/loop-rollout-advisor.sh` | ML recommendation review + blast radius check |
+| flag-cleanup | daily 02:00 UTC | `scripts/loop-flag-cleanup.sh` | Detects stale flags (100% for 30+ days), writes metrics, creates signals when count > 5 |
+| incident-response | circuit trip event | `scripts/loop-incident-response.sh <key> <env>` | Post-mortem doc + causal correlation + repeat-offender signal |
+| rollout-advisor | weekdays 08:00 UTC | `scripts/loop-rollout-advisor.sh` | ML recommendation review + blast radius check + signals |
+| governance | weekly Monday 06:00 UTC | `scripts/loop-governance.sh` | Health score + stale count + SOC2 evidence + alert signals |
+
+### Activation (set these GitHub Actions repo variables)
+- `TOMBSTONE_INTELLIGENCE_URL` → flag-cleanup, rollout-advisor, governance
+- `TOMBSTONE_EVALUATOR_URL` → incident-response
+- `TOMBSTONE_API_URL` → flag-api base URL for all loops
+- `SLACK_BOT_TOKEN` + `SLACK_SIGNING_SECRET` → interactive Slack app
+- `ANTHROPIC_API_KEY` → Argos rule generation endpoint
 
 ### Dev stack
 ```bash
