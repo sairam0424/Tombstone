@@ -62,7 +62,7 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
 
   it('TARGET_MATCH: rule attribute=plan IN [pro,enterprise]', () => {
     const result = engine.evaluate(activeFlag(100), [
-      { id: 'r1', attribute: 'plan', operator: 'IN', values: ['pro', 'enterprise'], variation: 'enabled', priority: 10 }
+      { id: 'r1', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['pro', 'enterprise'], variation: 'enabled', priority: 10 }
     ], ctx, false, 'test-flag');
     // plan=pro now hits Step 4 RULE_MATCH (not TARGET_MATCH — targetList is Step 3)
     assert.equal(result.reason, 'RULE_MATCH');
@@ -71,9 +71,54 @@ describe('EvaluationEngine — legacy signature (flagState, rules, ctx, default,
 
   it('falls through when targeting rule does not match', () => {
     const result = engine.evaluate(activeFlag(100), [
-      { id: 'r1', attribute: 'plan', operator: 'IN', values: ['enterprise'], variation: 'enabled', priority: 10 }
+      { id: 'r1', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['enterprise'], variation: 'enabled', priority: 10 }
     ], ctx, false, 'test-flag');
     // plan=pro not in ['enterprise'], falls through to rollout
+    assert.equal(result.reason, 'FALLTHROUGH');
+  });
+
+  it('TARGET_MATCH: dot-notation attribute (geo.country)', () => {
+    const geoCtx: EvaluationContext = { userId: 'user-geo', geo: { country: 'US' } };
+    const result = engine.evaluate(activeFlag(100), [
+      { id: 'r2', ruleType: 'CUSTOM', attribute: 'geo.country', operator: 'IN', values: ['US', 'CA'], variation: 'us-variant', priority: 5 }
+    ], geoCtx, false, 'test-flag');
+    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.value, 'us-variant');
+  });
+
+  it('TARGET_MATCH: EQ operator', () => {
+    const result = engine.evaluate(activeFlag(100), [
+      { id: 'r3', ruleType: 'USER', attribute: 'userId', operator: 'EQ', values: ['user-abc'], variation: 'user-variant', priority: 1 }
+    ], ctx, false, 'test-flag');
+    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.value, 'user-variant');
+  });
+
+  it('TARGET_MATCH: lower priority wins over higher priority number', () => {
+    // Rule with priority 1 should beat priority 10
+    const result = engine.evaluate(activeFlag(100), [
+      { id: 'r-high', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'high-prio', priority: 1 },
+      { id: 'r-low', ruleType: 'CUSTOM', attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'low-prio', priority: 10 },
+    ], ctx, false, 'test-flag');
+    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.value, 'high-prio');
+  });
+
+  it('TARGET_MATCH: GTE operator on numeric attribute', () => {
+    const numCtx: EvaluationContext = { userId: 'user-num', attrs: { score: '95' } };
+    const result = engine.evaluate(activeFlag(100), [
+      { id: 'r4', ruleType: 'CUSTOM', attribute: 'score', operator: 'GTE', values: [90], variation: 'premium', priority: 5 }
+    ], numCtx, false, 'test-flag');
+    assert.equal(result.reason, 'TARGET_MATCH');
+    assert.equal(result.value, 'premium');
+  });
+
+  it('returns false for missing attribute without throwing', () => {
+    const emptyCtx: EvaluationContext = { userId: 'user-empty' };
+    const result = engine.evaluate(activeFlag(100), [
+      { id: 'r5', ruleType: 'CUSTOM', attribute: 'nonexistent.deep.key', operator: 'EQ', values: ['x'], variation: 'v', priority: 5 }
+    ], emptyCtx, false, 'test-flag');
+    // Attribute not found — falls through to rollout
     assert.equal(result.reason, 'FALLTHROUGH');
   });
 });

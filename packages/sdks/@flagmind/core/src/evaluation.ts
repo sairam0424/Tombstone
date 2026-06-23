@@ -8,35 +8,24 @@ import type {
   EvaluationReason,
 } from './types.js';
 
-/**
- * FlagCache lookup interface.
- * EvaluationEngine accepts this narrow interface so it can be used standalone
- * (passing a Map directly in tests) or wired to the full FlagCache class.
- */
 export interface FlagLookup {
   get(flagKey: string): FlagEnvironmentState | undefined;
 }
 
 /**
- * 5-Step Sequential Evaluation Pipeline
- * Based on LaunchDarkly's production-verified open-source evaluator.
+ * 5-Step Sequential Evaluation Pipeline (LaunchDarkly-style, adversarially verified).
  *
  * Step 1 — Preliminary      : flag missing or disabled → OFF
- * Step 2 — Prerequisites    : any prerequisite fails  → PREREQUISITE_FAILED
- * Step 3 — Individual target: userId in targetList    → TARGET_MATCH
- * Step 4 — Rule matching    : first priority rule hit → RULE_MATCH
- * Step 5 — Fallthrough      : rollout hash bucket     → FALLTHROUGH / OFF
+ * Step 2 — Prerequisites    : any gating prerequisite fails → PREREQUISITE_FAILED
+ * Step 3 — Individual target: userId in explicit targetList → TARGET_MATCH
+ * Step 4 — Rule matching    : first priority-sorted rule match → RULE_MATCH
+ * Step 5 — Fallthrough      : MurmurHash rollout bucket → FALLTHROUGH / OFF
  */
 export class EvaluationEngine {
-  /** Maximum prerequisite chain depth to prevent infinite loops. */
   private static readonly MAX_PREREQ_DEPTH = 5;
 
   // ─── Public API ────────────────────────────────────────────────────────────
 
-  /**
-   * Full evaluation with detailed trace. Returns an EvaluationResult that
-   * includes the reason, optional ruleId (for RULE_MATCH), and variationIndex.
-   */
   evaluateWithDetail<T>(
     flagKey: string,
     context: EvaluationContext,
@@ -48,42 +37,37 @@ export class EvaluationEngine {
   }
 
   /**
-   * Sugar wrapper — returns just the resolved value.
-   * Kept for backward compatibility with the existing client.ts call-sites.
-   *
-   * Legacy overload signature (used by existing tests and TombstoneClient):
-   *   evaluate(flagState, rules, context, defaultValue, flagKey)
+   * Backward-compatible overload.
+   * Legacy signature:  evaluate(flagState, rules, context, defaultValue, flagKey)
+   * New signature:     evaluate(flagKey, context, defaultValue, cache, rules?)
    */
   evaluate<T>(
     flagStateOrKey: FlagEnvironmentState | undefined | string,
     rulesOrContext: TargetingRule[] | EvaluationContext,
     contextOrDefault: EvaluationContext | T,
-    defaultValueOrFlagKey: T | string,
-    flagKeyOrUndefined?: string,
-    cacheArg?: FlagLookup,
+    defaultValueOrCache: T | FlagLookup,
+    flagKeyOrRules?: string | TargetingRule[],
   ): EvaluationResult<T> {
-    // New signature: (flagKey, context, defaultValue, cache, rules?)
     if (typeof flagStateOrKey === 'string') {
-      const flagKey = flagStateOrKey;
-      const context = rulesOrContext as EvaluationContext;
-      const defaultValue = contextOrDefault as T;
-      const cache = defaultValueOrFlagKey as unknown as FlagLookup;
-      const rules = (flagKeyOrUndefined as unknown as TargetingRule[]) ?? [];
-      return this.evaluateWithDetail<T>(flagKey, context, defaultValue, cache, rules);
+      const flagKey    = flagStateOrKey;
+      const context    = rulesOrContext as EvaluationContext;
+      const defaultVal = contextOrDefault as T;
+      const cache      = defaultValueOrCache as FlagLookup;
+      const rules      = (Array.isArray(flagKeyOrRules) ? flagKeyOrRules : []) as TargetingRule[];
+      return this.evaluateWithDetail<T>(flagKey, context, defaultVal, cache, rules);
     }
 
-    // Legacy signature: (flagState, rules, context, defaultValue, flagKey)
-    const flagState = flagStateOrKey as FlagEnvironmentState | undefined;
-    const rules = rulesOrContext as TargetingRule[];
-    const context = contextOrDefault as EvaluationContext;
-    const defaultValue = defaultValueOrFlagKey as T;
-    const flagKey = flagKeyOrUndefined as string;
+    // Legacy path
+    const flagState  = flagStateOrKey as FlagEnvironmentState | undefined;
+    const rules      = rulesOrContext as TargetingRule[];
+    const context    = contextOrDefault as EvaluationContext;
+    const defaultVal = defaultValueOrCache as T;
+    const flagKey    = (typeof flagKeyOrRules === 'string' ? flagKeyOrRules : '') as string;
 
-    // Build a minimal single-entry cache from the supplied flagState
     const singleCache: FlagLookup = {
-      get: (key: string) => (key === flagKey ? flagState : undefined),
+      get: (k: string) => (k === flagKey ? flagState : undefined),
     };
-    return this.evaluateInternal<T>(flagKey, context, defaultValue, singleCache, rules, 0);
+    return this.evaluateInternal<T>(flagKey, context, defaultVal, singleCache, rules, 0);
   }
 
   // ─── Internal pipeline ─────────────────────────────────────────────────────
@@ -96,7 +80,7 @@ export class EvaluationEngine {
     rules: TargetingRule[],
     depth: number,
   ): EvaluationResult<T> {
-    // ── Step 1: Preliminary ──────────────────────────────────────────────────
+    // Step 1: Preliminary
     const flagState = cache.get(flagKey);
     if (!flagState) {
       return this.result(defaultValue, 'ERROR', flagKey, { fromCache: false });
@@ -105,141 +89,127 @@ export class EvaluationEngine {
       return this.result(this.parseSafeDefault<T>(flagState.safeDefault, defaultValue), 'OFF', flagKey);
     }
 
-    // ── Step 2: Prerequisites ────────────────────────────────────────────────
+    // Step 2: Prerequisites
     const prereqs = flagState.prerequisites ?? [];
     if (prereqs.length > 0 && depth < EvaluationEngine.MAX_PREREQ_DEPTH) {
-      const prereqResult = this.checkPrerequisites<T>(prereqs, context, defaultValue, cache, flagKey, depth);
-      if (prereqResult !== null) {
-        return prereqResult;
-      }
+      const blocked = this.checkPrerequisites<T>(prereqs, context, defaultValue, cache, flagKey, depth);
+      if (blocked !== null) return blocked;
     }
 
-    // ── Step 3: Individual targeting (explicit targetList) ───────────────────
+    // Step 3: Individual targeting
     const targetList = flagState.targetList ?? [];
-    if (targetList.length > 0 && targetList.includes(context.userId)) {
+    const userId = context.userId ?? '';
+    if (targetList.length > 0 && targetList.includes(userId)) {
       return this.result(true as unknown as T, 'TARGET_MATCH', flagKey);
     }
 
-    // ── Step 4: Rule matching ────────────────────────────────────────────────
-    const sortedRules = [...rules].sort((a, b) => b.priority - a.priority);
+    // Step 4: Rule matching — ascending priority (0 = highest)
+    const sortedRules = [...(flagState.targetingRules ?? []), ...rules]
+      .sort((a, b) => a.priority - b.priority);
     for (const rule of sortedRules) {
-      if (this.evaluateRule(rule, context)) {
-        return this.result(
-          rule.variation as unknown as T,
-          'RULE_MATCH',
-          flagKey,
-          { ruleId: rule.id },
-        );
+      if (this.matchesRule(rule, context)) {
+        return this.result(rule.variation as unknown as T, 'RULE_MATCH', flagKey, { ruleId: rule.id });
       }
     }
 
-    // ── Step 5: Fallthrough rollout ──────────────────────────────────────────
-    if (this.isInRollout(flagKey, context.userId, flagState.rolloutPct)) {
+    // Step 5: Fallthrough rollout
+    if (this.isInRollout(flagKey, userId, flagState.rolloutPct, flagState.hashVersion ?? 1)) {
       return this.result(true as unknown as T, 'FALLTHROUGH', flagKey);
     }
-
     return this.result(defaultValue, 'FALLTHROUGH', flagKey);
   }
 
-  // ─── Step 2 helpers ────────────────────────────────────────────────────────
+  // ─── Step 2: prerequisites ─────────────────────────────────────────────────
 
   private checkPrerequisites<T>(
     prereqs: FlagPrerequisite[],
     context: EvaluationContext,
     defaultValue: T,
     cache: FlagLookup,
-    parentFlagKey: string,
+    parentKey: string,
     depth: number,
   ): EvaluationResult<T> | null {
     for (const prereq of prereqs) {
       const prereqState = cache.get(prereq.flagKey);
-      if (!prereqState) {
-        // Prerequisite flag not in cache — treat as failed if gating
-        if (prereq.gate) {
-          return this.result(defaultValue, 'PREREQUISITE_FAILED', parentFlagKey, {
-            ruleId: prereq.flagKey,
-          });
-        }
-        continue;
+      if (!prereqState && prereq.gate) {
+        return this.result(defaultValue, 'PREREQUISITE_FAILED', parentKey, { ruleId: prereq.flagKey });
       }
+      if (!prereqState) continue;
 
-      // Evaluate the prerequisite inline (empty rules, recurse with depth+1)
       const prereqResult = this.evaluateInternal<string>(
-        prereq.flagKey,
-        context,
-        prereqState.safeDefault,
-        cache,
-        [],
-        depth + 1,
+        prereq.flagKey, context, prereqState.safeDefault, cache, [], depth + 1,
       );
-
-      const resolvedVariation = String(prereqResult.value);
-      const matches = resolvedVariation === prereq.requiredVariation;
-
-      if (!matches && prereq.gate) {
-        // Hard gate — block the entire feature
-        return this.result(defaultValue, 'PREREQUISITE_FAILED', parentFlagKey, {
-          ruleId: prereq.flagKey,
-        });
+      if (String(prereqResult.value) !== prereq.requiredVariation && prereq.gate) {
+        return this.result(defaultValue, 'PREREQUISITE_FAILED', parentKey, { ruleId: prereq.flagKey });
       }
-      // gate=false and no match → skip (continue to next prereq or next step)
     }
-    return null; // all gating prerequisites passed
+    return null;
   }
 
-  // ─── Rollout ───────────────────────────────────────────────────────────────
+  // ─── Step 4: rule matching ─────────────────────────────────────────────────
 
-  /** Consistent assignment: same userId always gets same bucket for a given flag. */
-  private isInRollout(flagKey: string, userId: string, rolloutPct: number): boolean {
-    if (rolloutPct === 100) return true;
-    if (rolloutPct === 0) return false;
-    const hash = murmurhash.v3(flagKey + userId) >>> 0;
-    return (hash % 100) < rolloutPct;
+  private matchesRule(rule: TargetingRule, context: EvaluationContext): boolean {
+    const raw = this.resolveAttribute(rule.attribute, context);
+    if (raw === undefined || raw === null) return false;
+    return this.applyOperator(rule.operator, raw, rule.values);
   }
 
-  // ─── Rule evaluation ───────────────────────────────────────────────────────
-
-  private evaluateRule(rule: TargetingRule, context: EvaluationContext): boolean {
-    let contextValue: string | undefined;
-    if (rule.attribute === 'userId') {
-      contextValue = context.userId;
-    } else if (rule.attribute === 'orgId') {
-      contextValue = context.orgId;
-    } else {
-      contextValue = context.attrs?.[rule.attribute];
+  private resolveAttribute(path: string, context: EvaluationContext): unknown {
+    const segments = path.split('.');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let current: any = context;
+    for (const seg of segments) {
+      if (current == null || typeof current !== 'object') { current = undefined; break; }
+      current = (current as Record<string, unknown>)[seg];
     }
-    if (contextValue === undefined) return false;
-    return this.evaluateOperator(rule.operator, contextValue, rule.values);
+    if (current !== undefined) return current;
+    if (segments.length === 1 && context.attrs !== undefined) return context.attrs[path];
+    return undefined;
   }
 
-  private evaluateOperator(operator: string, value: string, ruleValues: string[]): boolean {
+  private applyOperator(operator: string, value: unknown, ruleValues: unknown[]): boolean {
+    const strValue = String(value);
     switch (operator) {
-      case 'IN':       return ruleValues.includes(value);
-      case 'NOT_IN':   return !ruleValues.includes(value);
-      case 'EQ':       return value === ruleValues[0];
-      case 'NEQ':      return value !== ruleValues[0];
-      case 'CONTAINS': return ruleValues.some(v => value.includes(v));
-      case 'PREFIX':   return ruleValues.some(v => value.startsWith(v));
-      case 'SUFFIX':   return ruleValues.some(v => value.endsWith(v));
-      case 'LT':       return parseFloat(value) < parseFloat(ruleValues[0] ?? '0');
-      case 'LTE':      return parseFloat(value) <= parseFloat(ruleValues[0] ?? '0');
-      case 'GT':       return parseFloat(value) > parseFloat(ruleValues[0] ?? '0');
-      case 'GTE':      return parseFloat(value) >= parseFloat(ruleValues[0] ?? '0');
-      default:         return false;
+      case 'IN':       return ruleValues.some(v => String(v) === strValue);
+      case 'NOT_IN':   return ruleValues.every(v => String(v) !== strValue);
+      case 'EQ':       return strValue === String(ruleValues[0] ?? '');
+      case 'NEQ':      return strValue !== String(ruleValues[0] ?? '');
+      case 'CONTAINS': return typeof value === 'string' && ruleValues.some(v => value.includes(String(v)));
+      case 'PREFIX':   return typeof value === 'string' && ruleValues.some(v => value.startsWith(String(v)));
+      case 'SUFFIX':   return typeof value === 'string' && ruleValues.some(v => value.endsWith(String(v)));
+      case 'LT': { const n = Number(value); return Number.isFinite(n) && n < Number(ruleValues[0] ?? 0); }
+      case 'LTE': { const n = Number(value); return Number.isFinite(n) && n <= Number(ruleValues[0] ?? 0); }
+      case 'GT': { const n = Number(value); return Number.isFinite(n) && n > Number(ruleValues[0] ?? 0); }
+      case 'GTE': { const n = Number(value); return Number.isFinite(n) && n >= Number(ruleValues[0] ?? 0); }
+      default: return false;
     }
   }
 
-  // ─── Result builder ────────────────────────────────────────────────────────
+  // ─── Step 5: rollout ───────────────────────────────────────────────────────
+
+  private isInRollout(flagKey: string, userId: string, rolloutPct: number, hashVersion: 1 | 2 = 1): boolean {
+    if (rolloutPct >= 100) return true;
+    if (rolloutPct <= 0) return false;
+    if (hashVersion === 2) {
+      const FNV_PRIME = 16777619, FNV_OFFSET = 2166136261;
+      const fnv = (s: string) => {
+        let h = FNV_OFFSET >>> 0;
+        for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, FNV_PRIME) >>> 0; }
+        return h >>> 0;
+      };
+      return (fnv(String(fnv(flagKey + userId))) % 10000) / 10000 < rolloutPct / 100;
+    }
+    return ((murmurhash.v3(flagKey + userId) >>> 0) % 100) < rolloutPct;
+  }
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
 
   private result<T>(
-    value: T,
-    reason: EvaluationReason,
-    flagKey: string,
+    value: T, reason: EvaluationReason, flagKey: string,
     extra?: { fromCache?: boolean; ruleId?: string; variationIndex?: number },
   ): EvaluationResult<T> {
     return {
-      value,
-      reason,
+      value, reason,
       fromCache: extra?.fromCache ?? true,
       flagKey,
       ...(extra?.ruleId !== undefined ? { ruleId: extra.ruleId } : {}),
@@ -247,27 +217,12 @@ export class EvaluationEngine {
     };
   }
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
-
-  /**
-   * Parse the safeDefault string into the expected type T.
-   * Falls back to the supplied defaultValue if parsing fails.
-   */
   private parseSafeDefault<T>(safeDefault: string, fallback: T): T {
     try {
-      if (typeof fallback === 'boolean') {
-        return (safeDefault === 'true') as unknown as T;
-      }
-      if (typeof fallback === 'number') {
-        const n = Number(safeDefault);
-        return (isNaN(n) ? fallback : n) as unknown as T;
-      }
-      if (typeof fallback === 'string') {
-        return safeDefault as unknown as T;
-      }
+      if (typeof fallback === 'boolean') return (safeDefault === 'true') as unknown as T;
+      if (typeof fallback === 'number') { const n = Number(safeDefault); return (isNaN(n) ? fallback : n) as unknown as T; }
+      if (typeof fallback === 'string') return safeDefault as unknown as T;
       return JSON.parse(safeDefault) as T;
-    } catch {
-      return fallback;
-    }
+    } catch { return fallback; }
   }
 }
