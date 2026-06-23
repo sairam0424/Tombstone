@@ -18,6 +18,7 @@ from app.kafka.consumer import TelemetryConsumer
 from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
+from app.search.embedding_model import create_embedding_model
 from app.search.embedding_sync import EmbeddingSyncService
 from app.search.retriever import FlagSearchRetriever
 from app.stale.detector import StaleFlagDetector
@@ -73,8 +74,27 @@ async def lifespan(app: FastAPI):
         db_url=os.environ["DB_URL"],
         pagerduty_token=os.environ.get("PAGERDUTY_TOKEN", ""),
     )
-    app.state.searcher = FlagSearchRetriever(db_url=os.environ["DB_URL"])
-    app.state.embedding_sync = EmbeddingSyncService(db_url=os.environ["DB_URL"])
+    # Build embedding model — swap EMBEDDING_BACKEND=bedrock for Fly.io free tier
+    _embedding_backend = os.environ.get("EMBEDDING_BACKEND", "local")
+    if _embedding_backend == "bedrock":
+        _embedding_model = create_embedding_model(
+            "bedrock",
+            access_key_id=os.environ["BEDROCK_ACCESS_KEY_ID"],
+            secret_access_key=os.environ["BEDROCK_SECRET_ACCESS_KEY"],
+            region=os.environ.get("BEDROCK_REGION", "us-east-1"),
+        )
+    else:
+        _embedding_model = create_embedding_model("local")
+    app.state.embedding_model = _embedding_model
+
+    app.state.searcher = FlagSearchRetriever(
+        db_url=os.environ["DB_URL"],
+        embedding_model=app.state.embedding_model,
+    )
+    app.state.embedding_sync = EmbeddingSyncService(
+        db_url=os.environ["DB_URL"],
+        embedding_model=app.state.embedding_model,
+    )
     app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
 
     # Thompson Sampling engine for autonomous rollout
