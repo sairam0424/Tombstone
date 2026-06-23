@@ -15,6 +15,7 @@ from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
 from app.kafka.consumer import TelemetryConsumer
+from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
 from app.search.embedding_sync import EmbeddingSyncService
@@ -78,6 +79,21 @@ async def lifespan(app: FastAPI):
 
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
+
+    # LinUCB contextual bandit for context-aware rollout decisions
+    app.state.linucb_bandit = LinUCBBandit(alpha=1.0, d=5)
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(redis_url, decode_responses=False)
+        await app.state.linucb_bandit.load_from_redis(redis_client)
+        await redis_client.aclose()
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "LinUCB Redis restore skipped (Redis unavailable) — starting fresh"
+        )
+
     app.state.graph_builder = DependencyGraphBuilder(db_url=os.environ["DB_URL"])
 
     # Redis — optional; fails open so service starts even if Redis is down
