@@ -5,6 +5,8 @@ type: decision
 status: adopted
 ---
 
+> **Version:** v2.1.0 — all 4 domain loops active. Activate via GitHub Actions repo variables.
+
 # Knowledge-base architecture
 
 How this repo is organized as the operating substrate for a long-lived, autonomous agent

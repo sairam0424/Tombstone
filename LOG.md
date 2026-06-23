@@ -30,6 +30,14 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-06-24 · v2.1.0 shipped — all 10 phases complete · #infra #loop #harness
+What: Redis Streams (Phase 4.1), Slack HTTP routes + governance loop, mTLS (Phase 6.1), Argos LLM rule generation (Phase 3.2) merged to main. All 32 items from the 10-phase beast/ultimate upgrade plan are fully implemented.
+Refs: Pull requests #44 #45 #46 #47 #48 merged. Tombstone v2.1.0 on main.
+
+## 2026-06-24 · loop-engineer harness activated — 4 domain loops wired · #harness #loop #ops
+What: ship-change.js workflow, /pr skill, /new-loop skill, dev-local launcher, and 4 domain loops (flag-cleanup daily, incident-response event-driven, rollout-advisor weekdays, governance weekly) all deployed to main.
+Refs: .claude/workflows/ship-change.js (new), scripts/loop-*.sh (4 new), .github/workflows/loop-*.yml (4 new), domains/*/README.md (4 new).
+
 ## 2026-06-23 · Bootstrap loop-engineer knowledge base substrate · #harness #loop #infra
 What: Created signals/, docs/, domains/ scaffolding plus LOG.md and ARCHITECTURE.md for Loop-Engineer v2 integration.
 Refs: [signals/README.md](signals/README.md) (new), [docs/README.md](docs/README.md) (new), [domains/README.md](domains/README.md) (new), [ARCHITECTURE.md](ARCHITECTURE.md) (new)
