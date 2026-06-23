@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/evaluator/internal/tlsutil"
 )
 
 // RollbackRequest describes an automatic or manual rollback action.
@@ -31,11 +34,25 @@ type Executor struct {
 }
 
 func NewExecutor(flagAPIURL, flagAPIToken string, rdb *redis.Client, logger *zap.Logger) *Executor {
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		certsDir := os.Getenv("CERTS_DIR")
+		if certsDir == "" {
+			certsDir = "/certs"
+		}
+		tlsCfg, err := tlsutil.LoadClientTLSConfig(certsDir)
+		if err != nil {
+			logger.Warn("mTLS client cert load failed — falling back to plain HTTP", zap.Error(err))
+		} else {
+			httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+			logger.Info("evaluator -> flag-api mTLS enabled")
+		}
+	}
 	return &Executor{
 		flagAPIURL:   flagAPIURL,
 		flagAPIToken: flagAPIToken,
 		rdb:          rdb,
-		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		httpClient:   httpClient,
 		logger:       logger,
 	}
 }
