@@ -19,9 +19,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-snowflake = ["snowflake-connector-python>=3.12.0"]
-bigquery = ["google-cloud-bigquery>=3.25.0"]
-all-warehouses = ["snowflake-connector-python>=3.12.0", "google-cloud-bigquery>=3.25.0"]
+snowflake = ["snowflake-connector-python>=3.0"]
+bigquery = ["google-cloud-bigquery[pandas]>=3.0"]
+databricks = ["databricks-sql-connector>=3.0"]
+all-warehouses = [
+    "snowflake-connector-python>=3.0",
+    "google-cloud-bigquery[pandas]>=3.0",
+    "databricks-sql-connector>=3.0",
+]
 clickhouse = ["clickhouse-driver>=0.2.9"]
 
 [tool.uv]
