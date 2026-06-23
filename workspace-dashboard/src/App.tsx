@@ -1,6 +1,7 @@
 import { Routes, Route, NavLink } from 'react-router-dom';
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
+import SLOView from './views/SLOView/index.js';
 import IncidentTimeline from './views/IncidentTimeline/index.js';
 import GovernanceDash from './views/GovernanceDash/index.js';
 import ApprovalQueue from './views/ApprovalQueue/index.js';
@@ -119,9 +120,10 @@ export default function App() {
         {/* Page content */}
         <main className="flex-1 overflow-y-auto">
           <Routes>
-            <Route path="/"             element={<FlagList />} />
-            <Route path="/flags/:key"   element={<FlagDetail />} />
-            <Route path="/incident"     element={<IncidentTimeline />} />
+            <Route path="/"                    element={<FlagList />} />
+            <Route path="/flags/:key"          element={<FlagDetail />} />
+            <Route path="/flags/:key/slo"      element={<SLOView />} />
+            <Route path="/incident"            element={<IncidentTimeline />} />
             <Route path="/graph"        element={<DependencyGraph />} />
             <Route path="/governance"   element={<GovernanceDash />} />
             <Route path="/approvals"    element={<ApprovalQueue />} />

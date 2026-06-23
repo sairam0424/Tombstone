@@ -25,9 +25,9 @@
   },
   "engines": { "node": ">=18" },
   "scripts": {
-    "build": "tsc",
-    "test": "npm run build && npx mocha 'dist/tests/**/*.test.js'",
-    "test:watch": "tsc -w"
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run build && node_modules/.bin/mocha 'dist/tests/**/*.test.js'",
+    "test:watch": "tsc -p tsconfig.build.json -w"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.0",
@@ -39,5 +39,13 @@
   "dependencies": {
     "eventsource": "^3.0.0",
     "murmurhash": "^2.0.1"
+  },
+  "peerDependencies": {
+    "@openfeature/server-sdk": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/server-sdk": {
+      "optional": true
+    }
   }
 }

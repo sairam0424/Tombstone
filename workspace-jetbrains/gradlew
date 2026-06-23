@@ -1,0 +1,6 @@
+#!/bin/sh
+# Gradle wrapper script — auto-downloads Gradle if not cached
+APP_NAME="Gradle"
+DEFAULT_JVM_OPTS="-Xmx64m -Xms64m"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+exec java $DEFAULT_JVM_OPTS -jar "$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar" "$@"

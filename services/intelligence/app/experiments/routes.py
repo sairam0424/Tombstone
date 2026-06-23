@@ -1,10 +1,15 @@
 import os
+import re
+from datetime import datetime
 
 import httpx
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 
 from app.experiments.analyzer import ExperimentAnalyzer
+from app.experiments.collision import ExperimentSpec, detect_collisions
+from app.experiments.cuped import cuped_effect_size
 from app.experiments.models import ExperimentDefinition
 from app.warehouse.connector import get_connector
 
@@ -228,3 +233,146 @@ async def power_calculator(
             "power": power,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Collision detection
+# ---------------------------------------------------------------------------
+
+
+class CollisionExperimentSpec(BaseModel):
+    flag_key: str
+    environment: str
+    rollout_pct: float
+    targeting_rules: list = []
+
+
+class CheckCollisionRequest(BaseModel):
+    new_experiment: CollisionExperimentSpec
+    active_experiments: list[CollisionExperimentSpec]
+    threshold: float = 0.7
+
+
+class CollisionResult(BaseModel):
+    flag_key: str
+    overlap_score: float
+    blocked: bool
+    warning: bool
+
+
+class CheckCollisionResponse(BaseModel):
+    collisions: list[CollisionResult]
+    has_blocked: bool
+    has_warnings: bool
+    safe_to_launch: bool
+
+
+@router.post("/check-collision", response_model=CheckCollisionResponse)
+async def check_collision(req: CheckCollisionRequest):
+    """
+    Detect population overlap between a proposed experiment and active experiments.
+
+    Returns collision details with severity:
+      - blocked (overlap >= 0.9): launch should be rejected automatically.
+      - warning (0.7 <= overlap < 0.9): human review required.
+      - safe_to_launch: True only when no blocked collisions exist.
+    """
+    new_spec = ExperimentSpec(
+        flag_key=req.new_experiment.flag_key,
+        environment=req.new_experiment.environment,
+        rollout_pct=req.new_experiment.rollout_pct,
+        targeting_rules=req.new_experiment.targeting_rules,
+    )
+    active_specs = [
+        ExperimentSpec(
+            flag_key=e.flag_key,
+            environment=e.environment,
+            rollout_pct=e.rollout_pct,
+            targeting_rules=e.targeting_rules,
+        )
+        for e in req.active_experiments
+    ]
+
+    raw = detect_collisions(new_spec, active_specs, threshold=req.threshold)
+    collisions = [CollisionResult(**c) for c in raw]
+    has_blocked = any(c.blocked for c in collisions)
+    has_warnings = any(c.warning for c in collisions)
+
+    return CheckCollisionResponse(
+        collisions=collisions,
+        has_blocked=has_blocked,
+        has_warnings=has_warnings,
+        safe_to_launch=not has_blocked,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CUPED variance reduction endpoint (warehouse data path)
+# ---------------------------------------------------------------------------
+
+
+class CupedAdjustRequest(BaseModel):
+    treatment: list[float]
+    control: list[float]
+    pre_treatment: list[float]
+    pre_control: list[float]
+
+
+class CupedAdjustResponse(BaseModel):
+    effect_size: float
+    p_value: float
+    variance_reduction_pct: float
+    adjusted_treatment_mean: float
+    adjusted_control_mean: float
+    ci_lower: float
+    ci_upper: float
+    t_statistic: float
+    degrees_of_freedom: float
+    is_significant: bool
+
+
+@router.post("/cuped-adjust", response_model=CupedAdjustResponse)
+async def cuped_adjust(req: CupedAdjustRequest):
+    """
+    Apply CUPED variance reduction to experiment data using pre-experiment covariates.
+
+    Sends raw per-user metric values (treatment + control) alongside their
+    pre-experiment covariate values (e.g. prior-week activity).  Returns
+    CUPED-adjusted effect size, p-value, and confidence interval.
+
+    Typical variance reduction: 20-40%, allowing the same statistical power
+    with fewer observations.
+    """
+    if len(req.treatment) < 2 or len(req.control) < 2:
+        raise HTTPException(status_code=422, detail="Each variant requires at least 2 observations.")
+
+    if len(req.treatment) != len(req.pre_treatment):
+        raise HTTPException(
+            status_code=422,
+            detail="treatment and pre_treatment must have equal length.",
+        )
+    if len(req.control) != len(req.pre_control):
+        raise HTTPException(
+            status_code=422,
+            detail="control and pre_control must have equal length.",
+        )
+
+    result = cuped_effect_size(
+        treatment=np.array(req.treatment),
+        control=np.array(req.control),
+        pre_treatment=np.array(req.pre_treatment),
+        pre_control=np.array(req.pre_control),
+    )
+
+    return CupedAdjustResponse(
+        effect_size=result["effect_size"],
+        p_value=result["p_value"],
+        variance_reduction_pct=result["variance_reduction_pct"],
+        adjusted_treatment_mean=result["adjusted_treatment_mean"],
+        adjusted_control_mean=result["adjusted_control_mean"],
+        ci_lower=result["ci_lower"],
+        ci_upper=result["ci_upper"],
+        t_statistic=result["t_statistic"],
+        degrees_of_freedom=result["degrees_of_freedom"],
+        is_significant=result["p_value"] < 0.05,
+    )

@@ -5,8 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/open-policy-agent/opa/rego"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +29,8 @@ type Permission struct {
 	Action   string
 }
 
-// permissionMatrix maps Role -> set of allowed (resource, action) pairs
+// permissionMatrix maps Role -> set of allowed (resource, action) pairs.
+// Used as a fallback when OPA policy evaluation is unavailable.
 var permissionMatrix = map[Role][]Permission{
 	RoleViewer: {
 		{Resource: "flags", Action: "read"},
@@ -73,13 +79,149 @@ var permissionMatrix = map[Role][]Permission{
 	},
 }
 
+// opaEvaluator holds a compiled OPA query that can be swapped atomically on hot-reload.
+type opaEvaluator struct {
+	mu          sync.RWMutex
+	preparedQ   *rego.PreparedEvalQuery
+	available   bool
+	policyDir   string
+	query       string
+}
+
+func newOPAEvaluator(policyDir, query string, logger *zap.Logger) *opaEvaluator {
+	e := &opaEvaluator{policyDir: policyDir, query: query}
+	if err := e.load(logger); err != nil {
+		logger.Warn("[rbac] OPA policy load failed — falling back to hardcoded matrix",
+			zap.String("policy_dir", policyDir), zap.Error(err))
+	}
+	return e
+}
+
+// load reads all .rego files in policyDir and compiles the query.
+func (e *opaEvaluator) load(logger *zap.Logger) error {
+	files, err := filepath.Glob(filepath.Join(e.policyDir, "*.rego"))
+	if err != nil || len(files) == 0 {
+		e.mu.Lock()
+		e.available = false
+		e.preparedQ = nil
+		e.mu.Unlock()
+		return err
+	}
+
+	r := rego.New(
+		rego.Query(e.query),
+		rego.Load(files, nil),
+	)
+
+	ctx := context.Background()
+	pq, err := r.PrepareForEval(ctx)
+	if err != nil {
+		e.mu.Lock()
+		e.available = false
+		e.preparedQ = nil
+		e.mu.Unlock()
+		return err
+	}
+
+	e.mu.Lock()
+	e.preparedQ = &pq
+	e.available = true
+	e.mu.Unlock()
+
+	if logger != nil {
+		logger.Info("[rbac] OPA policies loaded", zap.Strings("files", files))
+	}
+	return nil
+}
+
+// evaluate runs the OPA query against input. Returns (allow, true) if OPA is
+// available, or (false, false) if the fallback should be used.
+func (e *opaEvaluator) evaluate(ctx context.Context, input map[string]interface{}) (allow bool, ok bool) {
+	e.mu.RLock()
+	pq := e.preparedQ
+	avail := e.available
+	e.mu.RUnlock()
+
+	if !avail || pq == nil {
+		return false, false
+	}
+
+	rs, err := pq.Eval(ctx, rego.EvalInput(input))
+	if err != nil || len(rs) == 0 {
+		return false, false
+	}
+	if v, isBool := rs[0].Expressions[0].Value.(bool); isBool {
+		return v, true
+	}
+	return false, false
+}
+
+// RBACMiddleware enforces role-based access control via OPA (primary) with a
+// hardcoded permission matrix as fallback.
 type RBACMiddleware struct {
-	db     *sql.DB
-	logger *zap.Logger
+	db          *sql.DB
+	logger      *zap.Logger
+	flagsEval   *opaEvaluator
 }
 
 func NewRBACMiddleware(db *sql.DB, logger *zap.Logger) *RBACMiddleware {
-	return &RBACMiddleware{db: db, logger: logger}
+	policyDir := os.Getenv("POLICY_DIR")
+	if policyDir == "" {
+		policyDir = "policies/"
+	}
+
+	mw := &RBACMiddleware{
+		db:        db,
+		logger:    logger,
+		flagsEval: newOPAEvaluator(policyDir, "data.tombstone.flags.allow", logger),
+	}
+
+	// Start fsnotify watcher for hot-reload.
+	go mw.watchPolicies(policyDir)
+
+	return mw
+}
+
+// watchPolicies monitors policyDir for .rego file changes and triggers reloads.
+func (mw *RBACMiddleware) watchPolicies(policyDir string) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		mw.logger.Warn("[rbac] fsnotify unavailable — hot-reload disabled", zap.Error(err))
+		return
+	}
+	defer watcher.Close()
+
+	if err := watcher.Add(policyDir); err != nil {
+		mw.logger.Warn("[rbac] cannot watch policy dir — hot-reload disabled",
+			zap.String("dir", policyDir), zap.Error(err))
+		return
+	}
+
+	mw.logger.Info("[rbac] watching policy directory for changes", zap.String("dir", policyDir))
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if !strings.HasSuffix(event.Name, ".rego") {
+				continue
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
+				mw.logger.Info("[rbac] policy file changed — reloading", zap.String("file", event.Name))
+				if err := mw.flagsEval.load(mw.logger); err != nil {
+					mw.logger.Error("[rbac] policy reload failed — keeping last-known-good policy",
+						zap.Error(err))
+				}
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			mw.logger.Error("[rbac] fsnotify error", zap.Error(err))
+		}
+	}
 }
 
 type contextKeyRole string
@@ -87,15 +229,33 @@ type contextKeyRole string
 const ContextKeyRole contextKeyRole = "role"
 
 // RequirePermission returns a middleware that enforces resource+action permission.
+// It first tries OPA evaluation; if unavailable, falls back to the hardcoded matrix.
 func (r *RBACMiddleware) RequirePermission(resource, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			role := r.getRoleFromContext(req.Context())
-			if !r.hasPermission(role, resource, action) {
-				r.logger.Warn("permission denied",
+			actor := actorFromContext(req.Context())
+
+			allowed, source := r.checkPermissionWithOPA(req, role, resource, action)
+
+			r.logger.Debug("[rbac] decision",
+				zap.String("actor", actor),
+				zap.String("method", req.Method),
+				zap.String("path", req.URL.Path),
+				zap.Bool("allow", allowed),
+				zap.String("source", source),
+			)
+
+			if !allowed {
+				r.logger.Warn("[rbac] permission denied",
+					zap.String("actor", actor),
+					zap.String("method", req.Method),
+					zap.String("path", req.URL.Path),
 					zap.String("role", string(role)),
 					zap.String("resource", resource),
-					zap.String("action", action))
+					zap.String("action", action),
+					zap.String("source", source),
+				)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				_ = json.NewEncoder(w).Encode(map[string]string{
@@ -108,6 +268,27 @@ func (r *RBACMiddleware) RequirePermission(resource, action string) func(http.Ha
 			next.ServeHTTP(w, req)
 		})
 	}
+}
+
+// checkPermissionWithOPA tries OPA first, then falls back to the hardcoded matrix.
+// Returns (allowed bool, source string) where source is "opa" or "fallback".
+func (r *RBACMiddleware) checkPermissionWithOPA(req *http.Request, role Role, resource, action string) (bool, string) {
+	actor := actorFromContext(req.Context())
+	pathParts := splitPath(req.URL.Path)
+
+	input := map[string]interface{}{
+		"method": req.Method,
+		"path":   pathParts,
+		"role":   strings.ToLower(string(role)),
+		"actor":  actor,
+	}
+
+	if allow, ok := r.flagsEval.evaluate(req.Context(), input); ok {
+		return allow, "opa"
+	}
+
+	// OPA unavailable — use hardcoded fallback.
+	return r.hasPermission(role, resource, action), "fallback"
 }
 
 // LoadRole middleware resolves the actor's role from the database and injects it into context.
@@ -152,6 +333,18 @@ func (r *RBACMiddleware) hasPermission(role Role, resource, action string) bool 
 		}
 	}
 	return false
+}
+
+// splitPath splits a URL path into non-empty segments.
+func splitPath(path string) []string {
+	parts := strings.Split(path, "/")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 // actorFromContext retrieves the authenticated actor identifier from context.

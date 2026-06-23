@@ -233,7 +233,8 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
 		       COALESCE(ip_address,''), COALESCE(prev_hash,''),
-		       EXTRACT(EPOCH FROM created_at)::bigint
+		       EXTRACT(EPOCH FROM created_at)::bigint,
+		       COALESCE(rekor_log_id,''), rekor_log_index
 		FROM audit_log
 		ORDER BY created_at ASC
 	`)
@@ -255,7 +256,8 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		var e AuditEntry
 		var prevRaw, newRaw string
 		if err := rows.Scan(&e.ID, &e.FlagKey, &e.Environment, &e.Actor, &e.EventType,
-			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt); err != nil {
+			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt,
+			&e.RekorLogID, &e.RekorLogIndex); err != nil {
 			h.logger.Error("audit export scan", zap.Error(err))
 			return
 		}
