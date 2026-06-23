@@ -9,18 +9,46 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+---
+
+## [2.1.0] - 2026-06-24
+
 ### Added
-- Argos-inspired 3-agent LLM anomaly rule generation (Phase 3.2)
-  - `POST /api/v1/intelligence/generate-rule` endpoint
-  - Detection Agent → Repair Agent (syntax-validated, ≤3 retry rounds) → Review Agent (precision/recall on held-out 20%)
-  - Requires `ANTHROPIC_API_KEY`; graceful 503 when absent; 422 when <30 observations
-  - Generated rules stored as `signals/rule-candidate-{flag}-{date}.md` with `status: pending-approval` — never auto-activated
-  - `ast.parse()` sandbox blocks imports, file access, subprocess in generated code
-- Redis Streams (`XADD`/`XREADGROUP`) alongside pub/sub for flag event delivery (Phase 4.1)
-  - Stream key: `tombstone:stream:{environment}`, consumer group: `gateway-workers`
-  - Consumer name per gateway instance: `gateway-{hostname}`
-  - Event history: last 10,000 events per stream retained (approximate trim)
-  - Legacy pub/sub still active for backward compat — removal tracked for v2.1
+
+**Phase 4.1 — Redis Streams**
+- `XADD`/`XREADGROUP` alongside legacy pub/sub for flag event delivery
+- Stream key: `tombstone:stream:{environment}`, consumer group: `gateway-workers`
+- Event history: last 10,000 events per stream (approximate trim)
+- Legacy pub/sub kept for backward compat — removal planned for v2.2
+
+**Phase 6.1 — mTLS**
+- Mutual TLS between internal services (evaluator→flag-api, gateway→flag-api)
+- ECDSA P256 self-signed PKI, TLS 1.3 minimum, `RequireAndVerifyClientCert`
+- Opt-in via `MTLS_ENABLED=true` — plain HTTP default preserved
+- Docker Compose shared `certs:` volume
+
+**Phase 3.2 — Argos LLM Rule Generation**
+- `POST /api/v1/intelligence/generate-rule` endpoint
+- 3-agent pipeline: Detection → Repair (syntax-validated) → Review (held-out 20%)
+- Graceful 503 when `ANTHROPIC_API_KEY` absent
+- Generated rules stored as pending-approval signals, never auto-activated
+
+**Slack Interactive App**
+- `POST /api/v1/marketplace/slack/commands` — slash command handler
+- `POST /api/v1/marketplace/slack/actions` — block action handler
+- Signature verification enforced when `SLACK_SIGNING_SECRET` is set
+
+**Governance Domain Loop**
+- Weekly health score + stale flag count + SOC2 evidence tracking
+- `scripts/loop-governance.sh` + `.github/workflows/loop-governance.yml`
+- Alert signal when `health_score < 0.80` or `stale_count > 50`
+
+**Loop-Engineer Harness**
+- `ship-change.js` autonomous PR workflow (6-phase: Setup→Implement→Simplify→Review→Verify→PR)
+- `/pr` skill with independent verifier sub-agent
+- `/new-loop`, `/setup-codebase-harness`, `/dev-local` skills
+- 4 domain loops: flag-cleanup, incident-response, rollout-advisor, governance
+- Knowledge base: `signals/`, `docs/`, `domains/`, `LOG.md`, `ARCHITECTURE.md`
 
 ---
 
@@ -277,7 +305,8 @@ Initial repository scaffolding. Project initialized as **FlagMind** before renam
 
 ---
 
-[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/sairam0424/Tombstone/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/sairam0424/Tombstone/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/sairam0424/Tombstone/compare/v0.1.0...v1.0.0

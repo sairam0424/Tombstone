@@ -39,3 +39,4 @@ Collector writes to `domains/incident-response/metrics/trips.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | flag_key — what happened -->
+2026-06-24 | Loop scaffolded and deployed to main. Webhook trigger available via workflow_dispatch. Pending marketplace webhook wiring for auto-trigger on circuit trips.
