@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -368,15 +369,19 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 	currJSON, _ := json.Marshal(curr)
 
 	// Get previous entry hash for Merkle chain
-	var lastID, lastTs string
+	var lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs string
 	_ = h.db.QueryRowContext(ctx, `
-		SELECT id, EXTRACT(EPOCH FROM created_at)::text FROM audit_log
+		SELECT id, event_type, actor,
+		       COALESCE(prev_state::text, ''), COALESCE(new_state::text, ''),
+		       EXTRACT(EPOCH FROM created_at)::text
+		FROM audit_log
 		WHERE flag_key=$1 ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastTs)
+	`, flagKey).Scan(&lastID, &lastEventType, &lastActor, &lastPrevState, &lastNewState, &lastTs)
 
 	prevHash := ""
 	if lastID != "" {
-		hashBytes := sha256.Sum256([]byte(lastID + lastTs))
+		content := strings.Join([]string{lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs}, "|")
+		hashBytes := sha256.Sum256([]byte(content))
 		prevHash = fmt.Sprintf("%x", hashBytes)
 	}
 
