@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from aiokafka import AIOKafkaConsumer
@@ -14,8 +15,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TOPIC_FLAG_EVALUATED = "tombstone.flag.evaluated"
-TOPIC_FLAG_CHANGES = "tombstone.flag.changes"
+TOPIC_FLAG_CHANGED = "tombstone.flag.changed"
 GROUP_ID = "intelligence-anomaly"
+
+# Event types that constitute a "flag change" for dep-graph purposes
+FLAG_CHANGE_EVENT_TYPES = frozenset({
+    "flag_environment_updated",
+    "kill_switch_activated",
+    "flag_created",
+})
 
 
 @dataclass
@@ -29,10 +37,11 @@ class EvaluationEvent:
 
 class TelemetryConsumer:
     """
-    Consumes tombstone.flag.evaluated and tombstone.flag.changes events from Kafka.
+    Consumes tombstone.flag.evaluated and tombstone.flag.changed events from Kafka.
 
     - tombstone.flag.evaluated  → feeds AnomalyDetector (error-rate windowing)
-    - tombstone.flag.changes    → triggers EmbeddingSyncService for created/updated flags
+    - tombstone.flag.changed    → triggers EmbeddingSyncService for created/updated flags
+                                  AND updates Redis dep-graph sorted sets incrementally
 
     Follows the Graph-Forge aiokafka pattern (manual commit, OTel headers).
     """
@@ -42,16 +51,20 @@ class TelemetryConsumer:
         brokers: str,
         anomaly_detector: AnomalyDetector,
         embedding_sync: "EmbeddingSyncService | None" = None,
+        graph_builder=None,
+        redis_client=None,
     ):
         self._brokers = brokers
         self._detector = anomaly_detector
         self._embedding_sync = embedding_sync
+        self._graph_builder = graph_builder
+        self._redis_client = redis_client
         self._consumer: AIOKafkaConsumer | None = None
         self._window: dict[str, dict] = {}  # flag_key:env -> {errors, total}
         self._flush_interval = 10  # seconds
 
     async def run(self) -> None:
-        topics = [TOPIC_FLAG_EVALUATED, TOPIC_FLAG_CHANGES]
+        topics = [TOPIC_FLAG_EVALUATED, TOPIC_FLAG_CHANGED]
         self._consumer = AIOKafkaConsumer(
             *topics,
             bootstrap_servers=self._brokers,
@@ -64,7 +77,7 @@ class TelemetryConsumer:
         flush_task = asyncio.create_task(self._flush_loop())
         try:
             async for msg in self._consumer:
-                if msg.topic == TOPIC_FLAG_CHANGES:
+                if msg.topic == TOPIC_FLAG_CHANGED:
                     await self._handle_flag_change(msg.value)
                 else:
                     await self._handle_evaluation(msg.value)
@@ -86,21 +99,56 @@ class TelemetryConsumer:
             self._window[window_key]["errors"] += 1
 
     async def _handle_flag_change(self, payload: dict) -> None:
-        """Sync embedding when a flag is created or updated."""
-        if self._embedding_sync is None:
-            return
+        """Process a flag-change event.
+
+        Performs two independent operations:
+        1. Sync pgvector embedding when a flag is created or updated.
+        2. Update the Redis dep-graph sorted sets incrementally.
+        """
         event_type: str = payload.get("event_type", "")
-        flag_key: str = payload.get("flag_key", "")
-        if not flag_key or event_type not in {"flag.created", "flag.updated"}:
-            return
-        await self._embedding_sync.on_flag_event(
-            event_type=event_type,
-            flag_key=flag_key,
-            name=payload.get("name", ""),
-            description=payload.get("description", ""),
-            tags=payload.get("tags", []),
-        )
-        logger.debug("Embedding sync triggered for %s (event=%s)", flag_key, event_type)
+        flag_key: str = payload.get("flag_key") or payload.get("key", "")
+        environment = payload.get("environment", "production")
+
+        # --- Embedding sync (pgvector search) ---
+        if self._embedding_sync is not None and flag_key and event_type in {"flag.created", "flag.updated"}:
+            try:
+                await self._embedding_sync.on_flag_event(
+                    event_type=event_type,
+                    flag_key=flag_key,
+                    name=payload.get("name", ""),
+                    description=payload.get("description", ""),
+                    tags=payload.get("tags", []),
+                )
+                logger.debug("Embedding sync triggered for %s (event=%s)", flag_key, event_type)
+            except Exception as exc:
+                logger.warning("Embedding sync failed for %s: %s", flag_key, exc)
+
+        # --- Dep-graph incremental update (Redis sorted sets) ---
+        if self._graph_builder is not None and self._redis_client is not None:
+            if event_type not in FLAG_CHANGE_EVENT_TYPES or not flag_key:
+                return
+
+            # changed_at: prefer explicit field, fall back to now
+            changed_at_raw = payload.get("changed_at") or payload.get("created_at")
+            if changed_at_raw:
+                try:
+                    changed_at = datetime.fromisoformat(str(changed_at_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    changed_at = datetime.now(tz=timezone.utc)
+            else:
+                changed_at = datetime.now(tz=timezone.utc)
+
+            try:
+                await self._graph_builder.update_on_flag_change(
+                    flag_key=flag_key,
+                    environment=environment,
+                    changed_at=changed_at,
+                    redis_client=self._redis_client,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "dep graph incremental update failed for %s: %s", flag_key, exc
+                )
 
     async def _flush_loop(self) -> None:
         while True:

@@ -35,6 +35,12 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce per-environment SSE connection limit.
+	if !checkSSEConnLimit(w, environment) {
+		return
+	}
+	defer releaseSSEConn(environment)
+
 	// SSE headers — must be set before WriteHeader
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
