@@ -11,6 +11,7 @@ jobs:
     name: Go Services (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace]
     steps:
@@ -33,11 +34,6 @@ jobs:
         env:
           GOWORK: "off"
         run: go build ./...
-
-      - name: Generate build provenance
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-path: '${{ github.workspace }}/dist/**'
 
   python-intelligence:
     name: Python Intelligence Service
