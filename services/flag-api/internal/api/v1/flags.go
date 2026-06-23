@@ -259,6 +259,10 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
 	})
+	h.publishToStream(r.Context(), env, FlagEvent{
+		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
+		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
+	})
 
 	writeJSON(w, http.StatusOK, curr)
 }
@@ -313,6 +317,10 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 		FlagKey: key, Enabled: false, RolloutPct: 0,
 		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
 	})
+	h.publishToStream(r.Context(), req.Environment, FlagEvent{
+		FlagKey: key, Enabled: false, RolloutPct: 0,
+		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
 }
@@ -358,6 +366,30 @@ func (h *FlagHandler) publishEvent(ctx context.Context, environment string, even
 	channel := fmt.Sprintf("stream:%s:updates", environment)
 	if err := h.rdb.Publish(ctx, channel, payload).Err(); err != nil {
 		h.logger.Warn("redis publish failed", zap.Error(err), zap.String("channel", channel))
+	}
+}
+
+// publishToStream publishes a flag change event to a Redis Stream (XADD).
+// Runs alongside publishEvent for one release cycle (legacy pub/sub removed in v2.1).
+// Stream key: tombstone:stream:{environment}, MaxLen: 10000 (approximate trim).
+func (h *FlagHandler) publishToStream(ctx context.Context, environment string, event FlagEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	streamKey := fmt.Sprintf("tombstone:stream:%s", environment)
+	if err := h.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		MaxLen: 10000,
+		Approx: true,
+		Values: map[string]interface{}{
+			"event":       event.Reason,
+			"flag_key":    event.FlagKey,
+			"environment": environment,
+			"payload":     string(payload),
+		},
+	}).Err(); err != nil {
+		h.logger.Warn("redis xadd failed", zap.Error(err), zap.String("stream", streamKey))
 	}
 }
 
