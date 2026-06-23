@@ -54,6 +54,7 @@ func main() {
 
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
+	metricsH := v1.NewGatewayMetricsHandler(h, logger)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -74,6 +75,9 @@ func main() {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/stream", sseH.Stream)
 		r.Get("/snapshot", snapH.GetSnapshot)
+		r.Route("/gateway", func(r chi.Router) {
+			r.Get("/metrics", metricsH.GetMetrics)
+		})
 	})
 
 	srv := &http.Server{

@@ -369,31 +369,27 @@ func (rp *RelayProxy) ServeLocalStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData)
 	flusher.Flush()
 
-	ch := rp.localHub.Subscribe(environment)
-	defer rp.localHub.Unsubscribe(environment, ch)
+	// Use a time-based client ID for correlation in logs.
+	clientID := fmt.Sprintf("relay-%d", time.Now().UnixNano())
+
+	ch := rp.localHub.Subscribe(environment, clientID)
+	defer rp.localHub.Unsubscribe(environment, clientID, ch)
 
 	heartbeat := time.NewTicker(heartbeatPeriod)
 	defer heartbeat.Stop()
 
-	rp.logger.Debug("local SSE client connected", zap.String("env", environment))
+	rp.logger.Debug("local SSE client connected",
+		zap.String("env", environment),
+		zap.String("client", clientID))
 
 	for {
 		select {
-		case event, ok := <-ch:
+		case frame, ok := <-ch:
 			if !ok {
 				return
 			}
-			payload, err := json.Marshal(event)
-			if err != nil {
-				continue
-			}
-			eventType := "flag_updated"
-			if !event.Enabled && (event.Reason == "circuit_breaker" ||
-				event.Reason == "manual_kill_switch" ||
-				event.Reason == "slo_burn_rate") {
-				eventType = "kill_switch"
-			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, payload)
+			// frame is a pre-serialized SSE wire-format payload — write verbatim.
+			_, _ = w.Write(frame)
 			flusher.Flush()
 
 		case <-heartbeat.C:
@@ -401,7 +397,9 @@ func (rp *RelayProxy) ServeLocalStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 
 		case <-r.Context().Done():
-			rp.logger.Debug("local SSE client disconnected", zap.String("env", environment))
+			rp.logger.Debug("local SSE client disconnected",
+				zap.String("env", environment),
+				zap.String("client", clientID))
 			return
 		}
 	}
