@@ -19,6 +19,7 @@ import (
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
 	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/scheduler"
 	"github.com/tombstone/flag-api/internal/transparency"
 )
 
@@ -67,20 +68,29 @@ func main() {
 	rekorClient := transparency.NewRekorClient()
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
+	rateMw := middleware.NewRateLimitMiddleware()
+	defer rateMw.Stop()
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
 	complianceH := v1.NewComplianceHandler(db, logger)
+	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
 
-	// Start background orphan detector (runs every 24 h, stops on shutdown).
-	orphanCtx, orphanCancel := context.WithCancel(context.Background())
-	go v1.NewOrphanDetector(db, logger).Run(orphanCtx)
+	// Background workers — all share the same cancellable root context.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+
+	// Orphan detector: scans for stale flags every 24 h.
+	go v1.NewOrphanDetector(db, logger).Run(bgCtx)
+
+	// Scheduled-change executor: applies due flag changes every 30 s.
+	go scheduler.Start(bgCtx, db, rdb, logger)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(rateMw.RateLimit)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -101,6 +111,11 @@ func main() {
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
 		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 		r.Post("/flags/{key}/kill", flagH.KillSwitch)
+
+		// Scheduled changes
+		r.Post("/flags/{key}/schedule", scheduledH.CreateSchedule)
+		r.Get("/flags/{key}/schedule", scheduledH.ListSchedule)
+		r.Delete("/flags/{key}/schedule/{id}", scheduledH.CancelSchedule)
 
 		r.Get("/environments/snapshot", snapH.GetSnapshot)
 		r.Get("/audit", auditH.ListAuditLog)
@@ -151,9 +166,9 @@ func main() {
 	<-quit
 	logger.Info("shutting down flag-api")
 
-	orphanCancel() // stop background orphan detector
+	bgCancel() // stop background workers (orphan detector + scheduled executor)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	_ = srv.Shutdown(shutdownCtx)
 }
