@@ -71,6 +71,7 @@ func main() {
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
 	complianceH := v1.NewComplianceHandler(db, logger)
+	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
@@ -108,6 +109,11 @@ func main() {
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
 		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 		r.Post("/flags/{key}/kill", flagH.KillSwitch)
+
+		// Flag prerequisites (GrowthBook ParentConditions pattern)
+		r.Post("/flags/{key}/prerequisites", prereqH.AddPrerequisite)
+		r.Get("/flags/{key}/prerequisites", prereqH.ListPrerequisites)
+		r.Delete("/flags/{key}/prerequisites/{id}", prereqH.DeletePrerequisite)
 
 		// Scheduled changes
 		r.Post("/flags/{key}/schedule", scheduledH.CreateSchedule)

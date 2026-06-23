@@ -152,3 +152,18 @@ CREATE TABLE IF NOT EXISTS service_tokens (
 INSERT INTO projects (id, name, slug)
 VALUES ('00000000-0000-0000-0000-000000000001', 'Default', 'default')
 ON CONFLICT DO NOTHING;
+
+-- Migration 006: flag prerequisites (GrowthBook ParentConditions pattern)
+-- gate=true  → prerequisite blocks the entire feature evaluation if not met
+-- gate=false → prerequisite only skips the current targeting rule if not met
+CREATE TABLE IF NOT EXISTS flag_prerequisites (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flag_id           UUID NOT NULL REFERENCES flags(id) ON DELETE CASCADE,
+  prereq_flag_key   TEXT NOT NULL,
+  required_variation TEXT NOT NULL DEFAULT 'true',
+  gate              BOOLEAN NOT NULL DEFAULT true,
+  priority          INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(flag_id, prereq_flag_key)
+);
+CREATE INDEX IF NOT EXISTS idx_flag_prerequisites_flag_id ON flag_prerequisites(flag_id);
