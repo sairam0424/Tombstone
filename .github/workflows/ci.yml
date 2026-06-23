@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go 1.25
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
@@ -27,12 +27,14 @@ jobs:
         working-directory: services/${{ matrix.service }}
         env:
           GOWORK: "off"
+          GOTOOLCHAIN: "local"
         run: go vet ./...
 
       - name: go build
         working-directory: services/${{ matrix.service }}
         env:
           GOWORK: "off"
+          GOTOOLCHAIN: "local"
         run: go build ./...
 
   python-intelligence:
@@ -142,4 +144,5 @@ jobs:
       - name: build and vet
         env:
           GOWORK: "off"
+          GOTOOLCHAIN: "local"
         run: cd infra/terraform/provider && go mod tidy && go build ./... && go vet ./...
