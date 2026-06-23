@@ -4,11 +4,11 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-
-from fastapi import Request  # noqa: F401 — used in endpoint signatures below
+from fastapi.responses import JSONResponse
 from app.anomaly.detector import AnomalyDetector
+from app.anomaly.rule_generator import generate_rule
 from app.cleanup.routes import router as cleanup_router
 from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
@@ -299,3 +299,52 @@ async def correlate_incident(incident_id: str, affected_service: str, incident_s
         incident_start_unix=incident_start_unix,
     )
     return {"incident_id": incident_id, "candidates": candidates}
+
+
+@app.post("/api/v1/intelligence/generate-rule")
+async def generate_anomaly_rule(flag_key: str, request: Request):
+    """
+    Trigger Argos 3-agent LLM pipeline to generate an anomaly detection rule.
+
+    Requires ANTHROPIC_API_KEY env var. Returns graceful 503 when absent.
+    Generated rules are stored as pending-approval signals — never auto-activated.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "ANTHROPIC_API_KEY not configured",
+                "detail": "Set ANTHROPIC_API_KEY env var to enable LLM rule generation",
+            },
+        )
+
+    # Extract error rate history from the in-memory anomaly detector
+    detector = request.app.state.anomaly
+    metrics = detector._metrics.get(flag_key)
+    if not metrics or len(metrics.error_rates) < 30:
+        obs = len(metrics.error_rates) if metrics else 0
+        return JSONResponse(
+            status_code=422,
+            content={"error": f"insufficient data: {obs} observations (need >=30)"},
+        )
+
+    error_rates = list(metrics.error_rates)
+    signals_dir = "signals"  # relative to repo root; service runs from repo root in Docker
+
+    result = await generate_rule(flag_key, error_rates, signals_dir)
+
+    if result.error:
+        return JSONResponse(status_code=500, content={"error": result.error})
+
+    return {
+        "flag_key": result.flag_key,
+        "description": result.description,
+        "precision": result.precision,
+        "recall": result.recall,
+        "signal_path": result.signal_path,
+        "status": "pending-approval",
+        "message": (
+            "Rule generated and stored as pending-approval signal. "
+            "Owner must approve before activation."
+        ),
+    }
