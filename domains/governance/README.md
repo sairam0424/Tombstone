@@ -33,3 +33,4 @@ Collector writes to `domains/governance/metrics/health.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | health_score=X stale=Y -->
+2026-06-24 | Loop scaffolded and deployed to main. Weekly Monday cron wired (06:00 UTC). Pending GitHub Actions var TOMBSTONE_API_URL to activate.

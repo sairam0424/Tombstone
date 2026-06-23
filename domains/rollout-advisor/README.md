@@ -38,3 +38,4 @@ Collector writes to `domains/rollout-advisor/metrics/recommendations.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | N recommendations reviewed, M signals created -->
+2026-06-24 | Loop scaffolded and deployed to main. Weekday cron wired (08:00 UTC). Pending GitHub Actions var TOMBSTONE_INTELLIGENCE_URL to activate. Signals-only design confirmed.

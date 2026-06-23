@@ -38,3 +38,4 @@ Collector writes to `domains/flag-cleanup/metrics/stale.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | what you did and found -->
+2026-06-24 | Loop scaffolded and deployed to main. Cron trigger wired (daily 02:00 UTC). Pending GitHub Actions var TOMBSTONE_INTELLIGENCE_URL to activate.
