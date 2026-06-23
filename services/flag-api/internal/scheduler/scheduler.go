@@ -194,6 +194,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		Environment: pc.environment,
 	}
 	publishEvent(ctx, rdb, log, pc.environment, event)
+	publishToStream(ctx, rdb, log, pc.environment, event)
 
 	log.Info("scheduler: applied scheduled change",
 		zap.Bool("enabled", newEnabled),
@@ -224,6 +225,31 @@ func publishEvent(ctx context.Context, rdb *redis.Client, log *zap.Logger, envir
 	channel := fmt.Sprintf("stream:%s:updates", environment)
 	if err := rdb.Publish(ctx, channel, payload).Err(); err != nil {
 		log.Warn("scheduler: redis publish failed", zap.Error(err), zap.String("channel", channel))
+	}
+}
+
+// publishToStream publishes a flag update event to a Redis Stream (XADD).
+// Runs alongside publishEvent for one release cycle (legacy pub/sub removed in v2.1).
+// Stream key: tombstone:stream:{environment}, MaxLen: 10000 (approximate trim).
+func publishToStream(ctx context.Context, rdb *redis.Client, log *zap.Logger, environment string, event flagEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Warn("scheduler: failed to marshal event for stream", zap.Error(err))
+		return
+	}
+	streamKey := fmt.Sprintf("tombstone:stream:%s", environment)
+	if err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		MaxLen: 10000,
+		Approx: true,
+		Values: map[string]interface{}{
+			"event":       event.Reason,
+			"flag_key":    event.FlagKey,
+			"environment": environment,
+			"payload":     string(payload),
+		},
+	}).Err(); err != nil {
+		log.Warn("scheduler: redis xadd failed", zap.Error(err), zap.String("stream", streamKey))
 	}
 }
 
