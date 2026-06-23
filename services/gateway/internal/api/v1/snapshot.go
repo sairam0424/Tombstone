@@ -4,20 +4,38 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/gateway/internal/tlsutil"
 )
 
 type SnapshotProxy struct {
 	rdb        *redis.Client
 	flagAPIURL string
 	logger     *zap.Logger
+	httpClient *http.Client
 }
 
 func NewSnapshotProxy(rdb *redis.Client, flagAPIURL string, logger *zap.Logger) *SnapshotProxy {
-	return &SnapshotProxy{rdb: rdb, flagAPIURL: flagAPIURL, logger: logger}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		certsDir := os.Getenv("CERTS_DIR")
+		if certsDir == "" {
+			certsDir = "/certs"
+		}
+		tlsCfg, err := tlsutil.LoadClientTLSConfig(certsDir)
+		if err != nil {
+			logger.Warn("mTLS client cert load failed — plain HTTP fallback", zap.Error(err))
+		} else {
+			httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+			logger.Info("gateway -> flag-api snapshot proxy mTLS enabled")
+		}
+	}
+	return &SnapshotProxy{rdb: rdb, flagAPIURL: flagAPIURL, logger: logger, httpClient: httpClient}
 }
 
 // GetSnapshot handles GET /api/v1/snapshot?environment={env}
@@ -54,7 +72,7 @@ func (s *SnapshotProxy) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 	// Forward auth header
 	req.Header.Set("Authorization", r.Header.Get("Authorization"))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		s.logger.Error("fetch snapshot", zap.Error(err))
 		http.Error(w, `{"error":"upstream unavailable"}`, http.StatusBadGateway)
