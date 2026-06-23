@@ -39,5 +39,13 @@
   "dependencies": {
     "eventsource": "^3.0.0",
     "murmurhash": "^2.0.1"
+  },
+  "peerDependencies": {
+    "@openfeature/server-sdk": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/server-sdk": {
+      "optional": true
+    }
   }
 }
