@@ -97,6 +97,14 @@ func main() {
 		r.Post("/register", handler.RegisterIntegration)
 		r.Post("/events", handler.TriggerEvent)
 
+		// Inbound webhook routes — external services post alerts here.
+		r.Route("/inbound", func(r chi.Router) {
+			// POST /api/v1/marketplace/inbound/datadog
+			// Receives Datadog monitor alerts; auto-triggers blast-radius check and
+			// optional kill switch for P1/P2 alerts with BLOCKED flags.
+			r.Post("/datadog", handler.HandleDatadogInbound)
+		})
+
 		r.Route("/{id}", func(r chi.Router) {
 			r.Get("/", handler.GetIntegration)
 			r.Delete("/", handler.UninstallIntegration)
