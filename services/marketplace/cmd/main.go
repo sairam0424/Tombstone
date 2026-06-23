@@ -74,17 +74,20 @@ func main() {
 	dispatcher := webhook.NewDispatcher(reg, logger)
 	handler := v1.NewHandler(reg, dispatcher, logger)
 
-	// Interactive Slack app — requires SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET.
-	slackBotToken := os.Getenv("SLACK_BOT_TOKEN")
-	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
-	slackApp := integrations.NewSlackApp(slackBotToken, slackSigningSecret, flagAPIURL)
-	inboundHandler := v1.NewInboundHandler(slackApp, logger)
-
-	// Update Slack integration metadata to reflect bidirectional capability.
-	reg.MarkBidirectional("slack", []string{
-		"/api/v1/marketplace/slack/commands",
-		"/api/v1/marketplace/slack/actions",
-	})
+	// Interactive Slack app — wired at runtime if SLACK_BOT_TOKEN is set.
+	// HTTP handlers added in a follow-up (services/marketplace/internal/api/v1/slack.go).
+	if slackToken := os.Getenv("SLACK_BOT_TOKEN"); slackToken != "" {
+		slackApp := integrations.NewSlackApp(
+			slackToken,
+			os.Getenv("SLACK_SIGNING_SECRET"),
+			flagAPIURL,
+		)
+		_ = slackApp // TODO: wire to /api/v1/marketplace/slack/* routes
+		reg.MarkBidirectional("slack", []string{
+			"/api/v1/marketplace/slack/commands",
+			"/api/v1/marketplace/slack/actions",
+		})
+	}
 
 	r := chi.NewRouter()
 

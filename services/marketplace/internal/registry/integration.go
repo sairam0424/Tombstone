@@ -289,11 +289,20 @@ func (r *Registry) Register(i Integration) bool {
 	return true
 }
 
+// firstOf returns the first element of a slice, or empty string if the slice is empty.
+func firstOf(ss []string) string {
+	if len(ss) > 0 {
+		return ss[0]
+	}
+	return ""
+}
+
 // MarkBidirectional upgrades an integration's metadata to reflect bidirectional capability,
 // setting Bidirectional: true and recording the inbound endpoint paths.
 // This is called at startup for first-party integrations that support inbound webhooks.
 // Returns false if the integration does not exist.
 func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool {
+	// inboundEndpoints[0] used as the single InboundEndpoint field; further endpoints ignored
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -314,7 +323,7 @@ func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool 
 		Config:           existing.Config,
 		IsFirstParty:     existing.IsFirstParty,
 		Bidirectional:    true,
-		InboundEndpoints: inboundEndpoints,
+		InboundEndpoint:  firstOf(inboundEndpoints),
 	}
 	r.integrations[id] = updated
 	return true
