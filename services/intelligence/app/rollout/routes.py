@@ -125,7 +125,7 @@ async def enable_autonomous_rollout(
 ) -> PosteriorResponse:
     """Opt a flag-environment pair into autonomous rollout mode."""
     # Ensure posterior exists with the supplied current percentage before enabling
-    engine.update(
+    await engine.update(
         flag_key=body.flag_key,
         environment=body.environment,
         successes=0,
@@ -157,7 +157,7 @@ async def feed_telemetry(
     engine: EngineDep,
 ) -> RecommendationResponse:
     """Feed a telemetry window into the Beta posterior and return the current recommendation."""
-    engine.update(
+    await engine.update(
         flag_key=body.flag_key,
         environment=body.environment,
         successes=body.successes,
