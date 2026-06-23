@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -85,4 +87,57 @@ func (b *Broadcaster) handleMessage(msg *redis.Message) {
 	}
 
 	b.hub.Broadcast(environment, event)
+}
+
+// RunStreamConsumer reads from a Redis Stream consumer group for one environment.
+// Runs concurrently with the pub/sub broadcaster (Run). Call in a goroutine per
+// known environment. XACK is called after successful hub.Broadcast — not before.
+func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string) {
+	hostname, _ := os.Hostname()
+	consumer := fmt.Sprintf("gateway-%s", hostname)
+	streamKey := StreamKey(environment)
+	backoff := time.Second
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		msgs, err := ReadStreamEvents(ctx, b.rdb, streamKey, consumer)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			b.logger.Warn("stream read error, backing off",
+				zap.String("stream", streamKey),
+				zap.Error(err),
+				zap.Duration("backoff", backoff))
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
+
+		for _, msg := range msgs {
+			payload, ok := msg.Values["payload"].(string)
+			if !ok {
+				AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+				continue
+			}
+			var event FlagEvent
+			if err := json.Unmarshal([]byte(payload), &event); err != nil {
+				b.logger.Warn("stream: failed to unmarshal event",
+					zap.Error(err), zap.String("id", msg.ID))
+				AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+				continue
+			}
+			b.hub.Broadcast(environment, event)
+			AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+		}
+	}
 }

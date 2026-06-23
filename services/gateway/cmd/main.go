@@ -67,6 +67,16 @@ func main() {
 	defer cancel()
 	go broadcaster.Run(ctx)
 
+	// Seed consumer groups for known environments. New environments auto-register
+	// on first XREADGROUP call (MKSTREAM). Start one stream reader per environment.
+	knownEnvs := []string{"development", "staging", "production"}
+	hub.CreateConsumerGroups(ctx, rdb, knownEnvs, logger)
+	for _, env := range knownEnvs {
+		env := env // capture loop variable
+		go broadcaster.RunStreamConsumer(ctx, env)
+	}
+	logger.Info("Redis Streams consumers started", zap.Strings("environments", knownEnvs))
+
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
 	metricsH := v1.NewGatewayMetricsHandler(h, logger)

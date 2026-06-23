@@ -56,7 +56,7 @@ These four domain loops are the primary workstreams for Tombstone's intelligence
 | `flag-cleanup` | Eliminate stale flags before they become incidents | daily | `flag-api /api/v1/stale` |
 | `incident-response` | Correlate production incidents to causal flags; auto-rollback within SLO | on-trigger | `evaluator /api/v1/flags/{key}/slo` |
 | `rollout-advisor` | Maximize experiment velocity and minimize collision risk | daily | `intelligence /api/v1/anomaly/{key}` |
-| `governance` (planned) | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` |
+| `governance` (active) — weekly health loop | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/compliance/evidence`, `intelligence /api/v1/stale` |
 
 ### Collectors (data sources)
 
