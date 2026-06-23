@@ -75,18 +75,24 @@ func main() {
 	handler := v1.NewHandler(reg, dispatcher, logger)
 
 	// Interactive Slack app — wired at runtime if SLACK_BOT_TOKEN is set.
-	// HTTP handlers added in a follow-up (services/marketplace/internal/api/v1/slack.go).
+	slackEnabled := false
 	if slackToken := os.Getenv("SLACK_BOT_TOKEN"); slackToken != "" {
 		slackApp := integrations.NewSlackApp(
 			slackToken,
 			os.Getenv("SLACK_SIGNING_SECRET"),
 			flagAPIURL,
 		)
-		_ = slackApp // TODO: wire to /api/v1/marketplace/slack/* routes
+		handler.SetSlackApp(slackApp)
 		reg.MarkBidirectional("slack", []string{
 			"/api/v1/marketplace/slack/commands",
 			"/api/v1/marketplace/slack/actions",
 		})
+		slackEnabled = true
+		logger.Info("marketplace: Slack interactive app enabled",
+			zap.Strings("routes", []string{
+				"/api/v1/marketplace/slack/commands",
+				"/api/v1/marketplace/slack/actions",
+			}))
 	}
 
 	r := chi.NewRouter()
@@ -127,6 +133,14 @@ func main() {
 			// optional kill switch for P1/P2 alerts with BLOCKED flags.
 			r.Post("/datadog", handler.HandleDatadogInbound)
 		})
+
+		// Interactive Slack app routes — active only when SLACK_BOT_TOKEN is set.
+		if slackEnabled {
+			r.Route("/slack", func(r chi.Router) {
+				r.Post("/commands", handler.HandleSlackCommands)
+				r.Post("/actions", handler.HandleSlackActions)
+			})
+		}
 
 		r.Route("/{id}", func(r chi.Router) {
 			r.Get("/", handler.GetIntegration)
