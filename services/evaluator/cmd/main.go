@@ -19,6 +19,7 @@ import (
 
 	"github.com/tombstone/evaluator/internal/blast"
 	"github.com/tombstone/evaluator/internal/circuit"
+	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
 )
@@ -59,6 +60,9 @@ func main() {
 		db, _ = sql.Open("postgres", dbURL)
 	}
 
+	rateMw := middleware.NewRateLimitMiddleware()
+	defer rateMw.Stop()
+
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
 	agg := telemetry.NewAggregator(breaker, rdb, logger)
@@ -84,6 +88,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(rateMw.RateLimit)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"status":"ok"}`)

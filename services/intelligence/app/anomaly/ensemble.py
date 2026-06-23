@@ -50,7 +50,7 @@ class EnsembleDetector:
     # Isolation Forest
     iso_forest: IsolationForest = field(
         default_factory=lambda: IsolationForest(
-            n_estimators=100, contamination=0.05, random_state=42
+            n_estimators=100, contamination=0.05,  # type: ignore[call-arg]  # sklearn stubs incorrectly type contamination as str-only random_state=42
         )
     )
     iso_trained: bool = False
