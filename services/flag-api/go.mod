@@ -3,11 +3,13 @@ module github.com/tombstone/flag-api
 go 1.25.0
 
 require (
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-chi/cors v1.2.1
-	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
+	github.com/open-policy-agent/opa v1.17.1
 	github.com/redis/go-redis/v9 v9.5.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 	go.opentelemetry.io/otel v1.44.0
