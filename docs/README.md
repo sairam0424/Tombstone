@@ -1,3 +1,7 @@
+---
+kind: schema-readme
+---
+
 # docs/ — durable knowledge
 
 One file per **doc**: something you learned, analyzed, or decided that you want to be findable

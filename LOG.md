@@ -1,7 +1,7 @@
 # Tombstone — Activity Log
 
 Append-only journal of finished work, so anyone (human or agent) can catch up fast.
-Newest at the BOTTOM. Append an entry whenever a bulk of work wraps (ideally right before
+Newest first. Append an entry above older entries whenever a bulk of work wraps (ideally right before
 the commit that ships it). Keep entries SHORT: header line + What + Refs, nothing else.
 
 **Entry grammar** (strict, one header line per entry):
@@ -27,6 +27,8 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 ```
 
 ---
+
+<!-- entries below this line, newest first -->
 
 ## 2026-06-23 · Bootstrap loop-engineer knowledge base substrate · #harness #loop #infra
 What: Created signals/, docs/, domains/ scaffolding plus LOG.md and ARCHITECTURE.md for Loop-Engineer v2 integration.

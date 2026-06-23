@@ -1,4 +1,5 @@
 ---
+kind: architecture
 title: Knowledge-base architecture
 type: decision
 status: adopted

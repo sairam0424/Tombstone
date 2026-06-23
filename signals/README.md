@@ -1,3 +1,7 @@
+---
+kind: schema-readme
+---
+
 # signals/ — evidence
 
 One file per **signal**: a piece of feedback, an idea, or an observation worth remembering.
@@ -15,7 +19,7 @@ category: feedback | idea | friction | observation   # what sort of signal
 frequency: 1                # how many times seen; increment on recurrence
 sources: []                 # where it came from (links, ticket IDs, urls)
 domain: []                  # which loop(s) this feeds — a list of domain names
-status: open | triaged | actioned | closed
+status: open | reviewed | closed
 ---
 ```
 
