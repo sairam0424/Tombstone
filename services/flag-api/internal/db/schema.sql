@@ -1,3 +1,9 @@
+-- Migration 000 (baseline): Initial Tombstone schema
+-- Applied once at database initialization via: psql $DATABASE_URL < schema.sql
+-- Subsequent incremental changes: services/flag-api/internal/db/migrations/NNN_*.sql
+-- NOTE: 001 is intentionally skipped — this file IS the first migration (baseline).
+--       Incremental migrations start at 002.
+
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- pgvector: required for NLP search (available in pgvector/pgvector:pg16 image)
 DO $$ BEGIN
