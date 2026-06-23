@@ -14,7 +14,7 @@ from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
-from app.kafka.consumer import TelemetryConsumer
+from app.kafka.consumer import TelemetryConsumer, create_consumer
 from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
@@ -144,15 +144,30 @@ async def lifespan(app: FastAPI):
         )  # unavailable but won't crash
     await app.state.clickhouse.start()
 
-    # Start background Kafka consumer (drives embedding sync + dep-graph updates)
-    consumer = TelemetryConsumer(
-        brokers=os.environ.get("KAFKA_BROKERS", "localhost:9092"),
-        anomaly_detector=app.state.anomaly,
-        embedding_sync=app.state.embedding_sync,
-        graph_builder=app.state.graph_builder if app.state.redis else None,
-        redis_client=app.state.redis,
-    )
-    consumer_task = asyncio.create_task(consumer.run())
+    # Start background event consumer (drives embedding sync + dep-graph updates)
+    # CONSUMER_BACKEND=redis uses Redis Streams (Fly.io free tier, no Kafka needed)
+    # CONSUMER_BACKEND=kafka (default) preserves existing TelemetryConsumer behaviour
+    _consumer_backend = os.environ.get("CONSUMER_BACKEND", "kafka")
+    if _consumer_backend == "redis":
+        _consumer = create_consumer(
+            "redis",
+            redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"),
+            anomaly_detector=app.state.anomaly,
+            environments=os.environ.get("TOMBSTONE_ENVIRONMENTS", "production").split(","),
+            embedding_sync=app.state.embedding_sync,
+            graph_builder=app.state.graph_builder if app.state.redis else None,
+        )
+        await _consumer.start()
+    else:
+        _consumer = create_consumer(
+            "kafka",
+            brokers=os.environ.get("KAFKA_BROKERS", "localhost:9092"),
+            anomaly_detector=app.state.anomaly,
+            embedding_sync=app.state.embedding_sync,
+            graph_builder=app.state.graph_builder if app.state.redis else None,
+            redis_client=app.state.redis,
+        )
+    consumer_task = asyncio.create_task(_consumer.run())
 
     # Start daily Isolation Forest retraining task (runs at 02:00 UTC)
     retrain_task = asyncio.create_task(_daily_retrain(app))
@@ -170,6 +185,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await _consumer.stop()
     consumer_task.cancel()
     retrain_task.cancel()
     if rebuild_task is not None:
