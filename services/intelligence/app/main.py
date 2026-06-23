@@ -108,12 +108,21 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
 
     # ClickHouse telemetry pipeline (optional)
+    # Schema (run once in ClickHouse):
+    # CREATE TABLE tombstone_evaluations (
+    #   flag_key String, environment String, user_hash String,
+    #   result String, reason String, latency_ms Float64, ts DateTime
+    # ) ENGINE = MergeTree() ORDER BY (flag_key, ts);
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
+    redis_client = getattr(app.state, "redis", None)
     if ch_host:
-        app.state.clickhouse = ClickHouseWriter(host=ch_host)
+        app.state.clickhouse = ClickHouseWriter(host=ch_host, redis_client=redis_client)
         await app.state.clickhouse.create_tables()
     else:
-        app.state.clickhouse = ClickHouseWriter(host="localhost")  # unavailable but won't crash
+        app.state.clickhouse = ClickHouseWriter(
+            host="localhost", redis_client=redis_client
+        )  # unavailable but won't crash
+    await app.state.clickhouse.start()
 
     # Start background Kafka consumer (drives embedding sync + dep-graph updates)
     consumer = TelemetryConsumer(
