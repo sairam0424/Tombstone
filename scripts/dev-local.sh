@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # dev-local.sh — Tombstone full local dev stack.
-# Wraps docker compose (infra) + starts the dashboard in a tmux session.
+# Wraps docker compose with status/logs/restart commands for the full Tombstone stack.
 # Go services and intelligence are run via Docker Compose — not tmux windows.
 #
 # Usage:
@@ -10,10 +10,9 @@
 #   scripts/dev-local.sh down --all    # also wipe volumes
 #   scripts/dev-local.sh status        # compose ps + port check
 #   scripts/dev-local.sh logs <svc>    # docker compose logs -f <svc>
-#   scripts/dev-local.sh attach        # attach to tmux session (dashboard)
+#   scripts/dev-local.sh attach        # print attach tips (use logs or docker attach)
 set -euo pipefail
 
-SESSION="tombstone-dev"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="docker compose -f $ROOT/infra/docker-compose.yml"
 
@@ -73,7 +72,10 @@ cmd_status() {
 cmd_logs()    { $COMPOSE logs -f --tail=50 "${1:?usage: logs <service>}"; }
 cmd_down()    { $COMPOSE down $([ "${1:-}" = "--all" ] && echo "-v" || echo ""); ok "Stack stopped."; }
 cmd_restart() { $COMPOSE restart "${1:?usage: restart <service>}"; ok "Restarted $1."; }
-cmd_attach()  { tmux has-session -t "$SESSION" 2>/dev/null || die "No tmux session '$SESSION'."; tmux attach -t "$SESSION"; }
+cmd_attach()  {
+  echo "Tip: use 'scripts/dev-local.sh logs <service>' to tail a specific service."
+  echo "     or 'docker attach <container>' for interactive attach."
+}
 
 case "${1:-up}" in
   up)      cmd_up ;;
