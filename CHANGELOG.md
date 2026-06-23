@@ -12,10 +12,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Added
 - Argos-inspired 3-agent LLM anomaly rule generation (Phase 3.2)
   - `POST /api/v1/intelligence/generate-rule` endpoint
-  - Detection Agent -> Repair Agent (syntax-validated) -> Review Agent (precision/recall)
-  - Requires `ANTHROPIC_API_KEY`; graceful 503 when absent
-  - Generated rules stored as `signals/rule-candidate-{flag}-{date}.md` with `status: pending-approval`, never auto-activated
-  - `services/intelligence/pyproject.toml` gains optional `llm` extra (`anthropic>=0.55.0`)
+  - Detection Agent → Repair Agent (syntax-validated, ≤3 retry rounds) → Review Agent (precision/recall on held-out 20%)
+  - Requires `ANTHROPIC_API_KEY`; graceful 503 when absent; 422 when <30 observations
+  - Generated rules stored as `signals/rule-candidate-{flag}-{date}.md` with `status: pending-approval` — never auto-activated
+  - `ast.parse()` sandbox blocks imports, file access, subprocess in generated code
+- Redis Streams (`XADD`/`XREADGROUP`) alongside pub/sub for flag event delivery (Phase 4.1)
+  - Stream key: `tombstone:stream:{environment}`, consumer group: `gateway-workers`
+  - Consumer name per gateway instance: `gateway-{hostname}`
+  - Event history: last 10,000 events per stream retained (approximate trim)
+  - Legacy pub/sub still active for backward compat — removal tracked for v2.1
 
 ---
 
