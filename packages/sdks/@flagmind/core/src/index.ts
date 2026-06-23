@@ -9,6 +9,7 @@ export type {
   FlagType,
   FlagState,
   FlagEnvironmentState,
+  FlagPrerequisite,
   TargetingRule,
   EvaluationContext,
   EvaluationResult,
