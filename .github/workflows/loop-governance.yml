@@ -1,0 +1,28 @@
+name: Loop — Governance Health
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    if: vars.TOMBSTONE_API_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run governance health collector
+        env:
+          FLAG_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          INTELLIGENCE_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+        run: bash scripts/loop-governance.sh
+
+      - name: Commit metrics + signals if changed
+        run: |
+          git config user.name "tombstone-loop[bot]"
+          git config user.email "loop@tombstone.io"
+          git add domains/governance/metrics/ signals/ LOG.md
+          git diff --cached --quiet || (git commit -m "chore(loop): governance health ${{ github.run_id }}" && git push origin HEAD:develop)
