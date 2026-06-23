@@ -1,0 +1,29 @@
+# Primary region configuration — flag-api writes, all services full replicas
+global:
+  region: us-east-1
+  isPrimary: true
+
+flag-api:
+  replicaCount: 3
+  env:
+    - name: IS_PRIMARY_REGION
+      value: "true"
+    - name: REGION
+      value: "us-east-1"
+
+gateway:
+  replicaCount: 5    # More gateway replicas for high SSE connection count
+  env:
+    - name: REGION
+      value: "us-east-1"
+
+evaluator:
+  replicaCount: 2
+
+intelligence:
+  replicaCount: 1
+
+redis:
+  # Use external Redis (Upstash Global) in production
+  enabled: false
+  externalUrl: ""  # Set via --set redis.externalUrl=...
