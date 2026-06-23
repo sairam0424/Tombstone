@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/marketplace/internal/integrations"
 	"github.com/tombstone/marketplace/internal/registry"
 	"github.com/tombstone/marketplace/internal/webhook"
 )
@@ -17,6 +18,7 @@ type Handler struct {
 	reg        *registry.Registry
 	dispatcher *webhook.Dispatcher
 	logger     *zap.Logger
+	slackApp   *integrations.SlackApp
 }
 
 // NewHandler constructs a Handler.
@@ -26,6 +28,11 @@ func NewHandler(reg *registry.Registry, dispatcher *webhook.Dispatcher, logger *
 		dispatcher: dispatcher,
 		logger:     logger,
 	}
+}
+
+// SetSlackApp wires the SlackApp into the handler so Slack route methods are active.
+func (h *Handler) SetSlackApp(app *integrations.SlackApp) {
+	h.slackApp = app
 }
 
 // writeJSON serialises v to the response with the given status code.
