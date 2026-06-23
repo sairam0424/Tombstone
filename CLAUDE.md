@@ -179,6 +179,49 @@ make gen-proto      # Regenerate Go stubs from .proto files
 Before starting any task: read `AGENTS_LEARNING.md`.
 After completing any task: update `AGENTS_LEARNING.md` with new learnings.
 
+## Loop-Engineer Harness
+
+This repo uses the [loop-engineer](https://github.com/AI-Builder-Club/loop-engineer-template) pattern.
+Read `ARCHITECTURE.md` for the knowledge-base model.
+
+### Ship any code change
+Use the `ship-change` workflow — do NOT create ad-hoc worktrees manually:
+```js
+Workflow({ name: "ship-change", args: {
+  task: "what to build",
+  repo: "/Users/.../Tombstone",
+  baseBranch: "develop"
+}})
+```
+
+### Open a PR
+Use `/pr` skill — it spawns an independent verifier sub-agent that drives the real app.
+"The feature is the verdict — a green test suite with an unverified feature isn't done."
+
+### Set up new loops / domains
+Use `/new-loop` skill. A loop = a domain = a recurring workstream with its own charter.
+Charter, backlog, and timeline live in `domains/<name>/README.md`.
+
+### Knowledge base
+- `signals/` — evidence: feedback, friction, observations. Create with frontmatter `kind: signal`.
+- `docs/` — durable knowledge: analysis, decisions, learnings. Create with `kind: doc`.
+- `domains/` — the loops: flag-cleanup (daily), incident-response (event), rollout-advisor (daily).
+- `LOG.md` — global feed. Append one entry per ship. Never delete entries.
+
+### Active loops
+| Loop | Trigger | Script | What it does |
+|------|---------|--------|-------------|
+| flag-cleanup | daily 02:00 UTC | `scripts/loop-flag-cleanup.sh` | Detects stale flags, creates signals, metrics |
+| incident-response | circuit trip event | `scripts/loop-incident-response.sh <key> <env>` | Post-mortem doc + repeat-offender signal |
+| rollout-advisor | daily 08:00 UTC | `scripts/loop-rollout-advisor.sh` | ML recommendation review + blast radius check |
+
+### Dev stack
+```bash
+scripts/dev-local.sh up        # start full stack
+scripts/dev-local.sh status    # check ports
+scripts/dev-local.sh logs <svc>
+```
+
 ## Service Ports (local dev)
 
 | Service | Port |
