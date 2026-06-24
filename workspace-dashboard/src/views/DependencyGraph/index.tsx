@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { INTEL_URL, API_URL, SDK_TOKEN } from '../../config.js';
 
 type Win = '1h' | '6h' | '24h' | '7d';
 const WIN_SEC: Record<Win, number> = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
@@ -17,9 +18,9 @@ export default function DependencyGraph() {
   const [loading, setLoading] = useState(false);
   const [killing, setKilling] = useState(false);
 
-  const INTEL = 'http://localhost:8083';
-  const API = 'http://localhost:8081';
-  const TOK = 'sdk-dev-token-change-in-prod';
+  const INTEL = INTEL_URL;
+  const API = API_URL;
+  const TOK = SDK_TOKEN;
 
   const fetchGraph = useCallback(async () => {
     setLoading(true);

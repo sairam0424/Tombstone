@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { API_URL, SDK_TOKEN } from '../../config.js';
 
 interface BGToken {
   id: string;
@@ -16,8 +17,8 @@ export default function BreakGlassView() {
   const [newToken, setNewToken] = useState<string | null>(null);
   const [form, setForm] = useState({ scope: 'all-flags', expiresInHours: 4, incidentRef: '' });
 
-  const apiUrl = (import.meta as { env: Record<string, string> }).env['VITE_API_URL'] ?? 'http://localhost:8081';
-  const token = (import.meta as { env: Record<string, string> }).env['VITE_SDK_TOKEN'] ?? 'sdk-dev-token-change-in-prod';
+  const apiUrl = API_URL;
+  const token = SDK_TOKEN;
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
   const loadTokens = () => {
