@@ -33,7 +33,7 @@ class FlagSearchRetriever:
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        self._pool = await asyncpg.create_pool(self._db_url)
+        self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
         if self._embedding_model is not None:
             await self._embedding_model.initialize()
             logger.info("FlagSearchRetriever: embedding model initialized — dense vector search enabled")
@@ -187,5 +187,5 @@ class FlagSearchRetriever:
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url)
+            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
         return self._pool
