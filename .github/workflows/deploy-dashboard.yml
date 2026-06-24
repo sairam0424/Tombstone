@@ -1,0 +1,41 @@
+name: Deploy Dashboard to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workspace-dashboard/**'
+      - '.github/workflows/deploy-dashboard.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to Cloudflare Pages
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dashboard deps
+        working-directory: workspace-dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: workspace-dashboard
+        env:
+          VITE_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          VITE_GATEWAY_URL: ${{ vars.TOMBSTONE_GATEWAY_URL }}
+          VITE_INTEL_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          VITE_EVAL_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
+          VITE_SDK_TOKEN: ${{ secrets.TOMBSTONE_SDK_TOKEN }}
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy workspace-dashboard/dist --project-name=tombstone-dashboard --branch=main
