@@ -66,8 +66,10 @@ func main() {
 	if err != nil {
 		logger.Fatal("open db", zap.Error(err))
 	}
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(5)                      // Neon free tier — share budget with other services
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(5 * time.Minute)     // recycle before Neon's ~5 min idle timeout
+	db.SetConnMaxIdleTime(2 * time.Minute)     // release idle conns quickly
 	if err := db.Ping(); err != nil {
 		logger.Fatal("ping db", zap.Error(err))
 	}
