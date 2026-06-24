@@ -2,7 +2,7 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "installCommand": "npm ci --ignore-scripts",
+  "installCommand": "npm install --ignore-scripts",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ],
