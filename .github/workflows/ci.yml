@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace]
+        service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace, tombstone-operator]
     steps:
       - uses: actions/checkout@v4
 
