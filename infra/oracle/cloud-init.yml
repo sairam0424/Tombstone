@@ -1,0 +1,40 @@
+#cloud-config
+# Oracle Cloud Always Free — ARM (aarch64) Ubuntu 22.04
+# Run once on first boot via Oracle Cloud console "Cloud-Init Script" field
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - docker.io
+  - docker-compose-v2
+  - nginx
+  - certbot
+  - python3-certbot-nginx
+  - git
+  - curl
+  - ufw
+
+runcmd:
+  # Enable Docker
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker ubuntu
+
+  # Firewall — allow SSH, HTTP, HTTPS, and Tombstone service ports
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw allow 8081/tcp   # flag-api
+  - ufw allow 8082/tcp   # evaluator
+  - ufw allow 8084/tcp   # gitops-sync
+  - ufw allow 8085/tcp   # ast-rewriter
+  - ufw allow 8086/tcp   # marketplace
+  - ufw --force enable
+
+  # Clone repo
+  - git clone https://github.com/sairam0424/Tombstone.git /opt/tombstone
+  - chown -R ubuntu:ubuntu /opt/tombstone
+
+  # Create .env from template (fill in secrets after setup)
+  - cp /opt/tombstone/infra/.env.example /opt/tombstone/infra/.env

@@ -1,0 +1,105 @@
+# Production docker-compose for Oracle Cloud Always Free ARM VM
+# Runs only the 5 stateless Go services.
+# gateway and intelligence run on Northflank (separate platform).
+# PostgreSQL and Redis are managed externally (Neon + Upstash).
+
+services:
+  flag-api:
+    build:
+      context: ../../services/flag-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - DB_URL=${DB_URL}
+      - REDIS_URL=${REDIS_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - PORT=8081
+      - EMBEDDING_BACKEND=${EMBEDDING_BACKEND:-bedrock}
+      - BEDROCK_ACCESS_KEY_ID=${BEDROCK_ACCESS_KEY_ID}
+      - BEDROCK_SECRET_ACCESS_KEY=${BEDROCK_SECRET_ACCESS_KEY}
+      - BEDROCK_REGION=${BEDROCK_REGION:-us-east-1}
+      - UPSTASH_REDIS_REST_URL=${UPSTASH_REDIS_REST_URL}
+      - UPSTASH_REDIS_REST_TOKEN=${UPSTASH_REDIS_REST_TOKEN}
+      - REKOR_ENABLED=${REKOR_ENABLED:-false}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  evaluator:
+    build:
+      context: ../../services/evaluator
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_URL=${DB_URL}
+      - REDIS_URL=${REDIS_URL}
+      - FLAG_API_URL=http://flag-api:8081
+      - FLAG_API_TOKEN=${FLAG_API_TOKEN}
+      - PORT=8082
+    depends_on:
+      flag-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  marketplace:
+    build:
+      context: ../../services/marketplace
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - FLAG_API_URL=http://flag-api:8081
+      - FLAG_API_TOKEN=${FLAG_API_TOKEN}
+      - DD_WEBHOOK_SECRET=${DD_WEBHOOK_SECRET}
+      - EVALUATOR_URL=http://evaluator:8082
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}
+      - PORT=8086
+    depends_on:
+      - flag-api
+
+  gitops-sync:
+    build:
+      context: ../../services/gitops-sync
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      - FLAG_API_URL=http://flag-api:8081
+      - FLAG_API_TOKEN=${FLAG_API_TOKEN}
+      - PORT=8084
+    depends_on:
+      flag-api:
+        condition: service_healthy
+
+  ast-rewriter:
+    build:
+      context: ../../services/ast-rewriter
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  default:
+    name: tombstone-prod
