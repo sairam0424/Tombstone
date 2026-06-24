@@ -2,7 +2,8 @@ import asyncio
 import logging
 
 import asyncpg
-from sentence_transformers import SentenceTransformer
+
+from app.search.embedding_model import EmbeddingModel
 
 logger = logging.getLogger(__name__)
 
@@ -16,28 +17,28 @@ class FlagSearchRetriever:
     (populated by EmbeddingSyncService on flag create/update, backfilled on startup).
     If the pgvector extension is unavailable at query time, the dense path is skipped
     and search degrades gracefully to lexical + ILIKE only.
+
+    Pass embedding_model=None to use lexical-only search (no model loaded).
     """
 
-    MODEL_NAME = "BAAI/bge-m3"
     _RRF_K = 60
 
-    def __init__(self, db_url: str):
+    def __init__(self, db_url: str, embedding_model: EmbeddingModel | None = None):
         self._db_url = db_url
         self._pool: asyncpg.Pool | None = None
-        self._model: SentenceTransformer | None = None
+        self._embedding_model: EmbeddingModel | None = embedding_model
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        self._pool = await asyncpg.create_pool(self._db_url)
-        try:
-            self._model = SentenceTransformer(self.MODEL_NAME)
-            logger.info("BGE-M3 model loaded — dense vector search enabled")
-        except Exception as exc:
-            logger.warning("BGE-M3 model unavailable (%s) — falling back to lexical-only search", exc)
-            self._model = None
+        self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+        if self._embedding_model is not None:
+            await self._embedding_model.initialize()
+            logger.info("FlagSearchRetriever: embedding model initialized — dense vector search enabled")
+        else:
+            logger.warning("FlagSearchRetriever: no embedding model — falling back to lexical-only search")
 
     # ------------------------------------------------------------------
     # Public API
@@ -48,7 +49,7 @@ class FlagSearchRetriever:
         pool = await self._get_pool()
 
         # Run all three retrieval arms; dense is skipped if model absent or pgvector fails
-        dense_task = self._vector_search(pool, query, limit * 2) if self._model else asyncio.coroutine(lambda: [])()
+        dense_task = self._vector_search(pool, query, limit * 2) if self._embedding_model else asyncio.coroutine(lambda: [])()
         lexical_task = self._fulltext_search(pool, query, limit * 2)
         fallback_task = self._ilike_search(pool, query, limit * 2)
 
@@ -66,9 +67,10 @@ class FlagSearchRetriever:
     async def _vector_search(self, pool: asyncpg.Pool, query: str, limit: int) -> list[dict]:
         """Dense retrieval via pgvector cosine similarity. Falls back to [] on any error."""
         try:
-            embedding = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._embed(query)
-            )
+            vecs = await self._embedding_model.embed([query])
+            embedding = vecs[0] if vecs and vecs[0] else None
+            if embedding is None:
+                return []
             rows = await pool.fetch(
                 """
                 SELECT key, name, description,
@@ -180,20 +182,10 @@ class FlagSearchRetriever:
         ]
 
     # ------------------------------------------------------------------
-    # Embedding helper (synchronous — call via run_in_executor)
-    # ------------------------------------------------------------------
-
-    def _embed(self, text: str) -> list[float]:
-        """Encode *text* with BGE-M3 and return a flat float list."""
-        assert self._model is not None
-        vector = self._model.encode(text, normalize_embeddings=True)
-        return vector.tolist()
-
-    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url)
+            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
         return self._pool

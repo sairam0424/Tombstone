@@ -73,6 +73,12 @@ func main() {
 	var db *sql.DB
 	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
 		db, _ = sql.Open("postgres", dbURL)
+		if db != nil {
+			db.SetMaxOpenConns(3)                  // Neon free tier — evaluator uses DB rarely
+			db.SetMaxIdleConns(1)
+			db.SetConnMaxLifetime(5 * time.Minute) // recycle before Neon idle timeout
+			db.SetConnMaxIdleTime(2 * time.Minute)
+		}
 	}
 
 	rateMw := middleware.NewRateLimitMiddleware()

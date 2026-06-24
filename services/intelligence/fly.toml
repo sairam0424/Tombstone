@@ -1,0 +1,43 @@
+# services/intelligence/fly.toml
+# Fly.io deployment config for Tombstone intelligence service.
+# Free tier: shared-cpu-1x, 256MB RAM (fits without ML model).
+# Set secrets via: fly secrets set BEDROCK_ACCESS_KEY_ID=... etc.
+
+app = "tombstone-intelligence"
+primary_region = "iad"   # us-east (matches BEDROCK_REGION=us-east-1)
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+PORT = "8083"
+EMBEDDING_BACKEND = "bedrock"
+CONSUMER_BACKEND = "redis"
+TOMBSTONE_ENVIRONMENTS = "production"
+# Secrets (set via fly secrets set, never commit):
+# BEDROCK_ACCESS_KEY_ID
+# BEDROCK_SECRET_ACCESS_KEY
+# BEDROCK_REGION = "us-east-1"
+# DB_URL (Neon free PostgreSQL)
+# REDIS_URL (Upstash free Redis)
+
+[[services]]
+internal_port = 8083
+protocol = "tcp"
+
+[[services.ports]]
+port = 443
+handlers = ["tls", "http"]
+
+[[services.ports]]
+port = 80
+handlers = ["http"]
+
+[services.concurrency]
+type = "connections"
+hard_limit = 25
+soft_limit = 20
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
