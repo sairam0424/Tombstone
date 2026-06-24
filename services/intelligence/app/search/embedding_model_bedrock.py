@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 
@@ -9,6 +10,28 @@ logger = logging.getLogger(__name__)
 
 _MODEL_ID = "amazon.titan-embed-text-v2:0"
 _DIMENSIONS = 1024
+
+
+def decode_secret(value: str | None) -> str:
+    """
+    Decode a base64-encoded secret; return it unchanged if it isn't base64.
+    Uses a round-trip equality check (re-encode the decoded value and compare) —
+    many raw secrets are coincidentally valid base64 so a plain "decodes ok" test
+    is too loose. Raw AKIA… keys are not valid base64 of themselves, so they fall
+    through unchanged. Empty/None → "".
+
+    Mirrors Anvilry's TypeScript decodeSecret() in src/lib/llm.ts exactly.
+    """
+    if not value:
+        return ""
+    try:
+        decoded = base64.b64decode(value).decode("utf-8")
+        # Round-trip: if re-encoding matches the original it was valid base64
+        if base64.b64encode(decoded.encode("utf-8")).decode() == value:
+            return decoded
+    except Exception:
+        pass
+    return value
 
 
 class BedrockEmbeddingModel:
@@ -26,8 +49,9 @@ class BedrockEmbeddingModel:
         region: str,
         model_id: str = _MODEL_ID,
     ) -> None:
-        self._access_key_id = access_key_id
-        self._secret_access_key = secret_access_key
+        # decode_secret() handles both raw and base64-encoded values (same as Anvilry)
+        self._access_key_id = decode_secret(access_key_id)
+        self._secret_access_key = decode_secret(secret_access_key)
         self._region = region
         self._model_id = model_id
         self._client = None
