@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { FlagListItem } from '../types.js';
+import { API_URL, GATEWAY_URL, SDK_TOKEN } from '../config.js';
 
 export function useFlags(environment: string, projectId?: string) {
   const [flags, setFlags] = useState<FlagListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const apiUrl = import.meta.env['VITE_API_URL'] ?? 'http://localhost:8081';
-  const gatewayUrl = import.meta.env['VITE_GATEWAY_URL'] ?? 'http://localhost:8080';
-  const token = import.meta.env['VITE_SDK_TOKEN'] ?? 'sdk-dev-token-change-in-prod';
+  const apiUrl = API_URL;
+  const gatewayUrl = GATEWAY_URL;
+  const token = SDK_TOKEN;
 
   const fetchFlags = useCallback(async () => {
     setLoading(true);

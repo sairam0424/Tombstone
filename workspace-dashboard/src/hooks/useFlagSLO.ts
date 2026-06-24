@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { EVAL_URL, SDK_TOKEN } from '../config.js';
 
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
@@ -29,10 +30,10 @@ export function useFlagSLO(flagKey: string, window: SLOWindow = '7d') {
 
   const evaluatorUrl =
     (import.meta as unknown as { env: Record<string, string> }).env['VITE_EVALUATOR_URL'] ??
-    'http://localhost:8082';
+    EVAL_URL;
   const token =
     (import.meta as unknown as { env: Record<string, string> }).env['VITE_SDK_TOKEN'] ??
-    'sdk-dev-token-change-in-prod';
+    SDK_TOKEN;
 
   const fetchSLO = useCallback(async () => {
     if (!flagKey) return;

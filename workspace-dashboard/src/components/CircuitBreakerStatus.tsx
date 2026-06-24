@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { EVAL_URL } from '../config.js';
 
 type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
@@ -17,9 +18,7 @@ export function CircuitBreakerStatus({ flagKey }: Props) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const evalUrl = import.meta.env['VITE_EVAL_URL'] ?? 'http://localhost:8082';
-
-    globalThis.fetch(`${evalUrl}/api/v1/circuit/${encodeURIComponent(flagKey)}`)
+    globalThis.fetch(`${EVAL_URL}/api/v1/circuit/${encodeURIComponent(flagKey)}`)
       .then(r => r.json())
       .then((data: { state?: string }) => {
         setState((data.state ?? 'CLOSED') as CircuitState);
@@ -29,7 +28,7 @@ export function CircuitBreakerStatus({ flagKey }: Props) {
 
     // Poll every 10 seconds (matches the aggregation window)
     const interval = setInterval(() => {
-      globalThis.fetch(`${evalUrl}/api/v1/circuit/${encodeURIComponent(flagKey)}`)
+      globalThis.fetch(`${EVAL_URL}/api/v1/circuit/${encodeURIComponent(flagKey)}`)
         .then(r => r.json())
         .then((data: { state?: string }) => setState((data.state ?? 'CLOSED') as CircuitState))
         .catch(() => {/* keep last state */});
