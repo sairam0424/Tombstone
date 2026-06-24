@@ -11,6 +11,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.2.0] - 2026-06-24
+
+### Added — Fly.io Free-Tier Deployment
+
+**Bedrock Titan V2 Embeddings (EMBEDDING_BACKEND=bedrock)**
+- Replaces 1.4GB local BAAI/bge-m3 model with AWS Bedrock Titan Text Embeddings V2
+- EmbeddingModel protocol + factory — LocalEmbeddingModel (default) and BedrockEmbeddingModel
+- decode_secret() mirrors Anvilry's decodeSecret() — handles raw and base64-encoded creds
+- Same 1024-dim pgvector output — no schema migration needed
+
+**Redis Streams Consumer (CONSUMER_BACKEND=redis)**
+- Replaces aiokafka with redis.asyncio XREADGROUP on tombstone:stream:{env}
+- EventConsumer ABC + KafkaEventConsumer + RedisStreamsEventConsumer + factory
+- At-least-once delivery via XACK + PEL (Kafka semantics), /bin/zsh additional cost
+
+**Neon Connection Pool Tuning**
+- Python asyncpg: min=1/max=3 per pool (was 10/10 = 50 idle — exceeded free tier)
+- Go flag-api + evaluator: MaxOpenConns capped, ConnMaxLifetime(5m) added
+
+**Deployment tooling**
+- services/intelligence/fly.toml — Fly.io deployment config
+- services/intelligence/scripts/reembed_flags.py — one-shot re-embedding script
+- infra/.env.example — updated with all deployment vars documented
+
+---
+
 ## [2.1.0] - 2026-06-24
 
 ### Added
