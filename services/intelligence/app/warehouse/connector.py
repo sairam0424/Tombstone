@@ -60,7 +60,7 @@ class PostgresConnector(WarehouseConnector):
     async def _get_pool(self) -> Any:
         if self._pool is None:
             import asyncpg  # type: ignore[import]
-            self._pool = await asyncpg.create_pool(self._dsn)
+            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=2, max_inactive_connection_lifetime=30.0)
         return self._pool
 
     async def query_experiment_metrics(

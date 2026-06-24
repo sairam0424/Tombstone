@@ -80,7 +80,7 @@ class EmbeddingSyncService:
 
     async def initialize(self) -> None:
         """Initialize the DB pool, the embedding model, and start the background backfill task."""
-        self._pool = await asyncpg.create_pool(self._db_url)
+        self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
         if self._embedding_model is not None:
             try:
                 await self._embedding_model.initialize()
