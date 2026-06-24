@@ -1,0 +1,59 @@
+{
+  "apiVersion": "v1",
+  "spec": {
+    "kind": "Service",
+    "spec": {
+      "name": "tombstone-gateway",
+      "billing": {
+        "deploymentPlan": "nf-compute-10"
+      },
+      "deployment": {
+        "docker": {
+          "configType": "default"
+        },
+        "buildpack": {
+          "builder": "DOCKERFILE",
+          "dockerFilePath": "/services/gateway/Dockerfile",
+          "dockerWorkDir": "/services/gateway",
+          "useCache": false
+        },
+        "instances": 1,
+        "storage": {
+          "ephemeralStorage": {
+            "storageSize": 1024
+          }
+        }
+      },
+      "ports": [
+        {
+          "name": "http",
+          "internalPort": 8080,
+          "public": true,
+          "protocol": "HTTP",
+          "security": {
+            "sslOnly": true
+          },
+          "disableNfDomain": false
+        }
+      ],
+      "runtimeEnvironment": {
+        "REDIS_URL": "${SECRET_REDIS_URL}",
+        "FLAG_API_URL": "${SECRET_FLAG_API_URL}",
+        "PORT": "8080",
+        "CONSUMER_BACKEND": "redis",
+        "TOMBSTONE_ENVIRONMENTS": "production"
+      },
+      "healthChecks": [
+        {
+          "protocol": "HTTP",
+          "path": "/health",
+          "port": 8080,
+          "initialDelaySeconds": 10,
+          "periodSeconds": 30,
+          "timeoutSeconds": 5,
+          "failureThreshold": 3
+        }
+      ]
+    }
+  }
+}
