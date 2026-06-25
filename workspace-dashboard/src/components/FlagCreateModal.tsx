@@ -101,7 +101,7 @@ export function FlagCreateModal({ open, onClose }: Props) {
   const [step, setStep] = useState(1);
   const queryClient = useQueryClient();
 
-  const { register, control, handleSubmit, watch, formState: { errors } } = useForm<FlagFormData>({
+  const { register, control, handleSubmit, watch, trigger, formState: { errors } } = useForm<FlagFormData>({
     resolver: zodResolver(flagSchema),
     defaultValues: {
       flag_type:   'boolean',
@@ -115,9 +115,9 @@ export function FlagCreateModal({ open, onClose }: Props) {
 
   const mutation = useMutation({
     mutationFn: createFlag,
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['flags'] });
-      toast.success('Flag created', { description: watch('key') });
+      toast.success('Flag created', { description: variables.key });
       onClose();
       setStep(1);
     },
@@ -127,6 +127,18 @@ export function FlagCreateModal({ open, onClose }: Props) {
   });
 
   const onSubmit = handleSubmit(data => mutation.mutate(data));
+
+  // Per-step field sets — only validate the fields visible on the current step
+  const STEP_FIELDS: Record<number, (keyof FlagFormData)[]> = {
+    1: ['key', 'name', 'description', 'flag_type'],
+    2: ['rules'],
+  };
+
+  async function handleNext() {
+    const fields = STEP_FIELDS[step];
+    const valid = fields ? await trigger(fields) : true;
+    if (valid) setStep(s => s + 1);
+  }
 
   return (
     <Dialog.Root open={open} onOpenChange={v => { if (!v) { onClose(); setStep(1); } }}>
@@ -306,7 +318,7 @@ export function FlagCreateModal({ open, onClose }: Props) {
               {step < 3 ? (
                 <button
                   type="button"
-                  onClick={() => setStep(s => s + 1)}
+                  onClick={handleNext}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 6, padding: '8px 18px',
                     borderRadius: 8, border: 'none',
