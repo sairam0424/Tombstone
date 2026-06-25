@@ -1,4 +1,4 @@
-import { useRef, useDeferredValue, useEffect, useState } from 'react';
+import { useRef, useDeferredValue, useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useQueryState } from 'nuqs';
@@ -79,10 +79,16 @@ export default function FlagList() {
   );
 
   const parentRef = useRef<HTMLDivElement>(null);
+
+  // useCallback ensures the estimateSize ref is replaced when rowHeight changes.
+  // TanStack Virtual v3 honours a new callback identity and re-estimates all rows,
+  // so switching density correctly resizes the virtual slot heights.
+  const estimateSize = useCallback(() => rowHeight, [rowHeight]);
+
   const virtualizer = useVirtualizer({
     count: loading ? 8 : filtered.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => rowHeight,
+    estimateSize,
     overscan: 5,
   });
 
@@ -260,6 +266,12 @@ export default function FlagList() {
             const enabled = es?.enabled ?? false;
             const fillColor = !enabled ? 'var(--color-border)' : pct === 100 ? 'var(--color-risk-low)' : pct >= 50 ? 'var(--color-risk-medium)' : 'var(--color-accent)';
 
+            // Derive vertical padding from rowHeight so density visually adapts.
+            // vRow.size equals the estimated rowHeight (set by estimateSize above).
+            // Using padding-top/bottom to fill the slot prevents content overflow
+            // clipping in Condensed (32px) and gaps in Spacious (72px).
+            const vPad = Math.max(0, Math.floor((vRow.size - 20) / 2));
+
             return (
               <div
                 key={vRow.key}
@@ -268,10 +280,11 @@ export default function FlagList() {
                   display: 'grid',
                   gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
                   alignItems: 'center',
-                  padding: '0 16px',
+                  padding: `${vPad}px 16px`,
                   borderBottom: '1px solid var(--color-border)',
                   cursor: 'pointer',
                   transition: 'background 0.1s',
+                  boxSizing: 'border-box' as const,
                 }}
                 onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--color-bg-elevated)'; }}
                 onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
@@ -311,29 +324,6 @@ export default function FlagList() {
           })}
         </div>
 
-        {!loading && filtered.length === 0 && (
-          <div style={{ padding: 64, textAlign: 'center' as const, color: 'var(--color-fg-subtle)' }}>
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ margin: '0 auto 16px', opacity: 0.25, display: 'block' }}>
-              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
-              <line x1="4" y1="22" x2="4" y2="15" />
-            </svg>
-            {search
-              ? <>
-                  <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6, color: 'var(--color-fg-muted)' }}>No flags match &ldquo;{search}&rdquo;</div>
-                  <div style={{ fontSize: 12 }}>Try a different search term</div>
-                </>
-              : <>
-                  <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6, color: 'var(--color-fg-muted)' }}>No flags yet</div>
-                  <div style={{ fontSize: 12, marginBottom: 20 }}>Create your first feature flag to get started</div>
-                  <button
-                    style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: 'var(--color-accent)', color: '#07080d', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
-                  >
-                    + Create Flag
-                  </button>
-                </>
-            }
-          </div>
-        )}
       </div>
 
       <FlagCreateModal open={createOpen} onClose={() => setCreateOpen(false)} />
