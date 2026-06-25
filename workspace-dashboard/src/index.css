@@ -84,7 +84,7 @@ body { background-color: oklch(7% 0.02 264) !important; }
 @supports not (color: oklch(from red l c h)) {
   :root {
     --color-risk-low-hover:    #6ee7a0;
-    --color-risk-medium-hover: #fbbf24;  /* amber-400 — matches reduced +0.07 lightness perceptually */
+    --color-risk-medium-hover: #fcd34d; /* amber-300 — close approximation, slightly more saturated than OKLCH equivalent */
     --color-risk-high-hover:   #fca5a5;
     --color-accent-subtle:     rgba(56, 225, 255, 0.15);
     --color-accent-glow:       rgba(56, 225, 255, 0.40);
