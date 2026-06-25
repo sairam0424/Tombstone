@@ -1,24 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useRef, useDeferredValue, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
-import { API_URL, SDK_TOKEN } from '../../config.js';
-
-interface FlagItem {
-  id: string;
-  key: string;
-  name: string;
-  description: string;
-  state: string;
-  owner_id: string;
-  flag_type: string;
-}
-
-interface EnvState {
-  flag_key: string;
-  enabled: boolean;
-  rollout_pct: number;
-}
+import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
 
 type Env = 'development' | 'staging' | 'production';
 
@@ -64,34 +48,23 @@ function injectPulseStyle() {
 
 export default function FlagList() {
   const navigate = useNavigate();
-  const [flags, setFlags] = useState<FlagItem[]>([]);
-  const [envStates, setEnvStates] = useState<Record<string, EnvState>>({});
   const [env, setEnv] = useState<Env>('production');
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
 
-  const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
+  // useDeferredValue: adaptive interruptible search — no fixed debounce delay (React 19)
+  const deferredSearch = useDeferredValue(search);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [fr, sr] = await Promise.all([
-        fetch(`${API_URL}/api/v1/flags`, { headers: hdrs }).then(r => r.json()) as Promise<{ flags: FlagItem[] }>,
-        fetch(`${API_URL}/api/v1/environments/snapshot?environment=${env}`, { headers: hdrs }).then(r => r.json()) as Promise<{ flags: EnvState[] }>,
-      ]);
-      setFlags(fr.flags ?? []);
-      const m: Record<string, EnvState> = {};
-      for (const s of sr.flags ?? []) m[s.flag_key] = s;
-      setEnvStates(m);
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  }, [env]);
+  const { data: flags = [], isLoading: flagsLoading } = useFlags();
+  const { data: envStates = {}, isLoading: snapshotLoading } = useEnvSnapshot(env);
+  const loading = flagsLoading || snapshotLoading;
 
-  useEffect(() => { void load(); }, [load]);
   useEffect(() => { injectPulseStyle(); }, []);
 
-  const filtered = flags.filter(f =>
-    !search || f.key.toLowerCase().includes(search.toLowerCase()) || f.name.toLowerCase().includes(search.toLowerCase())
+  // Filter uses deferred value — won't block typing even with 5000+ flags
+  const filtered = flags.filter((f: FlagItem) =>
+    !deferredSearch ||
+    f.key.toLowerCase().includes(deferredSearch.toLowerCase()) ||
+    f.name.toLowerCase().includes(deferredSearch.toLowerCase())
   );
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -102,7 +75,7 @@ export default function FlagList() {
     overscan: 5,
   });
 
-  const onCount = Object.values(envStates).filter(s => s.enabled).length;
+  const onCount = Object.values(envStates).filter((s: EnvState) => s.enabled).length;
   const offCount = flags.length - onCount;
 
   const STAT_CARDS = [
