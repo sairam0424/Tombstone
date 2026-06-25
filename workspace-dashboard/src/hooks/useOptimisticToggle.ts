@@ -39,12 +39,12 @@ export function useOptimisticToggle(
   const mutation = useMutation({
     mutationFn: ({ enabled }: { enabled: boolean }) =>
       patchFlagEnv(flagKey, env, enabled),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       // Invalidate snapshot query so the list re-fetches server truth
       queryClient.invalidateQueries({
         queryKey: ['snapshot', env],
       });
-      toast.success(`Flag ${optimisticState.enabled ? 'enabled' : 'disabled'}`, {
+      toast.success(`Flag ${variables.enabled ? 'enabled' : 'disabled'}`, {
         description: flagKey,
       });
     },
