@@ -1,6 +1,7 @@
-import { useState, useRef, useDeferredValue, useEffect } from 'react';
+import { useRef, useDeferredValue, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useQueryState } from 'nuqs';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
 
@@ -48,8 +49,12 @@ function injectPulseStyle() {
 
 export default function FlagList() {
   const navigate = useNavigate();
-  const [env, setEnv] = useState<Env>('production');
-  const [search, setSearch] = useState('');
+  const [env, setEnv] = useQueryState<Env>('env', {
+    defaultValue: 'production',
+    parse: (v) => ((['development', 'staging', 'production'] as const).includes(v as Env) ? (v as Env) : 'production'),
+    serialize: (v) => v,
+  });
+  const [search, setSearch] = useQueryState('q', { defaultValue: '', shallow: true });
 
   // useDeferredValue: adaptive interruptible search — no fixed debounce delay (React 19)
   const deferredSearch = useDeferredValue(search);
