@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { API_URL, SDK_TOKEN } from '../../config.js';
@@ -64,6 +65,7 @@ function injectPulseStyle() {
 export default function FlagList() {
   injectPulseStyle();
 
+  const navigate = useNavigate();
   const [flags, setFlags] = useState<FlagItem[]>([]);
   const [envStates, setEnvStates] = useState<Record<string, EnvState>>({});
   const [env, setEnv] = useState<Env>('production');
@@ -287,7 +289,7 @@ export default function FlagList() {
                 }}
                 onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--color-bg-elevated)'; }}
                 onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-                onClick={() => { window.location.href = `/flags/${flag.key}`; }}
+                onClick={() => navigate(`/flags/${flag.key}`)}
               >
                 {/* Flag Key */}
                 <div>
