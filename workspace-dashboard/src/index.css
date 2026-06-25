@@ -67,9 +67,9 @@ body { background-color: oklch(7% 0.02 264) !important; }
 /* Auto-generate hover/focus/dim from base tokens without extra hex values.   */
 /* @supports fallback ensures old browsers still get the base color.           */
 :root {
-  /* Risk hover states — lightness +12% */
+  /* Risk hover states — lightness +12% (medium capped at +0.07 to avoid near-white wash on high-luminance displays) */
   --color-risk-low-hover:    oklch(from var(--color-risk-low)    calc(l + 0.12) c h);
-  --color-risk-medium-hover: oklch(from var(--color-risk-medium) calc(l + 0.10) c h);
+  --color-risk-medium-hover: oklch(from var(--color-risk-medium) calc(l + 0.07) c h);
   --color-risk-high-hover:   oklch(from var(--color-risk-high)   calc(l + 0.12) c h);
 
   /* Accent dim variants — lightness -20% */
@@ -84,7 +84,7 @@ body { background-color: oklch(7% 0.02 264) !important; }
 @supports not (color: oklch(from red l c h)) {
   :root {
     --color-risk-low-hover:    #6ee7a0;
-    --color-risk-medium-hover: #fcd34d;
+    --color-risk-medium-hover: #fbbf24;  /* amber-400 — matches reduced +0.07 lightness perceptually */
     --color-risk-high-hover:   #fca5a5;
     --color-accent-subtle:     rgba(56, 225, 255, 0.15);
     --color-accent-glow:       rgba(56, 225, 255, 0.40);
