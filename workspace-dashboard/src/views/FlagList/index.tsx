@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { API_URL, SDK_TOKEN } from '../../config.js';
 
 interface FlagItem {
@@ -59,38 +60,6 @@ function injectPulseStyle() {
   }
 }
 
-function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
-  const fillColor = !enabled
-    ? '#1a1a1a'
-    : pct === 100
-    ? '#22c55e'
-    : pct >= 50
-    ? '#f59e0b'
-    : '#3b82f6';
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
-      <div style={{
-        flex: 1,
-        height: 4,
-        background: '#1a1a1a',
-        borderRadius: 2,
-        overflow: 'hidden',
-      }}>
-        <div style={{
-          width: `${pct}%`,
-          height: '100%',
-          background: fillColor,
-          borderRadius: 2,
-          transition: 'width 0.5s ease',
-        }} />
-      </div>
-      <span style={{ fontSize: 11, color: '#6b7280', width: 32, textAlign: 'right' as const }}>
-        {pct}%
-      </span>
-    </div>
-  );
-}
 
 export default function FlagList() {
   injectPulseStyle();
@@ -100,7 +69,6 @@ export default function FlagList() {
   const [env, setEnv] = useState<Env>('production');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
-  const [hovered, setHovered] = useState<string | null>(null);
 
   const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
 
@@ -125,6 +93,14 @@ export default function FlagList() {
     !search || f.key.toLowerCase().includes(search.toLowerCase()) || f.name.toLowerCase().includes(search.toLowerCase())
   );
 
+  const parentRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: loading ? 8 : filtered.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 52,
+    overscan: 5,
+  });
+
   const onCount = Object.values(envStates).filter(s => s.enabled).length;
   const offCount = flags.length - onCount;
 
@@ -133,8 +109,6 @@ export default function FlagList() {
     { label: 'Enabled',  val: onCount,       color: '#4ade80' },
     { label: 'Disabled', val: offCount,      color: '#6b7280' },
   ];
-
-  const COL_HEADERS = ['Flag Key', 'Status', 'Rollout', 'Type', 'State', 'Owner', ''];
 
   return (
     <div style={{ padding: '32px 40px', maxWidth: 1320, margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif' }}>
@@ -256,206 +230,105 @@ export default function FlagList() {
       </div>
 
       {/* ── Table ── */}
-      <div style={{
-        background: '#0c0c0c',
-        border: '1px solid #1a1a1a',
-        borderRadius: 14,
-        overflow: 'hidden',
-      }}>
-        {loading ? (
-          <div style={{ padding: 72, textAlign: 'center' as const, color: '#4b5563', fontSize: 14 }}>
-            Loading flags…
-          </div>
-        ) : filtered.length === 0 ? (
-          /* ── Empty state ── */
-          <div style={{
-            padding: '80px 40px',
-            textAlign: 'center' as const,
-            display: 'flex',
-            flexDirection: 'column' as const,
-            alignItems: 'center',
-            gap: 14,
-          }}>
-            {/* Flag icon */}
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/>
-              <line x1="4" y1="22" x2="4" y2="15"/>
-            </svg>
-            <div style={{ fontSize: 16, fontWeight: 600, color: '#6b7280' }}>
-              {search ? `No flags match "${search}"` : 'No flags yet. Create your first flag.'}
-            </div>
-            {!search && (
-              <div style={{ fontSize: 13, color: '#374151' }}>
-                Click "Create Flag" above to get started.
+      <div
+        ref={parentRef}
+        style={{
+          background: 'var(--color-bg-surface)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 12,
+          overflow: 'auto',
+          maxHeight: 'calc(100vh - 280px)',
+        }}
+      >
+        {/* Table header */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
+          padding: '10px 16px',
+          borderBottom: '1px solid var(--color-border)',
+          position: 'sticky', top: 0, zIndex: 1,
+          background: 'var(--color-bg-surface)',
+        }}>
+          {['Flag Key', 'Status', 'Rollout', 'Type', 'State', 'Owner', ''].map(h => (
+            <div key={h} style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: 'var(--color-fg-subtle)' }}>{h}</div>
+          ))}
+        </div>
+
+        {/* Virtual rows */}
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          {virtualizer.getVirtualItems().map(vRow => {
+            if (loading) {
+              return (
+                <div key={vRow.key} style={{ position: 'absolute', top: vRow.start, left: 0, right: 0, height: vRow.size }}>
+                  <SkeletonRow />
+                </div>
+              );
+            }
+            const flag = filtered[vRow.index];
+            if (!flag) return null;
+            const es = envStates[flag.key];
+            const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
+            const pct = es?.rollout_pct ?? 0;
+            const enabled = es?.enabled ?? false;
+            const fillColor = !enabled ? 'var(--color-border)' : pct === 100 ? 'var(--color-risk-low)' : pct >= 50 ? 'var(--color-risk-medium)' : 'var(--color-accent)';
+
+            return (
+              <div
+                key={vRow.key}
+                style={{
+                  position: 'absolute', top: vRow.start, left: 0, right: 0, height: vRow.size,
+                  display: 'grid',
+                  gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
+                  alignItems: 'center',
+                  padding: '0 16px',
+                  borderBottom: '1px solid var(--color-border)',
+                  cursor: 'pointer',
+                  transition: 'background 0.1s',
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--color-bg-elevated)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                onClick={() => { window.location.href = `/flags/${flag.key}`; }}
+              >
+                {/* Flag Key */}
+                <div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-accent)', fontWeight: 500 }}>{flag.key}</div>
+                  {flag.name && flag.name !== flag.key && (
+                    <div style={{ fontSize: 11, color: 'var(--color-fg-subtle)', marginTop: 2 }}>{flag.name}</div>
+                  )}
+                </div>
+                {/* Status */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className={`status-dot status-dot-${enabled ? 'on' : 'off'}`} />
+                  <span style={{ fontSize: 12, fontWeight: 500, color: enabled ? 'var(--color-risk-low)' : 'var(--color-fg-subtle)' }}>
+                    {enabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                {/* Rollout */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ flex: 1, height: 4, background: 'var(--color-bg-overlay)', borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: fillColor, borderRadius: 2, transition: 'width 0.5s ease' }} />
+                  </div>
+                  <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 30, textAlign: 'right' as const }}>{pct}%</span>
+                </div>
+                {/* Type */}
+                <div><code style={{ fontSize: 11, color: 'var(--color-fg-muted)', background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 4, padding: '2px 6px' }}>{flag.flag_type}</code></div>
+                {/* State */}
+                <div><span className="badge" style={{ fontSize: 11, fontWeight: 500, padding: '2px 8px', borderRadius: 999, background: sb.bg, border: `1px solid ${sb.border}`, color: sb.text }}>{flag.state}</span></div>
+                {/* Owner */}
+                <div style={{ fontSize: 12, color: 'var(--color-fg-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{flag.owner_id}</div>
+                {/* Action */}
+                <div style={{ textAlign: 'right' as const, fontSize: 12, color: 'var(--color-fg-subtle)' }}>{'→'}</div>
               </div>
-            )}
+            );
+          })}
+        </div>
+
+        {!loading && filtered.length === 0 && (
+          <div style={{ padding: 64, textAlign: 'center' as const, color: 'var(--color-fg-subtle)' }}>
+            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.3 }}>{'⚑'}</div>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>No flags yet. Create your first flag.</div>
+            <div style={{ fontSize: 12, marginTop: 6, color: 'var(--color-fg-subtle)' }}>Click "+ Create Flag" above to get started.</div>
           </div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #1a1a1a' }}>
-                {COL_HEADERS.map((h, i) => (
-                  <th key={`${h}-${i}`} style={{
-                    textAlign: 'left' as const,
-                    padding: '11px 16px',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    textTransform: 'uppercase' as const,
-                    letterSpacing: '0.08em',
-                    color: '#6b7280',
-                    borderBottom: '1px solid #1a1a1a',
-                    background: '#0c0c0c',
-                    whiteSpace: 'nowrap' as const,
-                  }}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(flag => {
-                const es = envStates[flag.key];
-                const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
-                const hov = hovered === flag.id;
-                return (
-                  <tr
-                    key={flag.id}
-                    style={{
-                      borderBottom: '1px solid #111',
-                      background: hov ? '#111' : 'transparent',
-                      transition: 'background 150ms ease',
-                    }}
-                    onMouseEnter={() => setHovered(flag.id)}
-                    onMouseLeave={() => setHovered(null)}
-                  >
-                    {/* Flag key + name */}
-                    <td style={{ padding: '13px 16px', maxWidth: 240 }}>
-                      <Link
-                        to={`/flags/${flag.key}`}
-                        style={{
-                          fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
-                          fontSize: 12,
-                          color: '#3b82f6',
-                          textDecoration: 'none',
-                          fontWeight: 500,
-                          letterSpacing: '-0.01em',
-                        }}
-                        onMouseEnter={e => { (e.target as HTMLElement).style.textDecoration = 'underline'; }}
-                        onMouseLeave={e => { (e.target as HTMLElement).style.textDecoration = 'none'; }}
-                      >
-                        {flag.key}
-                      </Link>
-                      {flag.name && flag.name !== flag.key && (
-                        <div style={{
-                          fontSize: 11,
-                          color: '#6b7280',
-                          marginTop: 3,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap' as const,
-                          maxWidth: 210,
-                        }}>
-                          {flag.name}
-                        </div>
-                      )}
-                    </td>
-
-                    {/* Status — pulsing dot */}
-                    <td style={{ padding: '13px 16px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                        <div style={{
-                          width: 7,
-                          height: 7,
-                          borderRadius: '50%',
-                          background: es?.enabled ? '#4ade80' : '#374151',
-                          animation: es?.enabled ? 'pulse-dot 2s ease-in-out infinite' : 'none',
-                          flexShrink: 0,
-                        }} />
-                        <span style={{
-                          fontSize: 12,
-                          fontWeight: 600,
-                          color: es?.enabled ? '#4ade80' : '#4b5563',
-                          letterSpacing: '0.04em',
-                        }}>
-                          {es?.enabled ? 'ON' : 'OFF'}
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Rollout bar */}
-                    <td style={{ padding: '13px 16px', minWidth: 150 }}>
-                      <RolloutBar pct={es?.rollout_pct ?? 0} enabled={es?.enabled ?? false} />
-                    </td>
-
-                    {/* Type badge */}
-                    <td style={{ padding: '13px 16px' }}>
-                      <code style={{
-                        fontSize: 11,
-                        color: '#9ca3af',
-                        background: '#111',
-                        border: '1px solid #1a1a1a',
-                        borderRadius: 4,
-                        padding: '2px 8px',
-                        fontFamily: "'JetBrains Mono','Fira Code',monospace",
-                        letterSpacing: '-0.01em',
-                      }}>
-                        {flag.flag_type}
-                      </code>
-                    </td>
-
-                    {/* State pill */}
-                    <td style={{ padding: '13px 16px' }}>
-                      <span style={{
-                        fontSize: 11,
-                        fontWeight: 600,
-                        padding: '3px 10px',
-                        borderRadius: 999,
-                        background: sb.bg,
-                        border: `1px solid ${sb.border}`,
-                        color: sb.text,
-                        letterSpacing: '0.04em',
-                        textTransform: 'uppercase' as const,
-                      }}>
-                        {flag.state}
-                      </span>
-                    </td>
-
-                    {/* Owner */}
-                    <td style={{ padding: '13px 16px', maxWidth: 180 }}>
-                      <span style={{
-                        fontSize: 12,
-                        color: '#6b7280',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap' as const,
-                        display: 'block',
-                      }}>
-                        {flag.owner_id}
-                      </span>
-                    </td>
-
-                    {/* View action — visible on row hover */}
-                    <td style={{ padding: '13px 16px', textAlign: 'right' as const }}>
-                      <Link
-                        to={`/flags/${flag.key}`}
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 500,
-                          color: hov ? '#60a5fa' : 'transparent',
-                          textDecoration: 'none',
-                          transition: 'color 150ms ease',
-                          letterSpacing: '-0.01em',
-                          whiteSpace: 'nowrap' as const,
-                        }}
-                      >
-                        View &rarr;
-                      </Link>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
         )}
       </div>
     </div>
