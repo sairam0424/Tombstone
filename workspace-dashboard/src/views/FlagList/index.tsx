@@ -5,6 +5,8 @@ import { useQueryState } from 'nuqs';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
 import { FlagCreateModal } from '../../components/FlagCreateModal.js';
+import { useDensity } from '../../hooks/useDensity.js';
+import { DensityToggle } from '../../components/DensityToggle.js';
 
 type Env = 'development' | 'staging' | 'production';
 
@@ -61,6 +63,8 @@ export default function FlagList() {
   // useDeferredValue: adaptive interruptible search — no fixed debounce delay (React 19)
   const deferredSearch = useDeferredValue(search);
 
+  const { density, setDensity, rowHeight } = useDensity();
+
   const { data: flags = [], isLoading: flagsLoading } = useFlags();
   const { data: envStates = {}, isLoading: snapshotLoading } = useEnvSnapshot(env);
   const loading = flagsLoading || snapshotLoading;
@@ -78,7 +82,7 @@ export default function FlagList() {
   const virtualizer = useVirtualizer({
     count: loading ? 8 : filtered.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 52,
+    estimateSize: () => rowHeight,
     overscan: 5,
   });
 
@@ -209,6 +213,8 @@ export default function FlagList() {
             );
           })}
         </div>
+
+        <DensityToggle density={density} onChange={setDensity} />
       </div>
 
       {/* ── Table ── */}
@@ -307,9 +313,25 @@ export default function FlagList() {
 
         {!loading && filtered.length === 0 && (
           <div style={{ padding: 64, textAlign: 'center' as const, color: 'var(--color-fg-subtle)' }}>
-            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.3 }}>{'⚑'}</div>
-            <div style={{ fontSize: 14, fontWeight: 500 }}>No flags yet. Create your first flag.</div>
-            <div style={{ fontSize: 12, marginTop: 6, color: 'var(--color-fg-subtle)' }}>Click "+ Create Flag" above to get started.</div>
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ margin: '0 auto 16px', opacity: 0.25, display: 'block' }}>
+              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+              <line x1="4" y1="22" x2="4" y2="15" />
+            </svg>
+            {search
+              ? <>
+                  <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6, color: 'var(--color-fg-muted)' }}>No flags match &ldquo;{search}&rdquo;</div>
+                  <div style={{ fontSize: 12 }}>Try a different search term</div>
+                </>
+              : <>
+                  <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6, color: 'var(--color-fg-muted)' }}>No flags yet</div>
+                  <div style={{ fontSize: 12, marginBottom: 20 }}>Create your first feature flag to get started</div>
+                  <button
+                    style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: 'var(--color-accent)', color: '#07080d', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    + Create Flag
+                  </button>
+                </>
+            }
           </div>
         )}
       </div>
