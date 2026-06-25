@@ -199,9 +199,9 @@ function QuickActions({ flagKey, activeEnv, enabled, isPending, onToggle, onRoll
             disabled={isPending}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
-              background: 'color-mix(in oklab, #ef4444 10%, transparent)',
-              border: '1px solid color-mix(in oklab, #ef4444 25%, transparent)',
-              color: '#f87171',
+              background: 'color-mix(in oklab, var(--color-action-danger) 10%, transparent)',
+              border: '1px solid color-mix(in oklab, var(--color-action-danger) 25%, transparent)',
+              color: 'var(--color-action-danger)',
             }}
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -267,12 +267,12 @@ function QuickActions({ flagKey, activeEnv, enabled, isPending, onToggle, onRoll
         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         style={{
           background: enabled
-            ? 'color-mix(in oklab, #f59e0b 10%, transparent)'
-            : 'color-mix(in oklab, #22c55e 10%, transparent)',
+            ? 'color-mix(in oklab, var(--color-action-warning) 10%, transparent)'
+            : 'color-mix(in oklab, var(--color-action-success) 10%, transparent)',
           border: enabled
-            ? '1px solid color-mix(in oklab, #f59e0b 25%, transparent)'
-            : '1px solid color-mix(in oklab, #22c55e 25%, transparent)',
-          color: enabled ? '#fbbf24' : '#4ade80',
+            ? '1px solid color-mix(in oklab, var(--color-action-warning) 25%, transparent)'
+            : '1px solid color-mix(in oklab, var(--color-action-success) 25%, transparent)',
+          color: enabled ? 'var(--color-action-warning)' : 'var(--color-action-success)',
         }}
       >
         {enabled ? (
@@ -299,9 +299,9 @@ function QuickActions({ flagKey, activeEnv, enabled, isPending, onToggle, onRoll
         onClick={handleClone}
         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
         style={{
-          background: 'color-mix(in oklab, #38bdf8 8%, transparent)',
-          border: '1px solid color-mix(in oklab, #38bdf8 20%, transparent)',
-          color: copied ? '#4ade80' : '#7dd3fc',
+          background: 'color-mix(in oklab, var(--color-accent) 8%, transparent)',
+          border: '1px solid color-mix(in oklab, var(--color-accent) 20%, transparent)',
+          color: copied ? 'var(--color-action-success)' : 'var(--color-accent)',
         }}
       >
         {copied ? (
@@ -327,9 +327,9 @@ function QuickActions({ flagKey, activeEnv, enabled, isPending, onToggle, onRoll
         onClick={handleAudit}
         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
         style={{
-          background: 'color-mix(in oklab, #a78bfa 8%, transparent)',
-          border: '1px solid color-mix(in oklab, #a78bfa 20%, transparent)',
-          color: '#c4b5fd',
+          background: 'color-mix(in oklab, var(--color-violet) 8%, transparent)',
+          border: '1px solid color-mix(in oklab, var(--color-violet) 20%, transparent)',
+          color: 'var(--color-violet)',
         }}
       >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">

@@ -291,7 +291,7 @@ function QuickActions({ flagKey, severity }: { flagKey: string; severity: Timeli
         style={rollbackStyle}
       >
         <RollbackIcon />
-        Rollback
+        View &amp; Rollback
       </a>
     </div>
   );
@@ -299,7 +299,7 @@ function QuickActions({ flagKey, severity }: { flagKey: string; severity: Timeli
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function IncidentTimeline() {
-  const [window, setWindow] = useState<WindowOption>('1h');
+  const [timeWindow, setTimeWindow] = useState<WindowOption>('1h');
   const [entries, setEntries] = useState<TimelineEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -310,7 +310,7 @@ export default function IncidentTimeline() {
     setError(null);
     try {
       const now = Math.floor(Date.now() / 1000);
-      const from = now - WINDOW_SECONDS[window];
+      const from = now - WINDOW_SECONDS[timeWindow];
       const token = SDK_TOKEN;
       const apiUrl = API_URL;
 
@@ -345,7 +345,7 @@ export default function IncidentTimeline() {
     } finally {
       setLoading(false);
     }
-  }, [window]);
+  }, [timeWindow]);
 
   useEffect(() => { void fetchTimeline(); }, [fetchTimeline]);
 
@@ -384,7 +384,7 @@ export default function IncidentTimeline() {
                 {(['1h', '6h', '24h', '7d'] as WindowOption[]).map((w) => (
                   <button
                     key={w}
-                    onClick={() => setWindow(w)}
+                    onClick={() => setTimeWindow(w)}
                     style={{
                       padding: '4px 12px',
                       borderRadius: 6,
@@ -393,8 +393,8 @@ export default function IncidentTimeline() {
                       letterSpacing: '0.05em',
                       border: 'none',
                       cursor: 'pointer',
-                      background: window === w ? 'var(--color-accent)' : 'transparent',
-                      color: window === w ? 'var(--color-bg-base)' : 'var(--color-fg-muted)',
+                      background: timeWindow === w ? 'var(--color-accent)' : 'transparent',
+                      color: timeWindow === w ? 'var(--color-bg-base)' : 'var(--color-fg-muted)',
                     }}
                   >
                     {WINDOW_LABELS[w]}
@@ -502,7 +502,7 @@ export default function IncidentTimeline() {
             <div style={{ textAlign: 'center' }}>
               <p style={{ color: 'var(--color-fg)', fontWeight: 500 }}>No recent incidents</p>
               <p style={{ color: 'var(--color-fg-subtle)', fontSize: 14, marginTop: 4 }}>
-                No events detected in the last {WINDOW_LABELS[window]}. Production is quiet.
+                No events detected in the last {WINDOW_LABELS[timeWindow]}. Production is quiet.
               </p>
             </div>
           </div>
