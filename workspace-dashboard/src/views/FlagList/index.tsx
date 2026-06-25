@@ -63,8 +63,6 @@ function injectPulseStyle() {
 
 
 export default function FlagList() {
-  injectPulseStyle();
-
   const navigate = useNavigate();
   const [flags, setFlags] = useState<FlagItem[]>([]);
   const [envStates, setEnvStates] = useState<Record<string, EnvState>>({});
@@ -90,6 +88,7 @@ export default function FlagList() {
   }, [env]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { injectPulseStyle(); }, []);
 
   const filtered = flags.filter(f =>
     !search || f.key.toLowerCase().includes(search.toLowerCase()) || f.name.toLowerCase().includes(search.toLowerCase())
