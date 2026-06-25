@@ -4,7 +4,7 @@ import { API_URL, SDK_TOKEN } from '../../config.js';
 
 interface TimelineEntry {
   ts: number;
-  type: 'flag_change' | 'metric_anomaly' | 'incident';
+  type: 'flag_change' | 'metric_anomaly' | 'incident' | 'notification_delivery';
   title: string;
   description: string;
   actor?: string;
@@ -29,38 +29,120 @@ function normalizeSeverity(raw: string): TimelineEntry['severity'] {
   if (raw === 'warning') return 'medium';  // legacy alias
   if (raw === 'medium') return 'medium';
   if (raw === 'low') return 'low';
-  return 'low'; // info / unknown -> low (green)
+  if (raw === 'info') return 'info';
+  return 'low'; // unknown -> low (green)
 }
 
-const SEVERITY_BADGE: Record<TimelineEntry['severity'], { label: string; classes: string }> = {
-  critical: { label: 'CRITICAL', classes: 'bg-red-500/20 text-red-400 border border-red-500/40' },
-  high:     { label: 'HIGH',     classes: 'bg-orange-500/20 text-orange-400 border border-orange-500/40' },
-  medium:   { label: 'MEDIUM',   classes: 'bg-amber-500/20 text-amber-400 border border-amber-500/40' },
-  low:      { label: 'LOW',      classes: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' },
-  // legacy values kept so TypeScript is happy if they ever sneak through
-  info:     { label: 'LOW',      classes: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' },
-  warning:  { label: 'MEDIUM',   classes: 'bg-amber-500/20 text-amber-400 border border-amber-500/40' },
+// ─── SEVERITY CONFIG (OKLCH token-aligned) ───────────────────────────────────
+// dot: size class + glow;  text: semantic color class; bg: card background tint;
+// badge: inline severity label; borderLeft: left accent stripe
+const SEVERITY_CONFIG: Record<
+  TimelineEntry['severity'],
+  {
+    dotSize: string;
+    dotColor: string;
+    dotGlow: string;
+    text: string;
+    bg: string;
+    borderLeft: string;
+    badgeLabel: string;
+    badgeClasses: string;
+    opacity: string;
+  }
+> = {
+  critical: {
+    dotSize: 'w-3.5 h-3.5',
+    dotColor: 'bg-[oklch(65%_0.23_25)]',
+    dotGlow: 'shadow-[0_0_8px_2px_oklch(65%_0.23_25_/_60%)]',
+    text: 'text-[oklch(75%_0.18_25)]',
+    bg: 'bg-[oklch(65%_0.23_25_/_6%)]',
+    borderLeft: 'border-l-[oklch(65%_0.23_25)]',
+    badgeLabel: 'CRITICAL',
+    badgeClasses: 'bg-[oklch(65%_0.23_25_/_18%)] text-[oklch(75%_0.18_25)] border border-[oklch(65%_0.23_25_/_40%)]',
+    opacity: 'opacity-100',
+  },
+  high: {
+    dotSize: 'w-3 h-3',
+    dotColor: 'bg-[oklch(70%_0.2_45)]',
+    dotGlow: 'shadow-[0_0_7px_1px_oklch(70%_0.2_45_/_55%)]',
+    text: 'text-[oklch(80%_0.16_50)]',
+    bg: 'bg-[oklch(70%_0.2_45_/_5%)]',
+    borderLeft: 'border-l-[oklch(70%_0.2_45)]',
+    badgeLabel: 'HIGH',
+    badgeClasses: 'bg-[oklch(70%_0.2_45_/_18%)] text-[oklch(80%_0.16_50)] border border-[oklch(70%_0.2_45_/_40%)]',
+    opacity: 'opacity-100',
+  },
+  medium: {
+    dotSize: 'w-2.5 h-2.5',
+    dotColor: 'bg-[oklch(78%_0.17_85)]',
+    dotGlow: 'shadow-[0_0_5px_1px_oklch(78%_0.17_85_/_45%)]',
+    text: 'text-[oklch(78%_0.17_85)]',
+    bg: '',
+    borderLeft: 'border-l-[oklch(78%_0.17_85)]',
+    badgeLabel: 'MEDIUM',
+    badgeClasses: 'bg-amber-500/20 text-amber-400 border border-amber-500/40',
+    opacity: 'opacity-100',
+  },
+  low: {
+    dotSize: 'w-2 h-2',
+    dotColor: 'bg-gray-500',
+    dotGlow: '',
+    text: 'text-gray-500',
+    bg: '',
+    borderLeft: 'border-l-gray-700',
+    badgeLabel: 'LOW',
+    badgeClasses: 'bg-gray-800 text-gray-500 border border-gray-700',
+    opacity: 'opacity-65',
+  },
+  info: {
+    dotSize: 'w-2 h-2',
+    dotColor: 'bg-gray-600',
+    dotGlow: '',
+    text: 'text-gray-500',
+    bg: '',
+    borderLeft: 'border-l-gray-700',
+    badgeLabel: 'INFO',
+    badgeClasses: 'bg-gray-800 text-gray-600 border border-gray-700',
+    opacity: 'opacity-65',
+  },
+  warning: {
+    dotSize: 'w-2.5 h-2.5',
+    dotColor: 'bg-[oklch(78%_0.17_85)]',
+    dotGlow: 'shadow-[0_0_5px_1px_oklch(78%_0.17_85_/_45%)]',
+    text: 'text-[oklch(78%_0.17_85)]',
+    bg: '',
+    borderLeft: 'border-l-[oklch(78%_0.17_85)]',
+    badgeLabel: 'MEDIUM',
+    badgeClasses: 'bg-amber-500/20 text-amber-400 border border-amber-500/40',
+    opacity: 'opacity-100',
+  },
 };
 
-const SEVERITY_DOT: Record<TimelineEntry['severity'], string> = {
-  critical: 'bg-red-500 shadow-[0_0_6px_1px_rgba(239,68,68,0.6)]',
-  high:     'bg-orange-500 shadow-[0_0_6px_1px_rgba(249,115,22,0.6)]',
-  medium:   'bg-amber-500 shadow-[0_0_6px_1px_rgba(245,158,11,0.6)]',
-  low:      'bg-emerald-500 shadow-[0_0_6px_1px_rgba(16,185,129,0.5)]',
-  info:     'bg-emerald-500 shadow-[0_0_6px_1px_rgba(16,185,129,0.5)]',
-  warning:  'bg-amber-500 shadow-[0_0_6px_1px_rgba(245,158,11,0.6)]',
-};
+// ─── PRIMARY event types ────────────────────────────────────────────────────
+// These are state-changing / high-impact events that deserve full visual weight.
+const PRIMARY_TYPES = new Set<TimelineEntry['type']>([
+  'flag_change',
+  'incident',
+  'metric_anomaly',
+]);
 
-const SEVERITY_CARD_LEFT: Record<TimelineEntry['severity'], string> = {
-  critical: 'border-l-red-500',
-  high:     'border-l-orange-500',
-  medium:   'border-l-amber-500',
-  low:      'border-l-emerald-500',
-  info:     'border-l-emerald-500',
-  warning:  'border-l-amber-500',
-};
+/** Determine if an entry should render at PRIMARY (full weight) or SECONDARY (dimmed). */
+function isPrimary(entry: TimelineEntry): boolean {
+  if (PRIMARY_TYPES.has(entry.type)) return true;
+  if (entry.severity === 'critical' || entry.severity === 'high') return true;
+  return false;
+}
 
-// Lightning bolt SVG icon for empty state
+/** Determine if inline quick-actions should appear (View Flag + Rollback). */
+function hasQuickActions(entry: TimelineEntry): boolean {
+  return (
+    entry.type === 'flag_change' &&
+    (entry.severity === 'critical' || entry.severity === 'high') &&
+    Boolean(entry.flagKey)
+  );
+}
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
 function LightningIcon() {
   return (
     <svg
@@ -78,6 +160,96 @@ function LightningIcon() {
   );
 }
 
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      className={`w-4 h-4 text-gray-600 group-hover:text-gray-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+    >
+      <path
+        fillRule="evenodd"
+        d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      className="w-3 h-3"
+    >
+      <path
+        fillRule="evenodd"
+        d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+function RollbackIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-3 h-3"
+    >
+      <path d="M3 8a5 5 0 1 0 1.6-3.7M3 4v4h4" />
+    </svg>
+  );
+}
+
+// ─── Quick-action button strip ───────────────────────────────────────────────
+function QuickActions({ flagKey, severity }: { flagKey: string; severity: TimelineEntry['severity'] }) {
+  const isCritical = severity === 'critical';
+  return (
+    <div className="flex items-center gap-2 mt-3" onClick={(e) => e.stopPropagation()}>
+      {/* View Flag */}
+      <a
+        href={`/flags/${flagKey}`}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold
+          text-[oklch(82%_0.18_200)] bg-[oklch(82%_0.18_200_/_10%)] border border-[oklch(82%_0.18_200_/_25%)]
+          hover:bg-[oklch(82%_0.18_200_/_18%)] hover:border-[oklch(82%_0.18_200_/_40%)]
+          transition-all duration-150"
+      >
+        <ExternalLinkIcon />
+        View Flag
+      </a>
+
+      {/* Rollback — more prominent for critical */}
+      <button
+        type="button"
+        onClick={() => {
+          // Rollback action — placeholder; wired to API in a future task
+          console.warn('[Tombstone] Rollback requested for flag:', flagKey);
+        }}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold
+          transition-all duration-150
+          ${isCritical
+            ? 'text-[oklch(75%_0.18_25)] bg-[oklch(65%_0.23_25_/_14%)] border border-[oklch(65%_0.23_25_/_35%)] hover:bg-[oklch(65%_0.23_25_/_22%)] hover:border-[oklch(65%_0.23_25_/_55%)]'
+            : 'text-[oklch(80%_0.16_50)] bg-[oklch(70%_0.2_45_/_10%)] border border-[oklch(70%_0.2_45_/_30%)] hover:bg-[oklch(70%_0.2_45_/_18%)] hover:border-[oklch(70%_0.2_45_/_50%)]'
+          }`}
+      >
+        <RollbackIcon />
+        Rollback
+      </button>
+    </div>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 export default function IncidentTimeline() {
   const [window, setWindow] = useState<WindowOption>('1h');
   const [entries, setEntries] = useState<TimelineEntry[]>([]);
@@ -109,7 +281,8 @@ export default function IncidentTimeline() {
         return {
           ts: e['created_at'] as number,
           type: eventType.includes('kill') ? 'incident' :
-                eventType.includes('anomaly') ? 'metric_anomaly' : 'flag_change',
+                eventType.includes('anomaly') ? 'metric_anomaly' :
+                eventType.includes('notification') ? 'notification_delivery' : 'flag_change',
           title: `${eventType}: ${(e['flag_key'] as string) ?? 'unknown'}`,
           description: `Actor: ${(e['actor'] as string) ?? 'unknown'} | Env: ${(e['environment'] as string) ?? '-'}`,
           actor: e['actor'] as string,
@@ -251,19 +424,25 @@ export default function IncidentTimeline() {
             {/* Vertical rail */}
             <div className="absolute left-[5px] top-2 bottom-2 w-px bg-gray-800" />
 
-            <div className="space-y-4 pl-8">
+            <div className="space-y-3 pl-8">
               {entries.map((entry, i) => {
-                const badge = SEVERITY_BADGE[entry.severity];
-                const dot = SEVERITY_DOT[entry.severity];
-                const cardLeft = SEVERITY_CARD_LEFT[entry.severity];
+                const cfg = SEVERITY_CONFIG[entry.severity];
+                const primary = isPrimary(entry);
+                const showActions = hasQuickActions(entry);
                 const isOpen = expanded === i;
                 const entryDate = fromUnixTime(entry.ts);
 
+                // Dot offset: larger dots need to be nudged left to stay centered on the rail
+                const dotOffset = primary ? '-left-[29px]' : '-left-[27px]';
+
                 return (
-                  <div key={i} className="relative">
-                    {/* Timeline dot */}
+                  <div key={i} className={`relative transition-opacity duration-150 ${cfg.opacity}`}>
+                    {/* Timeline dot — primary: larger + glow; secondary: small + grey */}
                     <div
-                      className={`absolute -left-[27px] top-[18px] w-[11px] h-[11px] rounded-full ${dot}`}
+                      className={`
+                        absolute ${dotOffset} top-[18px] rounded-full
+                        ${cfg.dotSize} ${cfg.dotColor} ${cfg.dotGlow}
+                      `}
                     />
 
                     {/* Card */}
@@ -271,10 +450,13 @@ export default function IncidentTimeline() {
                       onClick={() => setExpanded(isOpen ? null : i)}
                       className={`
                         group cursor-pointer rounded-xl
-                        bg-gray-900 border border-gray-800
-                        border-l-2 ${cardLeft}
-                        hover:border-gray-700 hover:bg-gray-900/80
+                        border border-gray-800 border-l-2 ${cfg.borderLeft}
+                        hover:border-gray-700
                         transition-all duration-150
+                        ${primary
+                          ? `${cfg.bg} hover:brightness-110`
+                          : 'bg-gray-900/50 hover:bg-gray-900/70'
+                        }
                       `}
                     >
                       {/* Card header */}
@@ -299,29 +481,29 @@ export default function IncidentTimeline() {
                             )}
                           </div>
 
-                          {/* Change description */}
-                          <p className="text-sm text-gray-200 font-medium leading-snug">
+                          {/* Change description — bold + colored for primary, muted for secondary */}
+                          <p
+                            className={`text-sm leading-snug ${
+                              primary
+                                ? `font-semibold ${cfg.text}`
+                                : 'font-normal text-gray-500'
+                            }`}
+                          >
                             {entry.title}
                           </p>
+
+                          {/* Quick-action buttons — inline on critical/high flag_change events */}
+                          {showActions && (
+                            <QuickActions flagKey={entry.flagKey!} severity={entry.severity} />
+                          )}
                         </div>
 
                         {/* Severity badge + expand chevron */}
                         <div className="flex items-center gap-3 shrink-0 mt-0.5">
-                          <span className={`text-[10px] font-bold tracking-widest px-2 py-0.5 rounded-md ${badge.classes}`}>
-                            {badge.label}
+                          <span className={`text-[10px] font-bold tracking-widest px-2 py-0.5 rounded-md ${cfg.badgeClasses}`}>
+                            {cfg.badgeLabel}
                           </span>
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 20 20"
-                            fill="currentColor"
-                            className={`w-4 h-4 text-gray-600 group-hover:text-gray-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
+                          <ChevronIcon open={isOpen} />
                         </div>
                       </div>
 
@@ -339,18 +521,7 @@ export default function IncidentTimeline() {
                                 onClick={(e) => e.stopPropagation()}
                               >
                                 View flag: {entry.flagKey}
-                                <svg
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  viewBox="0 0 16 16"
-                                  fill="currentColor"
-                                  className="w-3 h-3"
-                                >
-                                  <path
-                                    fillRule="evenodd"
-                                    d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z"
-                                    clipRule="evenodd"
-                                  />
-                                </svg>
+                                <ExternalLinkIcon />
                               </a>
                             </div>
                           )}
