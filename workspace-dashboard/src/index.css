@@ -261,7 +261,8 @@ body::before {
   initial-value: 0%;
 }
 .rollout-bar-fill {
-  transition: --rollout-pct 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: --rollout-pct 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+              background-color 0.4s ease;
   width: var(--rollout-pct);
 }
 @media (prefers-reduced-motion: reduce) {
