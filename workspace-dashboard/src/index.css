@@ -254,16 +254,25 @@ body::before {
 
 /* ═══════════════════════════════════════════════════════
    ANIMATION 6: ROLLOUT BAR (@property)
+   Both --rollout-pct (width) and --fill-color (background)
+   are set as inline custom properties by RolloutBar so that
+   all animated values flow through CSS transitions uniformly.
 ═══════════════════════════════════════════════════════ */
 @property --rollout-pct {
   syntax: '<percentage>';
   inherits: false;
   initial-value: 0%;
 }
+@property --fill-color {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: transparent;
+}
 .rollout-bar-fill {
   transition: --rollout-pct 0.6s cubic-bezier(0.4, 0, 0.2, 1),
-              background-color 0.4s ease;
+              --fill-color 0.4s ease;
   width: var(--rollout-pct);
+  background: var(--fill-color);
 }
 @media (prefers-reduced-motion: reduce) {
   .rollout-bar-fill { transition: none; }
