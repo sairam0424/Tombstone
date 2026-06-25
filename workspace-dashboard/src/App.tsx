@@ -1,6 +1,7 @@
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import { useState, useCallback } from 'react';
 import { Activity } from 'lucide-react';
+import { Toaster } from 'sonner';
 import { CommandPalette } from './components/CommandPalette.js';
 import { LiveFeed } from './components/LiveFeed.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
@@ -536,6 +537,21 @@ export default function App() {
 
       {/* Command Palette */}
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} flags={flags} />
+
+      {/* Toast notifications */}
+      <Toaster
+        theme="dark"
+        position="bottom-right"
+        toastOptions={{
+          style: {
+            background: 'var(--color-bg-elevated)',
+            border: '1px solid var(--color-border-strong)',
+            color: 'var(--color-fg)',
+            fontFamily: 'Inter, system-ui, sans-serif',
+            fontSize: '13px',
+          },
+        }}
+      />
     </div>
   );
 }
