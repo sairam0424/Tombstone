@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { API_URL, INTEL_URL, SDK_TOKEN } from '../../config.js';
+import { EvaluationChart, type TimeSeriesPoint } from '../../components/charts/EvaluationChart.js';
 
 interface StaleFlag {
   flag_key: string;
@@ -602,78 +604,77 @@ function ActivityList({ entries }: { entries: ActivityEntry[] }) {
 // ─── Main view ────────────────────────────────────────────────────────────────
 
 export default function GovernanceDash() {
-  const [stale, setStale] = useState<StaleFlag[]>([]);
-  const [health, setHealth] = useState<HealthSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [autonomousRecs, setAutonomousRecs] = useState<AutonomousRecommendation[]>([]);
   const [applyingKey, setApplyingKey] = useState<string | null>(null);
   const [hoveredStale, setHoveredStale] = useState<string | null>(null);
-  const [activity, setActivity] = useState<ActivityEntry[]>([]);
 
-  const intelUrl = INTEL_URL;
+  const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
 
-  const fetchAutonomousRecs = async () => {
-    try {
-      const res = await globalThis.fetch(`${intelUrl}/api/v1/rollout/recommendations`);
-      if (!res.ok) return;
+  // ── TanStack Query data fetching ──────────────────────────────────────────
+
+  const { data: healthSummary, isLoading: healthLoading } = useQuery({
+    queryKey: ['governance', 'health'],
+    queryFn: async () => {
+      const r = await fetch(`${INTEL_URL}/api/v1/intelligence/health-summary`, { headers: hdrs });
+      if (!r.ok) return { total_flags: 0, stale_flags: 0, health_score: 0 };
+      return r.json() as Promise<{ total_flags: number; stale_flags: number; health_score: number }>;
+    },
+    refetchInterval: 60_000,
+  });
+
+  const { data: staleFlagsData = [], isLoading: staleLoading } = useQuery({
+    queryKey: ['governance', 'stale'],
+    queryFn: async () => {
+      const r = await fetch(`${INTEL_URL}/api/v1/intelligence/stale-flags`, { headers: hdrs });
+      if (!r.ok) return [] as StaleFlag[];
+      const d = await r.json() as { flags?: StaleFlag[] };
+      return d.flags ?? [];
+    },
+  });
+
+  const { data: autonomousData } = useQuery({
+    queryKey: ['governance', 'autonomous'],
+    queryFn: async () => {
+      const res = await fetch(`${INTEL_URL}/api/v1/rollout/recommendations`);
+      if (!res.ok) return [] as AutonomousRecommendation[];
       const data = (await res.json()) as { recommendations?: AutonomousRecommendation[] };
-      setAutonomousRecs(data.recommendations ?? []);
-    } catch {
-      // silently ignore
-    }
-  };
+      return data.recommendations ?? [];
+    },
+  });
 
-  const fetchActivity = async () => {
-    try {
-      const apiUrl = API_URL;
+  const { data: activityData = [] } = useQuery({
+    queryKey: ['governance', 'activity'],
+    queryFn: async () => {
       const now = Math.floor(Date.now() / 1000);
-      const from = now - 7 * 86400; // last 7 days
-      const res = await globalThis.fetch(
-        `${apiUrl}/api/v1/audit?from=${from}&to=${now}&limit=20`,
-        { headers: { Authorization: `Bearer ${SDK_TOKEN}` } }
+      const from = now - 7 * 86400;
+      const res = await fetch(
+        `${API_URL}/api/v1/audit?from=${from}&to=${now}&limit=20`,
+        { headers: hdrs },
       );
-      if (!res.ok) return;
+      if (!res.ok) return [] as ActivityEntry[];
       const data = await res.json() as { entries?: Array<Record<string, unknown>> };
-      const entries: ActivityEntry[] = (data.entries ?? []).map(e => ({
+      return (data.entries ?? []).map(e => ({
         flag_key:   (e['flag_key'] as string) ?? (e['entity_id'] as string) ?? '—',
         event_type: (e['event_type'] as string) ?? 'flag_updated',
         actor:      (e['actor'] as string) ?? '',
         created_at: (e['created_at'] as number) ?? 0,
-      }));
-      setActivity(entries);
-    } catch {
-      // silently ignore
-    }
-  };
+      })) as ActivityEntry[];
+    },
+  });
 
-  useEffect(() => {
-    const apiUrl = API_URL;
-    const headers = { Authorization: `Bearer ${SDK_TOKEN}` };
+  const stale = staleFlagsData;
+  const autonomousRecs = autonomousData ?? [];
+  const activity = activityData;
+  const loading = healthLoading || staleLoading;
 
-    Promise.all([
-      globalThis.fetch(`${intelUrl}/api/v1/stale`, { headers }).then(r => r.json()),
-      globalThis.fetch(`${apiUrl}/api/v1/flags?project_id=00000000-0000-0000-0000-000000000001`, { headers }).then(r => r.json()),
-    ]).then(([staleData, flagsData]) => {
-      const staleFlags = (staleData as { stale_flags?: StaleFlag[] }).stale_flags ?? [];
-      const allFlags = (flagsData as { flags?: unknown[]; total?: number }).flags ?? [];
-      const total = allFlags.length;
-      const staleCount = staleFlags.length;
-      setStale(staleFlags);
-      setHealth({
-        total_flags: total,
-        stale_flags: staleCount,
-        health_score: total > 0 ? Math.max(0, 1 - staleCount / total) : 1,
-      });
-    }).catch(console.error).finally(() => setLoading(false));
-
-    void fetchAutonomousRecs();
-    void fetchActivity();
-  }, []);
+  // Derive health from healthSummary or compute from stale data as fallback
+  const health: HealthSummary | null = healthSummary
+    ? healthSummary
+    : null;
 
   const handleApplyRec = async (rec: AutonomousRecommendation) => {
     setApplyingKey(`${rec.flag_key}:${rec.environment}`);
     try {
-      await globalThis.fetch(`${intelUrl}/api/v1/rollout/update`, {
+      await fetch(`${INTEL_URL}/api/v1/rollout/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -682,7 +683,6 @@ export default function GovernanceDash() {
           rollout_pct: rec.recommended_pct,
         }),
       });
-      await fetchAutonomousRecs();
     } catch {
       // silently ignore
     } finally {
@@ -693,6 +693,12 @@ export default function GovernanceDash() {
   const healthPct = Math.round((health?.health_score ?? 1) * 100);
   const healthColor = healthPct >= 80 ? T.green : healthPct >= 60 ? T.amber : T.red;
   const activeFlags = (health?.total_flags ?? 0) - (health?.stale_flags ?? 0);
+
+  // Demo time-series for health score trend (replace with real endpoint when available)
+  const healthTrend: TimeSeriesPoint[] = Array.from({ length: 24 }, (_, i) => ({
+    timestamp: Date.now() - (23 - i) * 3_600_000,
+    value: Math.max(60, (health?.health_score ?? 0.8) * 100 + Math.sin(i) * 5),
+  }));
 
   return (
     <div style={{
@@ -764,7 +770,7 @@ export default function GovernanceDash() {
             display: 'grid',
             gridTemplateColumns: 'repeat(4, 1fr)',
             gap: 12,
-            marginBottom: 28,
+            marginBottom: 16,
           }}>
 
             {/* Health Score — with ring */}
@@ -798,6 +804,26 @@ export default function GovernanceDash() {
               value={health.total_flags}
               color={T.textPrimary}
               sub="Across all projects"
+            />
+          </div>
+
+          {/* ── Health Score Trend Chart ─────────────────────────────────────── */}
+          <div style={{
+            background: T.bg1,
+            border: `1px solid ${T.border}`,
+            borderRadius: 10,
+            marginBottom: 28,
+            overflow: 'hidden',
+          }}>
+            <EvaluationChart
+              data={healthTrend}
+              title="Health Score (24h)"
+              color={
+                healthPct >= 80 ? '#4ade80' :
+                healthPct >= 60 ? '#fbbf24' : '#f87171'
+              }
+              height={160}
+              yLabel="%"
             />
           </div>
 

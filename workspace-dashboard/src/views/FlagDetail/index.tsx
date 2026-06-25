@@ -1,20 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { FlagHealthBadge } from '../../components/FlagHealthBadge.js';
 import { CircuitBreakerStatus } from '../../components/CircuitBreakerStatus.js';
 import { AutonomousRolloutToggle } from '../../components/AutonomousRolloutToggle.js';
+import { useOptimisticToggle } from '../../hooks/useOptimisticToggle.js';
+import { useEnvSnapshot } from '../../hooks/useFlags.js';
 import { API_URL, SDK_TOKEN } from '../../config.js';
 
-
-interface FlagEnvState {
-  flag_id: string;
-  flag_key: string;
-  environment: string;
-  enabled: boolean;
-  rollout_pct: number;
-  safe_default: string;
-  updated_at: number;
-}
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface AuditEntry {
   id: string;
@@ -27,7 +23,7 @@ interface AuditEntry {
   created_at: number;
 }
 
-interface Flag {
+interface FlagDetailType {
   id: string;
   key: string;
   name: string;
@@ -37,6 +33,15 @@ interface Flag {
   owner_id: string;
   created_at: number;
   updated_at: number;
+}
+
+// Matches the shape coming from useEnvSnapshot
+interface EnvStateRow {
+  flag_key: string;
+  enabled: boolean;
+  rollout_pct: number;
+  safe_default?: string;
+  updated_at?: number;
 }
 
 type Env = 'development' | 'staging' | 'production';
@@ -81,6 +86,12 @@ const flagTypeBadge: Record<string, string> = {
   multivariate: 'bg-violet-900/50 text-violet-300 border border-violet-800',
   experiment: 'bg-pink-900/50 text-pink-300 border border-pink-800',
 };
+
+const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
+
+// ---------------------------------------------------------------------------
+// Small sub-components
+// ---------------------------------------------------------------------------
 
 function SectionCard({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
@@ -143,64 +154,111 @@ function RolloutBar({ pct, envKey }: { pct: number; envKey: Env }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// EnvToggleButton — isolated per-env optimistic toggle
+// ---------------------------------------------------------------------------
+
+function EnvToggleButton({
+  flagKey,
+  env,
+  currentEnvState,
+}: {
+  flagKey: string;
+  env: Env;
+  currentEnvState: EnvStateRow | undefined;
+}) {
+  const { enabled, toggle, isPending } = useOptimisticToggle(
+    flagKey,
+    env,
+    {
+      enabled: currentEnvState?.enabled ?? false,
+      rolloutPct: currentEnvState?.rollout_pct ?? 0,
+    },
+  );
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={isPending}
+      style={{
+        padding: '8px 16px',
+        borderRadius: 8,
+        border: 'none',
+        background: enabled ? 'var(--color-risk-high, #7f1d1d)' : 'var(--color-accent, #3b82f6)',
+        color: enabled ? '#fff' : '#07080d',
+        fontSize: 13,
+        fontWeight: 600,
+        cursor: isPending ? 'not-allowed' : 'pointer',
+        opacity: isPending ? 0.7 : 1,
+        transition: 'all 0.15s ease',
+      }}
+    >
+      {isPending ? '…' : enabled ? 'Disable' : 'Enable'}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main view
+// ---------------------------------------------------------------------------
+
 export default function FlagDetail() {
-  const { key } = useParams<{ key: string }>();
-  const [flag, setFlag] = useState<Flag | null>(null);
-  const [envStates, setEnvStates] = useState<Record<string, FlagEnvState>>({});
-  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const { key: flagKey } = useParams<{ key: string }>();
   const [activeEnv, setActiveEnv] = useState<Env>('production');
-  const [loading, setLoading] = useState(true);
-  const [killing, setKilling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const apiUrl = API_URL;
-  const tok = SDK_TOKEN;
-  const headers = { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' };
+  // ── Flag detail query ───────────────────────────────────────────────────
+  const {
+    data: flag,
+    isLoading: flagLoading,
+    error: flagError,
+  } = useQuery({
+    queryKey: ['flag', flagKey],
+    queryFn: async (): Promise<FlagDetailType> => {
+      const r = await fetch(`${API_URL}/api/v1/flags/${flagKey}`, { headers: hdrs });
+      if (!r.ok) throw new Error('Flag not found');
+      return r.json() as Promise<FlagDetailType>;
+    },
+    enabled: !!flagKey,
+  });
 
-  useEffect(() => {
-    if (!key) return;
-    setLoading(true);
-    Promise.all([
-      fetch(`${apiUrl}/api/v1/flags/${key}`, { headers }).then(r => r.json()),
-      ...ENVS.map(env =>
-        fetch(`${apiUrl}/api/v1/flags/${key}?environment=${env}`, { headers })
-          .then(r => r.ok ? r.json() : null).catch(() => null)
-      ),
-      fetch(`${apiUrl}/api/v1/audit?flag_key=${key}&limit=20`, { headers }).then(r => r.json()),
-    ]).then(([f, ...rest]) => {
-      setFlag(f as Flag);
-      const auditData = rest.pop() as { entries: AuditEntry[] };
-      setAudit(auditData?.entries ?? []);
-    }).catch(e => setError(String(e))).finally(() => setLoading(false));
+  // ── Audit log query ─────────────────────────────────────────────────────
+  const { data: auditData } = useQuery({
+    queryKey: ['audit', flagKey],
+    queryFn: async (): Promise<AuditEntry[]> => {
+      const r = await fetch(
+        `${API_URL}/api/v1/audit?flag_key=${flagKey}&limit=20`,
+        { headers: hdrs },
+      );
+      if (!r.ok) return [];
+      const d = await r.json() as { entries?: AuditEntry[] };
+      return d.entries ?? [];
+    },
+    enabled: !!flagKey,
+  });
+  const audit = auditData ?? [];
 
-    ENVS.forEach(env => {
-      fetch(`${apiUrl}/api/v1/environments/snapshot?environment=${env}`, { headers })
-        .then(r => r.json())
-        .then((snap: { flags: FlagEnvState[] }) => {
-          const match = snap.flags?.find(f => f.flag_key === key);
-          if (match) setEnvStates(prev => ({ ...prev, [env]: match }));
-        })
-        .catch(() => null);
-    });
-  }, [key]);
+  // ── Per-env snapshot queries (one per env, re-uses shared cache key) ────
+  const { data: devSnap }  = useEnvSnapshot('development');
+  const { data: stgSnap }  = useEnvSnapshot('staging');
+  const { data: prodSnap } = useEnvSnapshot('production');
 
-  const killSwitch = async (env: Env) => {
-    if (!key) return;
-    setKilling(true);
-    try {
-      await fetch(`${apiUrl}/api/v1/flags/${key}/kill`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ environment: env, reason: 'manual kill switch from dashboard' }),
-      });
-      const snap = await fetch(`${apiUrl}/api/v1/environments/snapshot?environment=${env}`, { headers }).then(r => r.json()) as { flags: FlagEnvState[] };
-      const match = snap.flags?.find(f => f.flag_key === key);
-      if (match) setEnvStates(prev => ({ ...prev, [env]: match }));
-    } finally {
-      setKilling(false);
-    }
+  const snapByEnv: Record<Env, Record<string, EnvStateRow>> = {
+    development: (devSnap  ?? {}) as Record<string, EnvStateRow>,
+    staging:     (stgSnap  ?? {}) as Record<string, EnvStateRow>,
+    production:  (prodSnap ?? {}) as Record<string, EnvStateRow>,
   };
 
-  if (loading) {
+  // ── Derived per-env state ───────────────────────────────────────────────
+  const envStates: Record<Env, EnvStateRow | undefined> = {
+    development: flagKey ? snapByEnv.development[flagKey] : undefined,
+    staging:     flagKey ? snapByEnv.staging[flagKey]     : undefined,
+    production:  flagKey ? snapByEnv.production[flagKey]  : undefined,
+  };
+
+  const activeEnvState = envStates[activeEnv];
+
+  // ── Loading / error states ──────────────────────────────────────────────
+  if (flagLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: '#0a0a0a' }}>
         <div className="flex items-center gap-3 text-gray-500">
@@ -211,7 +269,7 @@ export default function FlagDetail() {
     );
   }
 
-  if (error || !flag) {
+  if (flagError || !flag) {
     return (
       <div className="min-h-screen p-8" style={{ background: '#0a0a0a' }}>
         <Link
@@ -221,12 +279,13 @@ export default function FlagDetail() {
         >
           ← All Flags
         </Link>
-        <p className="text-red-400 mt-6 text-sm">{error ?? 'Flag not found'}</p>
+        <p className="text-red-400 mt-6 text-sm">
+          {flagError ? String(flagError) : 'Flag not found'}
+        </p>
       </div>
     );
   }
 
-  const envState = envStates[activeEnv];
   const typeBadgeClass = flagTypeBadge[flag.flag_type] ?? 'bg-gray-800 text-gray-300 border border-gray-700';
 
   return (
@@ -324,11 +383,23 @@ export default function FlagDetail() {
                           </span>
                           {state && <ToggleVisual enabled={state.enabled} envKey={env} />}
                         </div>
-                        {state && (
-                          <span className="text-gray-500 text-xs">
-                            Updated {new Date(state.updated_at * 1000).toLocaleDateString()}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-3">
+                          {state?.updated_at != null && (
+                            <span className="text-gray-500 text-xs">
+                              Updated {new Date(state.updated_at * 1000).toLocaleDateString()}
+                            </span>
+                          )}
+                          {/* Per-env optimistic toggle button */}
+                          {flagKey && (
+                            <div onClick={e => e.stopPropagation()}>
+                              <EnvToggleButton
+                                flagKey={flagKey}
+                                env={env}
+                                currentEnvState={state}
+                              />
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       {state ? (
@@ -339,11 +410,13 @@ export default function FlagDetail() {
                             </div>
                             <RolloutBar pct={state.rollout_pct} envKey={env} />
                           </div>
-                          <div className="flex items-center gap-4 mt-2 text-xs">
-                            <span className="text-gray-500">
-                              Safe default: <code className="text-amber-300 ml-1">{state.safe_default}</code>
-                            </span>
-                          </div>
+                          {state.safe_default != null && (
+                            <div className="flex items-center gap-4 mt-2 text-xs">
+                              <span className="text-gray-500">
+                                Safe default: <code className="text-amber-300 ml-1">{state.safe_default}</code>
+                              </span>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <p className="text-gray-600 text-xs">No state for this environment yet.</p>
@@ -368,51 +441,55 @@ export default function FlagDetail() {
                 <CircuitBreakerStatus flagKey={flag.key} />
               </div>
 
-              {envState ? (
+              {activeEnvState ? (
                 <div className="space-y-4">
-                  <div
-                    className="grid grid-cols-2 gap-3 text-sm"
-                  >
+                  <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
                       <div className="text-gray-500 text-xs mb-1.5">Status</div>
-                      <ToggleVisual enabled={envState.enabled} envKey={activeEnv} />
+                      <ToggleVisual enabled={activeEnvState.enabled} envKey={activeEnv} />
                     </div>
                     <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
                       <div className="text-gray-500 text-xs mb-1.5">Rollout %</div>
-                      <RolloutBar pct={envState.rollout_pct} envKey={activeEnv} />
+                      <RolloutBar pct={activeEnvState.rollout_pct} envKey={activeEnv} />
                     </div>
-                    <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
-                      <div className="text-gray-500 text-xs mb-1.5">Safe Default</div>
-                      <code className="text-amber-300 text-sm">{envState.safe_default}</code>
-                    </div>
-                    <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
-                      <div className="text-gray-500 text-xs mb-1.5">Last Updated</div>
-                      <div className="text-gray-300 text-xs">{new Date(envState.updated_at * 1000).toLocaleString()}</div>
+                    {activeEnvState.safe_default != null && (
+                      <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
+                        <div className="text-gray-500 text-xs mb-1.5">Safe Default</div>
+                        <code className="text-amber-300 text-sm">{activeEnvState.safe_default}</code>
+                      </div>
+                    )}
+                    {activeEnvState.updated_at != null && (
+                      <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
+                        <div className="text-gray-500 text-xs mb-1.5">Last Updated</div>
+                        <div className="text-gray-300 text-xs">
+                          {new Date(activeEnvState.updated_at * 1000).toLocaleString()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Primary optimistic toggle for active env */}
+                  <div className="pt-4 border-t" style={{ borderColor: '#1a1a1a' }}>
+                    <div className="flex items-center gap-4">
+                      {flagKey && (
+                        <EnvToggleButton
+                          flagKey={flagKey}
+                          env={activeEnv}
+                          currentEnvState={activeEnvState}
+                        />
+                      )}
+                      <p className="text-gray-600 text-xs">
+                        Optimistic toggle — updates instantly, reverts automatically on API error.
+                      </p>
                     </div>
                   </div>
 
-                  {/* Kill switch */}
-                  {envState.enabled && (
-                    <div className="pt-4 border-t" style={{ borderColor: '#1a1a1a' }}>
-                      <button
-                        onClick={() => void killSwitch(activeEnv)}
-                        disabled={killing}
-                        className="px-4 py-2 rounded-lg bg-red-950 hover:bg-red-900 text-red-300 text-sm font-medium disabled:opacity-50 transition-colors border border-red-900"
-                      >
-                        {killing ? 'Disabling…' : `Kill Switch — Disable in ${activeEnv}`}
-                      </button>
-                      <p className="text-gray-600 text-xs mt-1.5">
-                        Instantly disables flag. All targeting rules preserved for re-enable.
-                      </p>
-                    </div>
-                  )}
-
                   {/* Autonomous rollout */}
-                  {envState.enabled && (
+                  {activeEnvState.enabled && (
                     <AutonomousRolloutToggle
                       flagKey={flag.key}
                       environment={activeEnv}
-                      currentRolloutPct={envState.rollout_pct}
+                      currentRolloutPct={activeEnvState.rollout_pct}
                     />
                   )}
                 </div>
