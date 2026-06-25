@@ -1,5 +1,7 @@
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
+import { CommandPalette } from './components/CommandPalette.js';
+import { useKeyboard } from './hooks/useKeyboard.js';
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
 import SLOView from './views/SLOView/index.js';
@@ -140,6 +142,14 @@ export default function App() {
   const location = useLocation();
   const [env, setEnv] = useState<Env>('production');
   const [envOpen, setEnvOpen] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
+
+  const openCmd = useCallback(() => setCmdOpen(true), []);
+  const closeCmd = useCallback(() => setCmdOpen(false), []);
+  const showShortcuts = useCallback(() => console.log('TODO: show shortcut map'), []);
+
+  useKeyboard({ 'cmd+k': openCmd, 'escape': closeCmd, '?': showShortcuts });
 
   const pageName = (() => {
     if (location.pathname.startsWith('/flags/')) return 'Flag Detail';
@@ -431,6 +441,22 @@ export default function App() {
               )}
             </div>
 
+            {/* Search / Cmd+K button */}
+            <button
+              onClick={() => setCmdOpen(true)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '5px 12px', borderRadius: 8, fontSize: 12,
+                background: 'var(--color-bg-elevated, #1a1a1a)',
+                border: '1px solid var(--color-border, #2a2a2a)',
+                color: 'var(--color-fg-muted, #6b7280)',
+                cursor: 'pointer',
+              }}
+            >
+              <span>Search…</span>
+              <kbd style={{ fontSize: 10, padding: '1px 4px', borderRadius: 3, background: 'var(--color-bg-surface, #111111)', border: '1px solid var(--color-border, #2a2a2a)' }}>⌘K</kbd>
+            </button>
+
             {/* New Flag button */}
             <button
               style={{
@@ -486,6 +512,9 @@ export default function App() {
           }}
         />
       )}
+
+      {/* Command Palette */}
+      <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} flags={flags} />
     </div>
   );
 }
