@@ -33,6 +33,9 @@ const STATE_BADGE: Record<string, { text: string; bg: string; border: string }> 
 };
 
 // ── RolloutBar — uses @property --rollout-pct for smooth width + color transition
+// Both animated properties (--rollout-pct for width, --fill-color for background)
+// are delivered as CSS custom properties so the .rollout-bar-fill class rule
+// transitions both symmetrically. See index.css ANIMATION 6.
 function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
   const fillColor = !enabled
     ? 'var(--color-border)'
@@ -54,9 +57,8 @@ function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
           className="rollout-bar-fill"
           style={{
             '--rollout-pct': `${pct}%`,
+            '--fill-color': fillColor,
             height: '100%',
-            background: fillColor,
-            borderRadius: 2,
           } as React.CSSProperties}
         />
       </div>
