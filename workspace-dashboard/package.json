@@ -11,6 +11,7 @@
     "lint": "eslint . --max-warnings=0"
   },
   "dependencies": {
+    "@cosmograph/cosmos": "^2.0.0-beta.26",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-dropdown-menu": "^2.1.18",
