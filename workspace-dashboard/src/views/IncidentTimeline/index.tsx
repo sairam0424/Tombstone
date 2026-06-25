@@ -33,97 +33,113 @@ function normalizeSeverity(raw: string): TimelineEntry['severity'] {
   return 'low'; // unknown -> low (green)
 }
 
-// ─── SEVERITY CONFIG (OKLCH token-aligned) ───────────────────────────────────
-// dot: size class + glow;  text: semantic color class; bg: card background tint;
-// badge: inline severity label; borderLeft: left accent stripe
+// ─── SEVERITY CONFIG ──────────────────────────────────────────────────────────
+// Uses CSS custom properties + color-mix(in oklab, ...) as mandated by the spec.
+// All sizes are in CSS px (not Tailwind size classes).
+// bgColor: card background tint  (color-mix over transparent per global constraint)
+// dotColor/borderColor/textColor: semantic token references
+// dotSize: diameter in px per spec: critical=10, high=8, medium=6, info=4
 const SEVERITY_CONFIG: Record<
   TimelineEntry['severity'],
   {
-    dotSize: string;
-    dotColor: string;
-    dotGlow: string;
-    text: string;
-    bg: string;
-    borderLeft: string;
+    dotSize: number;      // px diameter
+    dotColor: string;     // CSS color expression
+    dotGlow: string;      // CSS box-shadow expression ('' = none)
+    textColor: string;    // CSS color expression
+    bgColor: string;      // color-mix(in oklab, ...) background tint
+    borderLeftColor: string;
     badgeLabel: string;
-    badgeClasses: string;
-    opacity: string;
+    badgeBg: string;
+    badgeColor: string;
+    badgeBorder: string;
+    opacity: number;      // 0–1
   }
 > = {
   critical: {
-    dotSize: 'w-3.5 h-3.5',
-    dotColor: 'bg-[oklch(65%_0.23_25)]',
-    dotGlow: 'shadow-[0_0_8px_2px_oklch(65%_0.23_25_/_60%)]',
-    text: 'text-[oklch(75%_0.18_25)]',
-    bg: 'bg-[oklch(65%_0.23_25_/_6%)]',
-    borderLeft: 'border-l-[oklch(65%_0.23_25)]',
+    dotSize: 10,
+    dotColor: 'var(--color-risk-high)',
+    dotGlow: '0 0 8px 2px color-mix(in oklab, var(--color-risk-high) 60%, transparent)',
+    textColor: 'var(--color-risk-high)',
+    bgColor: 'color-mix(in oklab, var(--color-risk-high) 12%, transparent)',
+    borderLeftColor: 'var(--color-risk-high)',
     badgeLabel: 'CRITICAL',
-    badgeClasses: 'bg-[oklch(65%_0.23_25_/_18%)] text-[oklch(75%_0.18_25)] border border-[oklch(65%_0.23_25_/_40%)]',
-    opacity: 'opacity-100',
+    badgeBg: 'color-mix(in oklab, var(--color-risk-high) 18%, transparent)',
+    badgeColor: 'var(--color-risk-high)',
+    badgeBorder: 'color-mix(in oklab, var(--color-risk-high) 40%, transparent)',
+    opacity: 1,
   },
   high: {
-    dotSize: 'w-3 h-3',
-    dotColor: 'bg-[oklch(70%_0.2_45)]',
-    dotGlow: 'shadow-[0_0_7px_1px_oklch(70%_0.2_45_/_55%)]',
-    text: 'text-[oklch(80%_0.16_50)]',
-    bg: 'bg-[oklch(70%_0.2_45_/_5%)]',
-    borderLeft: 'border-l-[oklch(70%_0.2_45)]',
+    dotSize: 8,
+    dotColor: 'var(--color-action-warning)',
+    dotGlow: '0 0 7px 1px color-mix(in oklab, var(--color-action-warning) 55%, transparent)',
+    textColor: 'var(--color-action-warning)',
+    bgColor: 'color-mix(in oklab, var(--color-action-warning) 10%, transparent)',
+    borderLeftColor: 'var(--color-action-warning)',
     badgeLabel: 'HIGH',
-    badgeClasses: 'bg-[oklch(70%_0.2_45_/_18%)] text-[oklch(80%_0.16_50)] border border-[oklch(70%_0.2_45_/_40%)]',
-    opacity: 'opacity-100',
+    badgeBg: 'color-mix(in oklab, var(--color-action-warning) 18%, transparent)',
+    badgeColor: 'var(--color-action-warning)',
+    badgeBorder: 'color-mix(in oklab, var(--color-action-warning) 40%, transparent)',
+    opacity: 1,
   },
   medium: {
-    dotSize: 'w-2.5 h-2.5',
-    dotColor: 'bg-[oklch(78%_0.17_85)]',
-    dotGlow: 'shadow-[0_0_5px_1px_oklch(78%_0.17_85_/_45%)]',
-    text: 'text-[oklch(78%_0.17_85)]',
-    bg: '',
-    borderLeft: 'border-l-[oklch(78%_0.17_85)]',
+    dotSize: 6,
+    dotColor: 'var(--color-risk-medium)',
+    dotGlow: '0 0 5px 1px color-mix(in oklab, var(--color-risk-medium) 45%, transparent)',
+    textColor: 'var(--color-risk-medium)',
+    bgColor: '',
+    borderLeftColor: 'var(--color-risk-medium)',
     badgeLabel: 'MEDIUM',
-    badgeClasses: 'bg-amber-500/20 text-amber-400 border border-amber-500/40',
-    opacity: 'opacity-100',
+    badgeBg: 'color-mix(in oklab, var(--color-risk-medium) 18%, transparent)',
+    badgeColor: 'var(--color-risk-medium)',
+    badgeBorder: 'color-mix(in oklab, var(--color-risk-medium) 40%, transparent)',
+    opacity: 1,
   },
   low: {
-    dotSize: 'w-2 h-2',
-    dotColor: 'bg-gray-500',
+    dotSize: 6,
+    dotColor: 'var(--color-fg-subtle)',
     dotGlow: '',
-    text: 'text-gray-500',
-    bg: '',
-    borderLeft: 'border-l-gray-700',
+    textColor: 'var(--color-fg-subtle)',
+    bgColor: '',
+    borderLeftColor: 'var(--color-border)',
     badgeLabel: 'LOW',
-    badgeClasses: 'bg-gray-800 text-gray-500 border border-gray-700',
-    opacity: 'opacity-65',
+    badgeBg: 'color-mix(in oklab, var(--color-fg-subtle) 8%, transparent)',
+    badgeColor: 'var(--color-fg-subtle)',
+    badgeBorder: 'color-mix(in oklab, var(--color-fg-subtle) 15%, transparent)',
+    opacity: 0.65,
   },
   info: {
-    dotSize: 'w-2 h-2',
-    dotColor: 'bg-gray-600',
+    dotSize: 4,
+    dotColor: 'var(--color-fg-subtle)',
     dotGlow: '',
-    text: 'text-gray-500',
-    bg: '',
-    borderLeft: 'border-l-gray-700',
+    textColor: 'var(--color-fg-subtle)',
+    bgColor: '',
+    borderLeftColor: 'var(--color-border)',
     badgeLabel: 'INFO',
-    badgeClasses: 'bg-gray-800 text-gray-600 border border-gray-700',
-    opacity: 'opacity-65',
+    badgeBg: 'color-mix(in oklab, var(--color-fg-subtle) 6%, transparent)',
+    badgeColor: 'var(--color-fg-subtle)',
+    badgeBorder: 'color-mix(in oklab, var(--color-fg-subtle) 12%, transparent)',
+    opacity: 0.65,
   },
   warning: {
-    dotSize: 'w-2.5 h-2.5',
-    dotColor: 'bg-[oklch(78%_0.17_85)]',
-    dotGlow: 'shadow-[0_0_5px_1px_oklch(78%_0.17_85_/_45%)]',
-    text: 'text-[oklch(78%_0.17_85)]',
-    bg: '',
-    borderLeft: 'border-l-[oklch(78%_0.17_85)]',
+    dotSize: 6,
+    dotColor: 'var(--color-risk-medium)',
+    dotGlow: '0 0 5px 1px color-mix(in oklab, var(--color-risk-medium) 45%, transparent)',
+    textColor: 'var(--color-risk-medium)',
+    bgColor: '',
+    borderLeftColor: 'var(--color-risk-medium)',
     badgeLabel: 'MEDIUM',
-    badgeClasses: 'bg-amber-500/20 text-amber-400 border border-amber-500/40',
-    opacity: 'opacity-100',
+    badgeBg: 'color-mix(in oklab, var(--color-risk-medium) 18%, transparent)',
+    badgeColor: 'var(--color-risk-medium)',
+    badgeBorder: 'color-mix(in oklab, var(--color-risk-medium) 40%, transparent)',
+    opacity: 1,
   },
 };
 
 // ─── PRIMARY event types ────────────────────────────────────────────────────
-// These are state-changing / high-impact events that deserve full visual weight.
+// Exactly as spec: only flag_change + incident.
 const PRIMARY_TYPES = new Set<TimelineEntry['type']>([
   'flag_change',
   'incident',
-  'metric_anomaly',
 ]);
 
 /** Determine if an entry should render at PRIMARY (full weight) or SECONDARY (dimmed). */
@@ -153,7 +169,7 @@ function LightningIcon() {
       strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="w-12 h-12 text-gray-600"
+      style={{ width: 48, height: 48, color: 'var(--color-fg-subtle)' }}
     >
       <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
     </svg>
@@ -166,7 +182,14 @@ function ChevronIcon({ open }: { open: boolean }) {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 20 20"
       fill="currentColor"
-      className={`w-4 h-4 text-gray-600 group-hover:text-gray-400 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+      style={{
+        width: 16,
+        height: 16,
+        color: 'var(--color-fg-subtle)',
+        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+        // Reduced-motion: transition is applied via CSS class below
+      }}
+      className="chevron-icon"
     >
       <path
         fillRule="evenodd"
@@ -183,7 +206,7 @@ function ExternalLinkIcon() {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 16 16"
       fill="currentColor"
-      className="w-3 h-3"
+      style={{ width: 12, height: 12 }}
     >
       <path
         fillRule="evenodd"
@@ -204,7 +227,7 @@ function RollbackIcon() {
       strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="w-3 h-3"
+      style={{ width: 12, height: 12 }}
     >
       <path d="M3 8a5 5 0 1 0 1.6-3.7M3 4v4h4" />
     </svg>
@@ -214,37 +237,62 @@ function RollbackIcon() {
 // ─── Quick-action button strip ───────────────────────────────────────────────
 function QuickActions({ flagKey, severity }: { flagKey: string; severity: TimelineEntry['severity'] }) {
   const isCritical = severity === 'critical';
+
+  const viewFlagStyle: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 10px',
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--color-accent)',
+    background: 'color-mix(in oklab, var(--color-accent) 10%, transparent)',
+    border: '1px solid color-mix(in oklab, var(--color-accent) 25%, transparent)',
+    cursor: 'pointer',
+    textDecoration: 'none',
+  };
+
+  const rollbackStyle: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 10px',
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    background: isCritical
+      ? 'color-mix(in oklab, var(--color-risk-high) 14%, transparent)'
+      : 'color-mix(in oklab, var(--color-action-warning) 10%, transparent)',
+    color: isCritical ? 'var(--color-risk-high)' : 'var(--color-action-warning)',
+    border: isCritical
+      ? '1px solid color-mix(in oklab, var(--color-risk-high) 35%, transparent)'
+      : '1px solid color-mix(in oklab, var(--color-action-warning) 30%, transparent)',
+  };
+
   return (
-    <div className="flex items-center gap-2 mt-3" onClick={(e) => e.stopPropagation()}>
-      {/* View Flag */}
+    <div
+      style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* View Flag — navigates to /flags/${flagKey} */}
       <a
         href={`/flags/${flagKey}`}
-        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold
-          text-[oklch(82%_0.18_200)] bg-[oklch(82%_0.18_200_/_10%)] border border-[oklch(82%_0.18_200_/_25%)]
-          hover:bg-[oklch(82%_0.18_200_/_18%)] hover:border-[oklch(82%_0.18_200_/_40%)]
-          transition-all duration-150"
+        style={viewFlagStyle}
       >
         <ExternalLinkIcon />
         View Flag
       </a>
 
-      {/* Rollback — more prominent for critical */}
-      <button
-        type="button"
-        onClick={() => {
-          // Rollback action — placeholder; wired to API in a future task
-          console.warn('[Tombstone] Rollback requested for flag:', flagKey);
-        }}
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold
-          transition-all duration-150
-          ${isCritical
-            ? 'text-[oklch(75%_0.18_25)] bg-[oklch(65%_0.23_25_/_14%)] border border-[oklch(65%_0.23_25_/_35%)] hover:bg-[oklch(65%_0.23_25_/_22%)] hover:border-[oklch(65%_0.23_25_/_55%)]'
-            : 'text-[oklch(80%_0.16_50)] bg-[oklch(70%_0.2_45_/_10%)] border border-[oklch(70%_0.2_45_/_30%)] hover:bg-[oklch(70%_0.2_45_/_18%)] hover:border-[oklch(70%_0.2_45_/_50%)]'
-          }`}
+      {/* Rollback — navigates to /flags/${flagKey}?action=rollback */}
+      <a
+        href={`/flags/${flagKey}?action=rollback`}
+        style={rollbackStyle}
       >
         <RollbackIcon />
         Rollback
-      </button>
+      </a>
     </div>
   );
 }
@@ -306,34 +354,48 @@ export default function IncidentTimeline() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100">
-      <div className="max-w-4xl mx-auto px-6 py-8">
+    <div style={{ minHeight: '100vh', background: 'var(--color-bg-base)', color: 'var(--color-fg)' }}>
+      <div style={{ maxWidth: 896, margin: '0 auto', padding: '32px 24px' }}>
 
         {/* Page header */}
-        <div className="mb-8">
-          <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div style={{ marginBottom: 32 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-white">
+              <h1 style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.025em', color: 'var(--color-fg)', margin: 0 }}>
                 What Changed?
               </h1>
-              <p className="mt-1 text-sm text-gray-400 tracking-wide">
+              <p style={{ marginTop: 4, fontSize: 14, color: 'var(--color-fg-muted)', letterSpacing: '0.025em' }}>
                 Causal incident correlation
               </p>
             </div>
 
             {/* Controls */}
-            <div className="flex items-center gap-2 flex-wrap">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {/* Time range pills */}
-              <div className="flex items-center bg-gray-900 border border-gray-800 rounded-lg p-1 gap-1">
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                background: 'var(--color-bg-surface)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 10,
+                padding: 4,
+                gap: 4,
+              }}>
                 {(['1h', '6h', '24h', '7d'] as WindowOption[]).map((w) => (
                   <button
                     key={w}
                     onClick={() => setWindow(w)}
-                    className={`px-3 py-1 rounded-md text-xs font-semibold tracking-wide transition-all duration-150 ${
-                      window === w
-                        ? 'bg-blue-600 text-white shadow-sm'
-                        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
-                    }`}
+                    style={{
+                      padding: '4px 12px',
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      letterSpacing: '0.05em',
+                      border: 'none',
+                      cursor: 'pointer',
+                      background: window === w ? 'var(--color-accent)' : 'transparent',
+                      color: window === w ? 'var(--color-bg-base)' : 'var(--color-fg-muted)',
+                    }}
                   >
                     {WINDOW_LABELS[w]}
                   </button>
@@ -344,13 +406,27 @@ export default function IncidentTimeline() {
               <button
                 onClick={() => void fetchTimeline()}
                 disabled={loading}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 bg-gray-900 border border-gray-800 hover:text-gray-200 hover:border-gray-700 transition-all duration-150 disabled:opacity-40"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 12px',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: 'var(--color-fg-muted)',
+                  background: 'var(--color-bg-surface)',
+                  border: '1px solid var(--color-border)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  opacity: loading ? 0.4 : 1,
+                }}
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   viewBox="0 0 20 20"
                   fill="currentColor"
-                  className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`}
+                  style={{ width: 14, height: 14 }}
+                  className={loading ? 'animate-spin' : ''}
                 >
                   <path
                     fillRule="evenodd"
@@ -364,17 +440,26 @@ export default function IncidentTimeline() {
           </div>
 
           {/* Divider */}
-          <div className="mt-6 border-t border-gray-800" />
+          <div style={{ marginTop: 24, borderTop: '1px solid var(--color-border)' }} />
         </div>
 
         {/* Error banner */}
         {error && (
-          <div className="flex items-start gap-3 bg-red-950/60 border border-red-800/60 rounded-xl px-4 py-3 mb-6">
+          <div style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 12,
+            background: 'color-mix(in oklab, var(--color-risk-high) 8%, transparent)',
+            border: '1px solid color-mix(in oklab, var(--color-risk-high) 30%, transparent)',
+            borderRadius: 12,
+            padding: '12px 16px',
+            marginBottom: 24,
+          }}>
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="w-4 h-4 text-red-400 mt-0.5 shrink-0"
+              style={{ width: 16, height: 16, color: 'var(--color-risk-high)', marginTop: 2, flexShrink: 0 }}
             >
               <path
                 fillRule="evenodd"
@@ -382,21 +467,21 @@ export default function IncidentTimeline() {
                 clipRule="evenodd"
               />
             </svg>
-            <span className="text-red-300 text-sm">{error}</span>
+            <span style={{ fontSize: 14, color: 'var(--color-risk-high)' }}>{error}</span>
           </div>
         )}
 
         {/* Loading skeleton */}
         {loading && entries.length === 0 && (
-          <div className="space-y-4">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {[...Array(4)].map((_, i) => (
-              <div key={i} className="flex gap-6 animate-pulse">
-                <div className="flex flex-col items-center pt-1">
-                  <div className="w-3 h-3 rounded-full bg-gray-800" />
-                  <div className="w-px flex-1 bg-gray-800 mt-2" />
+              <div key={i} style={{ display: 'flex', gap: 24 }} className="animate-pulse">
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 4 }}>
+                  <div style={{ width: 12, height: 12, borderRadius: '50%', background: 'var(--color-bg-elevated)' }} />
+                  <div style={{ width: 1, flex: 1, background: 'var(--color-bg-elevated)', marginTop: 8 }} />
                 </div>
-                <div className="flex-1 pb-6">
-                  <div className="h-20 bg-gray-900 rounded-xl border border-gray-800" />
+                <div style={{ flex: 1, paddingBottom: 24 }}>
+                  <div style={{ height: 80, background: 'var(--color-bg-surface)', borderRadius: 12, border: '1px solid var(--color-border)' }} />
                 </div>
               </div>
             ))}
@@ -405,13 +490,18 @@ export default function IncidentTimeline() {
 
         {/* Empty state */}
         {!loading && entries.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-24 gap-4">
-            <div className="p-4 rounded-full bg-gray-900 border border-gray-800">
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '96px 0', gap: 16 }}>
+            <div style={{
+              padding: 16,
+              borderRadius: '50%',
+              background: 'var(--color-bg-surface)',
+              border: '1px solid var(--color-border)',
+            }}>
               <LightningIcon />
             </div>
-            <div className="text-center">
-              <p className="text-gray-300 font-medium">No recent incidents</p>
-              <p className="text-gray-600 text-sm mt-1">
+            <div style={{ textAlign: 'center' }}>
+              <p style={{ color: 'var(--color-fg)', fontWeight: 500 }}>No recent incidents</p>
+              <p style={{ color: 'var(--color-fg-subtle)', fontSize: 14, marginTop: 4 }}>
                 No events detected in the last {WINDOW_LABELS[window]}. Production is quiet.
               </p>
             </div>
@@ -420,11 +510,18 @@ export default function IncidentTimeline() {
 
         {/* Timeline */}
         {entries.length > 0 && (
-          <div className="relative">
+          <div style={{ position: 'relative' }}>
             {/* Vertical rail */}
-            <div className="absolute left-[5px] top-2 bottom-2 w-px bg-gray-800" />
+            <div style={{
+              position: 'absolute',
+              left: 5,
+              top: 8,
+              bottom: 8,
+              width: 1,
+              background: 'var(--color-border)',
+            }} />
 
-            <div className="space-y-3 pl-8">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingLeft: 32 }}>
               {entries.map((entry, i) => {
                 const cfg = SEVERITY_CONFIG[entry.severity];
                 const primary = isPrimary(entry);
@@ -432,49 +529,66 @@ export default function IncidentTimeline() {
                 const isOpen = expanded === i;
                 const entryDate = fromUnixTime(entry.ts);
 
-                // Dot offset: larger dots need to be nudged left to stay centered on the rail
-                const dotOffset = primary ? '-left-[29px]' : '-left-[27px]';
+                // Dot offset: center the dot on the rail (rail is at left:5, half-width)
+                const dotHalfSize = cfg.dotSize / 2;
+                const dotLeft = 5 - dotHalfSize - 32; // relative to the pl-32 container
 
                 return (
-                  <div key={i} className={`relative transition-opacity duration-150 ${cfg.opacity}`}>
+                  <div
+                    key={`${entry.ts}-${entry.type}-${entry.flagKey ?? i}`}
+                    style={{ position: 'relative', opacity: cfg.opacity }}
+                    className="timeline-entry"
+                  >
                     {/* Timeline dot — primary: larger + glow; secondary: small + grey */}
                     <div
-                      className={`
-                        absolute ${dotOffset} top-[18px] rounded-full
-                        ${cfg.dotSize} ${cfg.dotColor} ${cfg.dotGlow}
-                      `}
+                      style={{
+                        position: 'absolute',
+                        left: dotLeft,
+                        top: 18,
+                        width: cfg.dotSize,
+                        height: cfg.dotSize,
+                        borderRadius: '50%',
+                        background: cfg.dotColor,
+                        boxShadow: cfg.dotGlow || undefined,
+                      }}
                     />
 
                     {/* Card */}
                     <div
                       onClick={() => setExpanded(isOpen ? null : i)}
-                      className={`
-                        group cursor-pointer rounded-xl
-                        border border-gray-800 border-l-2 ${cfg.borderLeft}
-                        hover:border-gray-700
-                        transition-all duration-150
-                        ${primary
-                          ? `${cfg.bg} hover:brightness-110`
-                          : 'bg-gray-900/50 hover:bg-gray-900/70'
-                        }
-                      `}
+                      style={{
+                        cursor: 'pointer',
+                        borderRadius: 12,
+                        border: `1px solid var(--color-border)`,
+                        borderLeft: `2px solid ${cfg.borderLeftColor}`,
+                        background: primary && cfg.bgColor ? cfg.bgColor : 'color-mix(in oklab, var(--color-bg-surface) 50%, transparent)',
+                      }}
+                      className="timeline-card"
                     >
                       {/* Card header */}
-                      <div className="flex items-start justify-between gap-4 px-5 py-4">
-                        <div className="flex-1 min-w-0">
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '16px 20px' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           {/* Timestamp + flag key row */}
-                          <div className="flex items-center gap-3 mb-1.5 flex-wrap">
-                            <span className="font-mono text-xs text-[#6b7280] tabular-nums shrink-0">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-fg-subtle)', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
                               {format(entryDate, 'HH:mm:ss')}
                             </span>
-                            <span className="text-[#6b7280] text-xs">·</span>
-                            <span className="text-gray-500 text-xs">
+                            <span style={{ color: 'var(--color-fg-subtle)', fontSize: 12 }}>·</span>
+                            <span style={{ color: 'var(--color-fg-subtle)', fontSize: 12 }}>
                               {formatDistanceToNow(entryDate, { addSuffix: true })}
                             </span>
                             {entry.flagKey && (
                               <>
-                                <span className="text-[#6b7280] text-xs">·</span>
-                                <span className="font-mono text-xs text-blue-400 bg-blue-950/40 px-1.5 py-0.5 rounded border border-blue-900/60">
+                                <span style={{ color: 'var(--color-fg-subtle)', fontSize: 12 }}>·</span>
+                                <span style={{
+                                  fontFamily: 'var(--font-mono)',
+                                  fontSize: 12,
+                                  color: 'var(--color-accent)',
+                                  background: 'color-mix(in oklab, var(--color-accent) 10%, transparent)',
+                                  padding: '2px 6px',
+                                  borderRadius: 4,
+                                  border: '1px solid color-mix(in oklab, var(--color-accent) 20%, transparent)',
+                                }}>
                                   {entry.flagKey}
                                 </span>
                               </>
@@ -482,13 +596,13 @@ export default function IncidentTimeline() {
                           </div>
 
                           {/* Change description — bold + colored for primary, muted for secondary */}
-                          <p
-                            className={`text-sm leading-snug ${
-                              primary
-                                ? `font-semibold ${cfg.text}`
-                                : 'font-normal text-gray-500'
-                            }`}
-                          >
+                          <p style={{
+                            fontSize: 14,
+                            lineHeight: 1.4,
+                            margin: 0,
+                            fontWeight: primary ? 600 : 400,
+                            color: primary ? cfg.textColor : 'var(--color-fg-subtle)',
+                          }}>
                             {entry.title}
                           </p>
 
@@ -499,8 +613,17 @@ export default function IncidentTimeline() {
                         </div>
 
                         {/* Severity badge + expand chevron */}
-                        <div className="flex items-center gap-3 shrink-0 mt-0.5">
-                          <span className={`text-[10px] font-bold tracking-widest px-2 py-0.5 rounded-md ${cfg.badgeClasses}`}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, marginTop: 2 }}>
+                          <span style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: '0.1em',
+                            padding: '2px 8px',
+                            borderRadius: 6,
+                            background: cfg.badgeBg,
+                            color: cfg.badgeColor,
+                            border: `1px solid ${cfg.badgeBorder}`,
+                          }}>
                             {cfg.badgeLabel}
                           </span>
                           <ChevronIcon open={isOpen} />
@@ -509,15 +632,22 @@ export default function IncidentTimeline() {
 
                       {/* Expanded details */}
                       {isOpen && (
-                        <div className="px-5 pb-4 border-t border-gray-800/60">
-                          <p className="text-xs text-gray-400 mt-3 leading-relaxed">
+                        <div style={{ padding: '0 20px 16px', borderTop: '1px solid color-mix(in oklab, var(--color-border) 60%, transparent)' }}>
+                          <p style={{ fontSize: 12, color: 'var(--color-fg-muted)', marginTop: 12, lineHeight: 1.6 }}>
                             {entry.description}
                           </p>
                           {entry.flagKey && (
-                            <div className="mt-3">
+                            <div style={{ marginTop: 12 }}>
                               <a
                                 href={`/flags/${entry.flagKey}`}
-                                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                  fontSize: 12,
+                                  color: 'var(--color-accent)',
+                                  textDecoration: 'none',
+                                }}
                                 onClick={(e) => e.stopPropagation()}
                               >
                                 View flag: {entry.flagKey}
@@ -535,6 +665,29 @@ export default function IncidentTimeline() {
           </div>
         )}
       </div>
+
+      {/* ── Reduced-motion guards for all CSS transitions in this view ── */}
+      <style>{`
+        @media (prefers-reduced-motion: reduce) {
+          .timeline-card { transition: none !important; }
+          .timeline-entry { transition: none !important; }
+          .chevron-icon { transition: none !important; }
+          .animate-spin { animation: none !important; }
+          .animate-pulse { animation: none !important; }
+        }
+        @media (prefers-reduced-motion: no-preference) {
+          .timeline-card {
+            transition: border-color 150ms ease, background 150ms ease, filter 150ms ease;
+          }
+          .timeline-card:hover {
+            border-color: var(--color-border-strong);
+            filter: brightness(1.08);
+          }
+          .chevron-icon {
+            transition: transform 200ms ease;
+          }
+        }
+      `}</style>
     </div>
   );
 }
