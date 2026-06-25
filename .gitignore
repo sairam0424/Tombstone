@@ -34,5 +34,10 @@ Thumbs.db
 **/*.test
 **/testdata/tmp/
 
+# Claude Code worktrees
+.claude/worktrees/
+
 # Go workspace sum (regenerated)
 go.work.sum
+infra/.env.secrets
+infra/.env
