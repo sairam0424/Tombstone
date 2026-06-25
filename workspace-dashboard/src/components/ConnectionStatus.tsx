@@ -1,47 +1,52 @@
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import { useSSE } from '../hooks/useSSE.js';
 
-interface ConnectionStatusProps {
+interface Props {
   env: string;
 }
 
-export function ConnectionStatus({ env }: ConnectionStatusProps) {
+export function ConnectionStatus({ env }: Props) {
   const { connected } = useSSE(env);
+  const reduced = useReducedMotion();
 
   return (
     <AnimatePresence mode="wait">
       <motion.div
         key={connected ? 'live' : 'offline'}
-        initial={{ opacity: 0, scale: 0.85, y: -4 }}
+        initial={reduced ? { opacity: 1, scale: 1, y: 0 } : { opacity: 0, scale: 0.9, y: 0 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.85, y: 4 }}
-        transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
+        exit={reduced ? { opacity: 1, scale: 1, y: 0 } : { opacity: 0, scale: 0.9, y: 0 }}
+        transition={{ type: 'spring', stiffness: 500, damping: 35 }}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
           gap: '6px',
           padding: '3px 10px 3px 8px',
-          borderRadius: '20px',
+          borderRadius: 'var(--radius-pill)',
           fontSize: '12px',
           fontWeight: '600',
           letterSpacing: '0.02em',
-          background: connected ? 'rgba(34,197,94,0.10)' : 'rgba(239,68,68,0.10)',
-          border: `1px solid ${connected ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
-          color: connected ? '#4ade80' : '#f87171',
+          background: connected
+            ? 'color-mix(in oklab, var(--color-risk-low) 12%, transparent)'
+            : 'color-mix(in oklab, var(--color-action-danger) 12%, transparent)',
+          border: connected
+            ? '1px solid color-mix(in oklab, var(--color-risk-low) 30%, transparent)'
+            : '1px solid color-mix(in oklab, var(--color-action-danger) 30%, transparent)',
+          color: connected ? 'var(--color-risk-low)' : 'var(--color-action-danger)',
           userSelect: 'none',
           flexShrink: 0,
         }}
       >
         {/* Ripple dot container */}
         <span style={{ position: 'relative', width: '8px', height: '8px', flexShrink: 0 }}>
-          {/* Outer ripple — only visible when live */}
-          {connected && (
+          {/* Outer ripple — only visible when live and motion not reduced */}
+          {connected && !reduced && (
             <motion.span
               style={{
                 position: 'absolute',
                 inset: 0,
                 borderRadius: '50%',
-                background: '#22c55e',
+                background: 'var(--color-risk-low)',
                 opacity: 0,
               }}
               animate={{ scale: [1, 2], opacity: [0.5, 0] }}
@@ -54,8 +59,10 @@ export function ConnectionStatus({ env }: ConnectionStatusProps) {
               position: 'absolute',
               inset: 0,
               borderRadius: '50%',
-              background: connected ? '#22c55e' : '#ef4444',
-              boxShadow: connected ? '0 0 6px #22c55e' : undefined,
+              background: connected ? 'var(--color-risk-low)' : 'var(--color-action-danger)',
+              boxShadow: connected
+                ? '0 0 6px color-mix(in oklab, var(--color-risk-low) 60%, transparent)'
+                : undefined,
             }}
           />
         </span>
