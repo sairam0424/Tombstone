@@ -32,6 +32,41 @@ const STATE_BADGE: Record<string, { text: string; bg: string; border: string }> 
   ARCHIVED: { text: '#4b5563', bg: 'rgba(75,85,99,0.08)',    border: 'rgba(75,85,99,0.18)' },
 };
 
+// ── RolloutBar — uses @property --rollout-pct for smooth width + color transition
+function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
+  const fillColor = !enabled
+    ? 'var(--color-border)'
+    : pct === 100
+    ? 'var(--color-risk-low)'
+    : pct >= 50
+    ? 'var(--color-risk-medium)'
+    : 'var(--color-accent)';
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
+      <div style={{
+        flex: 1, height: 4,
+        background: 'var(--color-bg-overlay)',
+        borderRadius: 2,
+        overflow: 'hidden',
+      }}>
+        <div
+          className="rollout-bar-fill"
+          style={{
+            '--rollout-pct': `${pct}%`,
+            height: '100%',
+            background: fillColor,
+            borderRadius: 2,
+          } as React.CSSProperties}
+        />
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 32, textAlign: 'right' as const }}>
+        {pct}%
+      </span>
+    </div>
+  );
+}
+
 // Pulsing green dot keyframes injected once
 const PULSE_STYLE = `
 @keyframes pulse-dot {
@@ -264,7 +299,6 @@ export default function FlagList() {
             const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
             const pct = es?.rollout_pct ?? 0;
             const enabled = es?.enabled ?? false;
-            const fillColor = !enabled ? 'var(--color-border)' : pct === 100 ? 'var(--color-risk-low)' : pct >= 50 ? 'var(--color-risk-medium)' : 'var(--color-accent)';
 
             // Derive vertical padding from rowHeight so density visually adapts.
             // vRow.size equals the estimated rowHeight (set by estimateSize above).
@@ -305,12 +339,7 @@ export default function FlagList() {
                   </span>
                 </div>
                 {/* Rollout */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ flex: 1, height: 4, background: 'var(--color-bg-overlay)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{ width: `${pct}%`, height: '100%', background: fillColor, borderRadius: 2, transition: 'width 0.5s ease' }} />
-                  </div>
-                  <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 30, textAlign: 'right' as const }}>{pct}%</span>
-                </div>
+                <RolloutBar pct={pct} enabled={enabled} />
                 {/* Type */}
                 <div><code style={{ fontSize: 11, color: 'var(--color-fg-muted)', background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 4, padding: '2px 6px' }}>{flag.flag_type}</code></div>
                 {/* State */}
