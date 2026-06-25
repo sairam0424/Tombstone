@@ -1,9 +1,10 @@
-import { useRef, useDeferredValue, useEffect } from 'react';
+import { useRef, useDeferredValue, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useQueryState } from 'nuqs';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
+import { FlagCreateModal } from '../../components/FlagCreateModal.js';
 
 type Env = 'development' | 'staging' | 'production';
 
@@ -49,6 +50,7 @@ function injectPulseStyle() {
 
 export default function FlagList() {
   const navigate = useNavigate();
+  const [createOpen, setCreateOpen] = useState(false);
   const [env, setEnv] = useQueryState<Env>('env', {
     defaultValue: 'production',
     parse: (v) => ((['development', 'staging', 'production'] as const).includes(v as Env) ? (v as Env) : 'production'),
@@ -132,6 +134,7 @@ export default function FlagList() {
 
           {/* Create Flag button */}
           <button
+            onClick={() => setCreateOpen(true)}
             style={{
               marginLeft: 8,
               padding: '10px 18px',
@@ -310,6 +313,8 @@ export default function FlagList() {
           </div>
         )}
       </div>
+
+      <FlagCreateModal open={createOpen} onClose={() => setCreateOpen(false)} />
     </div>
   );
 }
