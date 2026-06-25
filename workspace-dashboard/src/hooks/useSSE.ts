@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { GATEWAY_URL, SDK_TOKEN } from '../config.js';
 
 export interface SSEEvent {
@@ -15,14 +15,14 @@ const MAX_EVENTS = 50;
 export function useSSE(env: string) {
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [connected, setConnected] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     const url = `${GATEWAY_URL}/api/v1/stream?environment=${env}&sdk_key=${SDK_TOKEN}`;
     const es = new EventSource(url);
-    esRef.current = es;
 
     es.onopen = () => setConnected(true);
+    // No auto-reconnect implemented by design. LiveFeed UI shows connection status;
+    // manual page refresh recovers from disconnection.
     es.onerror = () => setConnected(false);
 
     es.onmessage = (e) => {
@@ -34,7 +34,6 @@ export function useSSE(env: string) {
 
     return () => {
       es.close();
-      esRef.current = null;
       setConnected(false);
     };
   }, [env]);
