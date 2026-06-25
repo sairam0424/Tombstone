@@ -1,208 +1,213 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { INTEL_URL, API_URL, SDK_TOKEN } from '../../config.js';
+// workspace-dashboard/src/views/DependencyGraph/index.tsx
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { GitBranch, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
+import { API_URL, SDK_TOKEN } from '../../config.js';
 
-type Win = '1h' | '6h' | '24h' | '7d';
-const WIN_SEC: Record<Win, number> = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
+interface GraphNode { id: string; name: string; blast_radius?: string; flag_type?: string; val?: number; }
+interface GraphLink { source: string; target: string; }
+interface GraphData { nodes: GraphNode[]; links: GraphLink[]; }
 
-interface GNode { flagKey: string; enabled: boolean; rolloutPct: number; state: string; ownerId: string; x?: number; y?: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null; }
-interface GEdge { source: string | GNode; target: string | GNode; weight: number; coChangeCount: number; }
-interface Graph { nodes: GNode[]; edges: GEdge[]; generatedAt: number; eventCount: number; }
+const BLAST_COLOR: Record<string, string> = {
+  HIGH:    '#f87171',
+  MEDIUM:  '#fbbf24',
+  LOW:     '#4ade80',
+  BLOCKED: '#a78bfa',
+};
 
 export default function DependencyGraph() {
-  const svgRef = useRef<SVGSVGElement>(null);
-  const simRef = useRef<unknown>(null);
-  const [graph, setGraph] = useState<Graph | null>(null);
-  const [selected, setSelected] = useState<GNode | null>(null);
-  const [win, setWin] = useState<Win>('6h');
-  const [env, setEnv] = useState('production');
-  const [loading, setLoading] = useState(false);
-  const [killing, setKilling] = useState(false);
+  const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
+  const [loading, setLoading] = useState(true);
+  const [hovered, setHovered] = useState<GraphNode | null>(null);
+  const [FG, setFG] = useState<React.ComponentType<unknown> | null>(null);
+  const graphRef = useRef<unknown>(null);
+  const navigate = useNavigate();
 
-  const INTEL = INTEL_URL;
-  const API = API_URL;
-  const TOK = SDK_TOKEN;
-
-  const fetchGraph = useCallback(async () => {
-    setLoading(true);
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      const from = now - WIN_SEC[win];
-      const r = await fetch(
-        INTEL + '/api/v1/dependency-graph?environment=' + env + '&from_unix=' + from + '&to_unix=' + now,
-        { method: 'POST' }
-      );
-      if (r.ok) setGraph(await r.json());
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  }, [win, env]);
-
-  useEffect(() => { fetchGraph(); }, [fetchGraph]);
+  // Dynamic import react-force-graph (heavy lib)
+  useEffect(() => {
+    import('react-force-graph').then((mod: Record<string, unknown>) => {
+      setFG(() => mod.ForceGraph2D as React.ComponentType<unknown>);
+    });
+  }, []);
 
   useEffect(() => {
-    if (!graph || !svgRef.current || !graph.nodes.length) return;
-    import('d3').then(d3 => {
-      const el = svgRef.current!;
-      const W = el.parentElement?.clientWidth || 900;
-      const H = el.parentElement?.clientHeight || 600;
-      const svg = d3.select(el).attr('width', W).attr('height', H);
-      svg.selectAll('*').remove();
-      const g = svg.append('g');
-      svg.call(
-        d3.zoom<SVGSVGElement, unknown>()
-          .scaleExtent([0.2, 4])
-          .on('zoom', e => g.attr('transform', e.transform))
-      );
+    const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
+    fetch(`${API_URL}/api/v1/flags`, { headers: hdrs })
+      .then(r => r.json())
+      .then((data: { flags?: Array<{ key: string; name: string; flag_type: string; prerequisite_flags?: string[] }> }) => {
+        const flags = data.flags ?? [];
+        const nodes: GraphNode[] = flags.map(f => ({
+          id: f.key,
+          name: f.name || f.key,
+          flag_type: f.flag_type,
+          val: 4,
+        }));
+        const links: GraphLink[] = [];
+        for (const f of flags) {
+          for (const dep of (f.prerequisite_flags ?? [])) {
+            links.push({ source: f.key, target: dep });
+          }
+        }
+        setGraphData({ nodes, links });
+      })
+      .catch(() => {
+        // Demo data when API unreachable
+        setGraphData({
+          nodes: [
+            { id: 'auth-v2', name: 'Auth V2', blast_radius: 'HIGH', val: 8 },
+            { id: 'new-checkout', name: 'New Checkout', blast_radius: 'MEDIUM', val: 6 },
+            { id: 'dark-mode', name: 'Dark Mode', blast_radius: 'LOW', val: 4 },
+            { id: 'feature-x', name: 'Feature X', blast_radius: 'LOW', val: 4 },
+          ],
+          links: [
+            { source: 'new-checkout', target: 'auth-v2' },
+            { source: 'feature-x', target: 'new-checkout' },
+          ],
+        });
+      })
+      .finally(() => setLoading(false));
+  }, []);
 
-      const nodes: GNode[] = graph.nodes.map(n => ({ ...n }));
-      const links: GEdge[] = graph.edges.map(e => ({ ...e }));
+  const handleNodeClick = useCallback((node: GraphNode) => {
+    navigate(`/flags/${node.id}`);
+  }, [navigate]);
 
-      const sim = d3.forceSimulation(nodes as d3.SimulationNodeDatum[])
-        .force('link', d3.forceLink(links).id((d: d3.SimulationNodeDatum) => (d as GNode).flagKey).distance(130))
-        .force('charge', d3.forceManyBody().strength(-250))
-        .force('center', d3.forceCenter(W / 2, H / 2))
-        .force('collide', d3.forceCollide(30));
-      simRef.current = sim;
+  const handleNodeHover = useCallback((node: GraphNode | null) => {
+    setHovered(node);
+    if (document.body) document.body.style.cursor = node ? 'pointer' : 'default';
+  }, []);
 
-      const link = g.append('g').selectAll('line').data(links).join('line')
-        .attr('stroke', '#30363d')
-        .attr('stroke-width', (d: GEdge) => Math.min(4, d.coChangeCount + 1))
-        .attr('stroke-opacity', (d: GEdge) => 0.15 + d.weight * 0.75);
+  if (loading || !FG) {
+    return (
+      <div style={{ padding: '32px 40px' }}>
+        <div style={{ height: 'calc(100vh - 180px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ textAlign: 'center', color: 'var(--color-fg-subtle)' }}>
+            <GitBranch size={40} style={{ marginBottom: 16, opacity: 0.3 }} />
+            <div>Loading dependency graph…</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-      const drag = d3.drag<SVGGElement, GNode>()
-        .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-        .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-        .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; });
-
-      const node = g.append('g').selectAll<SVGGElement, GNode>('g').data(nodes).join('g')
-        .attr('cursor', 'pointer')
-        .call(drag)
-        .on('click', (_, d) => setSelected(d));
-
-      node.append('circle').attr('r', 16)
-        .attr('fill', (d: GNode) => d.enabled ? '#1a3520' : '#1a1a22')
-        .attr('stroke', (d: GNode) => d.enabled ? '#3fb950' : '#30363d')
-        .attr('stroke-width', 2);
-
-      node.append('text').attr('dy', 30).attr('text-anchor', 'middle')
-        .attr('font-size', '9px').attr('fill', '#6e7681')
-        .text((d: GNode) => { const p = d.flagKey.split('.'); return p[p.length - 1].slice(0, 12); });
-
-      sim.on('tick', () => {
-        link
-          .attr('x1', (d: GEdge) => (d.source as GNode).x || 0)
-          .attr('y1', (d: GEdge) => (d.source as GNode).y || 0)
-          .attr('x2', (d: GEdge) => (d.target as GNode).x || 0)
-          .attr('y2', (d: GEdge) => (d.target as GNode).y || 0);
-        node.attr('transform', (d: GNode) => 'translate(' + (d.x || 0) + ',' + (d.y || 0) + ')');
-      });
-    });
-    return () => {
-      if (simRef.current) (simRef.current as { stop: () => void }).stop();
-    };
-  }, [graph]);
-
-  const killFlag = async (flagKey: string) => {
-    setKilling(true);
-    try {
-      await fetch(API + '/api/v1/flags/' + flagKey + '/kill', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + TOK, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ environment: env, reason: 'kill from dependency graph' }),
-      });
-      setSelected(null);
-      fetchGraph();
-    } finally { setKilling(false); }
-  };
-
-  const btnStyle = (active: boolean, col: string): React.CSSProperties => ({
-    padding: '6px 13px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-    border: '1px solid ' + (active ? col : '#21262d'),
-    background: active ? col + '18' : 'transparent',
-    color: active ? col : '#6e7681', transition: 'all 0.15s',
-  });
+  const Graph = FG as React.ComponentType<{
+    ref: React.Ref<unknown>;
+    graphData: GraphData;
+    nodeId: string;
+    nodeLabel: string;
+    nodeColor: (n: GraphNode) => string;
+    nodeVal: (n: GraphNode) => number;
+    linkColor: () => string;
+    linkWidth: number;
+    backgroundColor: string;
+    onNodeClick: (n: GraphNode) => void;
+    onNodeHover: (n: GraphNode | null) => void;
+    dagMode: string;
+    dagLevelDistance: number;
+    width: number;
+    height: number;
+    nodeCanvasObject: (n: GraphNode, ctx: CanvasRenderingContext2D, scale: number) => void;
+  }>;
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#080c14' }}>
-      <div style={{ padding: '20px 28px 14px', borderBottom: '1px solid #21262d' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e6edf3', margin: '0 0 4px' }}>Causal Dependency Graph</h1>
-            <p style={{ fontSize: 13, color: '#6e7681', margin: 0 }}>
-              Flags changed together within 5 min — thicker edges = stronger coupling
-              {graph ? ' · ' + graph.nodes.length + ' nodes · ' + graph.edges.length + ' edges · ' + graph.eventCount + ' events' : ''}
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            {(['development', 'staging', 'production'] as const).map(e =>
-              <button key={e} onClick={() => setEnv(e)} style={btnStyle(env === e, '#58a6ff')}>{e}</button>
-            )}
-            <div style={{ width: 1, background: '#21262d', margin: '0 3px' }} />
-            {(['1h', '6h', '24h', '7d'] as Win[]).map(w =>
-              <button key={w} onClick={() => setWin(w)} style={btnStyle(win === w, '#3fb950')}>{w}</button>
-            )}
-            <button onClick={fetchGraph} style={btnStyle(false, '#58a6ff')}>↻</button>
-          </div>
+    <div style={{ padding: '24px 32px', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 60px)', gap: 16 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-fg)', margin: '0 0 4px' }}>Causal Graph</h1>
+          <p style={{ fontSize: 13, color: 'var(--color-fg-subtle)', margin: 0 }}>
+            {graphData.nodes.length} flags · {graphData.links.length} dependencies
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { icon: ZoomIn,    label: 'Zoom in',  fn: () => { const g = graphRef.current as { zoom: (v: number) => void } | null; g?.zoom(2); } },
+            { icon: ZoomOut,   label: 'Zoom out', fn: () => { const g = graphRef.current as { zoom: (v: number) => void } | null; g?.zoom(0.5); } },
+            { icon: Maximize2, label: 'Fit',      fn: () => { const g = graphRef.current as { zoomToFit: (ms: number) => void } | null; g?.zoomToFit(400); } },
+          ].map(({ icon: Icon, label, fn }) => (
+            <button key={label} onClick={fn} title={label} style={{
+              width: 36, height: 36, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)',
+              color: 'var(--color-fg-muted)', cursor: 'pointer',
+            }}>
+              <Icon size={14} />
+            </button>
+          ))}
         </div>
       </div>
 
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {loading && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#484f58' }}>
-            Building graph…
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 16 }}>
+        {Object.entries(BLAST_COLOR).map(([label, color]) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-fg-subtle)' }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
+            {label}
           </div>
-        )}
-        {!loading && graph && !graph.nodes.length && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#484f58', textAlign: 'center' }}>
-            <div style={{ fontSize: 40, marginBottom: 8 }}>◎</div>
-            No co-occurrences in this window.<br />
-            <span style={{ fontSize: 12 }}>Try a wider time range or make some flag changes first.</span>
-          </div>
-        )}
-        <svg ref={svgRef} style={{ width: '100%', height: '100%', display: 'block' }} />
-
-        {selected && (
-          <div style={{ position: 'absolute', top: 16, right: 16, width: 256, background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-              <code style={{ fontSize: 11, color: '#58a6ff', wordBreak: 'break-all', maxWidth: 200 }}>{selected.flagKey}</code>
-              <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', color: '#484f58', cursor: 'pointer', fontSize: 18, padding: 0 }}>×</button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-              {[
-                { l: 'Status', v: selected.enabled ? 'ENABLED' : 'DISABLED', c: selected.enabled ? '#3fb950' : '#484f58' },
-                { l: 'Rollout', v: selected.rolloutPct + '%', c: '#e6edf3' },
-                { l: 'State', v: selected.state, c: '#8b949e' },
-                { l: 'Owner', v: (selected.ownerId || '').split('@')[0], c: '#8b949e' },
-              ].map(s => (
-                <div key={s.l} style={{ background: '#161b22', borderRadius: 6, padding: '7px 10px' }}>
-                  <div style={{ fontSize: 10, color: '#484f58', marginBottom: 2 }}>{s.l}</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: s.c, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.v}</div>
-                </div>
-              ))}
-            </div>
-            {selected.enabled && (
-              <button
-                onClick={() => killFlag(selected.flagKey)}
-                disabled={killing}
-                style={{
-                  width: '100%', padding: 8, borderRadius: 6, fontSize: 12, fontWeight: 600,
-                  background: '#300', border: '1px solid #611', color: '#ff7b7b', cursor: 'pointer',
-                }}
-              >
-                {killing ? 'Disabling…' : '⚡ Kill Switch — ' + env}
-              </button>
-            )}
-          </div>
-        )}
-
-        <div style={{ position: 'absolute', bottom: 16, left: 16, background: '#0d1117', border: '1px solid #21262d', borderRadius: 8, padding: '8px 14px', display: 'flex', gap: 14, fontSize: 11, color: '#6e7681' }}>
-          {[{ c: '#3fb950', l: 'Enabled' }, { c: '#484f58', l: 'Disabled' }].map(i =>
-            <div key={i.l} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: i.c }} />{i.l}
-            </div>
-          )}
-          <span style={{ borderLeft: '1px solid #21262d', paddingLeft: 12 }}>Thicker = more co-changes</span>
-        </div>
+        ))}
       </div>
+
+      {/* Graph */}
+      <div style={{
+        flex: 1, borderRadius: 12,
+        border: '1px solid var(--color-border)',
+        overflow: 'hidden',
+        background: 'var(--color-bg-base)',
+      }}>
+        <Graph
+          ref={graphRef as React.Ref<unknown>}
+          graphData={graphData}
+          nodeId="id"
+          nodeLabel="name"
+          nodeColor={(n: GraphNode) => BLAST_COLOR[n.blast_radius ?? 'LOW'] ?? '#4ade80'}
+          nodeVal={(n: GraphNode) => n.val ?? 4}
+          linkColor={() => 'rgba(255,255,255,0.1)'}
+          linkWidth={1}
+          backgroundColor="transparent"
+          onNodeClick={handleNodeClick}
+          onNodeHover={handleNodeHover}
+          dagMode="td"
+          dagLevelDistance={80}
+          width={window.innerWidth - 320}
+          height={window.innerHeight - 300}
+          nodeCanvasObject={(node: GraphNode, ctx: CanvasRenderingContext2D, scale: number) => {
+            const r = Math.sqrt(node.val ?? 4) * 4;
+            const color = BLAST_COLOR[node.blast_radius ?? 'LOW'] ?? '#4ade80';
+            ctx.beginPath();
+            ctx.arc(0, 0, r, 0, 2 * Math.PI);
+            ctx.fillStyle = `${color}33`;
+            ctx.fill();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5 / scale;
+            ctx.stroke();
+            if (scale > 1.5) {
+              ctx.font = `${11 / scale}px "JetBrains Mono", monospace`;
+              ctx.fillStyle = color;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(node.id, 0, r + 10 / scale);
+            }
+          }}
+        />
+      </div>
+
+      {/* Tooltip */}
+      {hovered && (
+        <div style={{
+          position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)',
+          background: 'var(--color-bg-elevated)',
+          border: '1px solid var(--color-border-strong)',
+          borderRadius: 10, padding: '10px 16px',
+          boxShadow: 'var(--glow-accent)',
+          fontSize: 13, color: 'var(--color-fg)',
+          display: 'flex', gap: 12, alignItems: 'center',
+          pointerEvents: 'none',
+          zIndex: 100,
+        }}>
+          <code style={{ color: 'var(--color-accent)', fontFamily: 'var(--font-mono)' }}>{hovered.id}</code>
+          {hovered.blast_radius && <span className={`badge badge-risk-${hovered.blast_radius.toLowerCase()}`}>{hovered.blast_radius}</span>}
+          <span style={{ color: 'var(--color-fg-subtle)', fontSize: 11 }}>Click to view details</span>
+        </div>
+      )}
     </div>
   );
 }
