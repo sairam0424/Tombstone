@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { API_URL, SDK_TOKEN } from '../../config.js';
+import { EmptyState } from '../../components/ui/index.js';
 
 interface ChangeRequest {
   id: string;
@@ -171,24 +172,11 @@ export default function ApprovalQueue() {
 
       {/* Empty state */}
       {!loading && pendingCount === 0 && (
-        <div style={{
-          background: '#0d0d0d',
-          border: '1px solid #1a1a1a',
-          borderRadius: '16px',
-          padding: '56px 32px',
-          textAlign: 'center',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '14px',
-        }}>
-          <div style={{ color: '#22c55e', opacity: 0.7 }}>
-            <CheckCircleIcon />
-          </div>
-          <p style={{ color: '#6b7280', fontSize: '14px', margin: 0 }}>
-            No pending approvals
-          </p>
-        </div>
+        <EmptyState
+          icon={<CheckCircleIcon />}
+          heading="No pending approvals"
+          body="All flag changes have been reviewed. The queue is clear."
+        />
       )}
 
       {/* Approval cards */}
