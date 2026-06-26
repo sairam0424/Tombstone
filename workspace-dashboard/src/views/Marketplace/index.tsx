@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { MARKETPLACE_URL } from '../../config.js';
+import { EmptyState, Reveal } from '../../components/ui/index.js';
 
 interface Integration {
   id: string;
@@ -313,16 +314,17 @@ export default function Marketplace() {
 
       {/* ── Empty state ── */}
       {!loading && !error && filtered.length === 0 && (
-        <div
-          style={{
-            textAlign: 'center',
-            padding: '72px 0',
-            color: '#484f58',
-            fontSize: '14px',
-          }}
-        >
-          No integrations found in this category.
-        </div>
+        <EmptyState
+          icon={
+            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5l6.74-6.76z"/>
+              <line x1="16" y1="8" x2="2" y2="22"/>
+              <line x1="17.5" y1="15" x2="9" y2="15"/>
+            </svg>
+          }
+          heading="No integrations found"
+          body="No integrations available in this category. Try a different filter."
+        />
       )}
 
       {/* ── Integration grid ── */}
@@ -334,7 +336,7 @@ export default function Marketplace() {
             gap: '16px',
           }}
         >
-          {filtered.map(integration => {
+          {filtered.map((integration, i) => {
             const status = resolveStatus(integration);
             const statusStyle = STATUS_STYLES[status];
             const icon = iconColor(integration.name);
@@ -342,8 +344,8 @@ export default function Marketplace() {
             const isConnected = integration.installed;
 
             return (
+              <Reveal key={integration.id} delay={i * 0.04}>
               <div
-                key={integration.id}
                 style={{
                   background: '#0d1117',
                   border: `1px solid ${isConnected ? 'rgba(63,185,80,0.18)' : '#1c2333'}`,
@@ -520,6 +522,7 @@ export default function Marketplace() {
                     : 'Connect'}
                 </button>
               </div>
+              </Reveal>
             );
           })}
         </div>

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { API_URL, INTEL_URL, SDK_TOKEN } from '../../config.js';
 import { EvaluationChart, type TimeSeriesPoint } from '../../components/charts/EvaluationChart.js';
+import { Section, SkeletonStatCard, Reveal } from '../../components/ui/index.js';
 
 interface StaleFlag {
   flag_key: string;
@@ -710,56 +711,29 @@ export default function GovernanceDash() {
     }}>
 
       {/* ── Page Header ─────────────────────────────────────────────────────── */}
-      <div style={{ marginBottom: 28 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-          {/* Shield icon */}
-          <svg width={20} height={20} viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0 }}>
-            <path
-              d="M10 2L3 5v5c0 4.418 3.134 7.516 7 8 3.866-.484 7-3.582 7-8V5L10 2z"
-              stroke={T.green}
-              strokeWidth={1.5}
-              strokeLinejoin="round"
-              fill={`${T.green}18`}
-            />
-            <path d="M7 10l2 2 4-4" stroke={T.green} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <h1 style={{
-            margin: 0,
-            fontSize: 22,
-            fontWeight: 700,
-            color: T.textPrimary,
-            letterSpacing: '-0.01em',
-          }}>
-            Governance
-          </h1>
-          {/* SOC2 badge */}
-          <span style={{
-            fontSize: 10,
-            fontWeight: 700,
-            padding: '2px 8px',
-            borderRadius: 4,
-            background: `${T.green}18`,
-            border: `1px solid ${T.green}40`,
-            color: T.green,
-            letterSpacing: '0.08em',
-          }}>
-            SOC2
-          </span>
-        </div>
+      <Section
+        label="SOC2 Compliance"
+        title="Governance"
+        titleAs="h1"
+        className="mb-7"
+      >
         <p style={{ margin: 0, fontSize: 13, color: T.textMuted }}>
           SOC2 compliance &amp; flag health
         </p>
-      </div>
+      </Section>
 
       {/* ── Loading ─────────────────────────────────────────────────────────── */}
       {loading && (
         <div style={{
-          padding: '80px 0',
-          textAlign: 'center',
-          color: T.textDim,
-          fontSize: 14,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(4, 1fr)',
+          gap: 12,
+          marginBottom: 16,
         }}>
-          Loading governance data…
+          <SkeletonStatCard />
+          <SkeletonStatCard />
+          <SkeletonStatCard />
+          <SkeletonStatCard />
         </div>
       )}
 
@@ -834,16 +808,18 @@ export default function GovernanceDash() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
               {/* Stale Flags table */}
-              <SectionCard
-                title="Stale Flags"
-                subtitle={`${stale.length} flag${stale.length !== 1 ? 's' : ''} at 100% rollout for 30+ days`}
-              >
-                <StaleFlagsTable
-                  stale={stale}
-                  hovered={hoveredStale}
-                  setHovered={setHoveredStale}
-                />
-              </SectionCard>
+              <Reveal>
+                <SectionCard
+                  title="Stale Flags"
+                  subtitle={`${stale.length} flag${stale.length !== 1 ? 's' : ''} at 100% rollout for 30+ days`}
+                >
+                  <StaleFlagsTable
+                    stale={stale}
+                    hovered={hoveredStale}
+                    setHovered={setHoveredStale}
+                  />
+                </SectionCard>
+              </Reveal>
 
               {/* Autonomous Rollout Status */}
               <SectionCard
