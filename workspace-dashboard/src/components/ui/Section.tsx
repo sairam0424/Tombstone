@@ -1,31 +1,40 @@
 // workspace-dashboard/src/components/ui/Section.tsx
 import type { ReactNode } from 'react';
+import { cn } from '../../lib/utils.js';
 
 interface SectionProps {
-  eyebrow?: string;
-  heading: string;
+  id?: string;
+  label?: string;
+  title?: string;
+  titleAs?: 'h1' | 'h2';
   children: ReactNode;
   className?: string;
 }
 
 export function Section({
-  eyebrow,
-  heading,
+  id,
+  label,
+  title,
+  titleAs: TitleTag = 'h2',
   children,
-  className = '',
+  className,
 }: SectionProps) {
   return (
-    <section className={`space-y-4 ${className}`}>
-      <div className="space-y-2">
-        {eyebrow && (
-          <p className="text-xs font-semibold uppercase tracking-widest text-[var(--color-fg-muted)]">
-            {eyebrow}
-          </p>
-        )}
-        <h2 className="text-2xl font-semibold text-[var(--color-fg)]">
-          {heading}
-        </h2>
-      </div>
+    <section id={id} className={cn('space-y-4', className)}>
+      {(label || title) && (
+        <div className="space-y-2">
+          {label && (
+            <p className="text-xs font-semibold uppercase tracking-widest text-[var(--color-fg-muted)]">
+              {label}
+            </p>
+          )}
+          {title && (
+            <TitleTag className="text-2xl font-semibold text-[var(--color-fg)]">
+              {title}
+            </TitleTag>
+          )}
+        </div>
+      )}
       {children}
     </section>
   );
