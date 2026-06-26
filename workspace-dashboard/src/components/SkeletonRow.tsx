@@ -50,7 +50,7 @@ export function SkeletonStatCard() {
   return (
     <div
       className="card-surface"
-      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px' }}
+      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', pointerEvents: 'none' }}
       aria-hidden="true"
     >
       <div
@@ -86,11 +86,11 @@ export function SkeletonViewTransition({ label }: { label?: string }) {
     >
       {/* Orb ring — matches Anvilry accent aesthetics */}
       <div
+        className={reduced ? undefined : 'pulse-orb'}
         style={{
           width: 64, height: 64, borderRadius: '50%',
           border: '1px solid color-mix(in oklab, var(--color-accent) 30%, transparent)',
           background: 'color-mix(in oklab, var(--color-accent) 5%, transparent)',
-          animation: reduced ? 'none' : 'pulse 2s ease-in-out infinite',
         }}
         aria-hidden="true"
       />
@@ -99,7 +99,6 @@ export function SkeletonViewTransition({ label }: { label?: string }) {
         <div className="skeleton-shimmer" style={{ height: 10, width: '75%', borderRadius: 999, margin: '0 auto' }} />
         <div className="skeleton-shimmer" style={{ height: 10, width: '50%', borderRadius: 999, margin: '0 auto' }} />
       </div>
-      <span className="sr-only">{label ?? 'Loading…'}</span>
     </div>
   );
 }
