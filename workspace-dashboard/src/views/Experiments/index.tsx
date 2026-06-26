@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { INTEL_URL } from '../../config.js';
+import { EmptyState, Reveal } from '../../components/ui/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -623,15 +624,29 @@ export default function Experiments() {
       </div>
 
       {/* ── Experiment grid ────────────────────────────────────────────── */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(440px, 1fr))',
-        gap: 14,
-      }}>
-        {MOCK_EXPERIMENTS.map(entry => (
-          <ExperimentCard key={entry.id} entry={entry} onAnalyze={handleAnalyze} />
-        ))}
-      </div>
+      {MOCK_EXPERIMENTS.length === 0 ? (
+        <EmptyState
+          icon={
+            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v11l-3 3a2 2 0 0 0 1.4 3.4h9.2A2 2 0 0 0 18 17l-3-3V3" />
+            </svg>
+          }
+          heading="No experiments yet"
+          body="Create your first A/B test to start measuring the impact of your flag changes."
+        />
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(440px, 1fr))',
+          gap: 14,
+        }}>
+          {MOCK_EXPERIMENTS.map((entry, i) => (
+            <Reveal key={entry.id} delay={i * 0.05}>
+              <ExperimentCard entry={entry} onAnalyze={handleAnalyze} />
+            </Reveal>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { formatDistanceToNow, fromUnixTime, format } from 'date-fns';
 import { API_URL, SDK_TOKEN } from '../../config.js';
+import { EmptyState } from '../../components/ui/index.js';
 
 interface TimelineEntry {
   ts: number;
@@ -490,22 +491,11 @@ export default function IncidentTimeline() {
 
         {/* Empty state */}
         {!loading && entries.length === 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '96px 0', gap: 16 }}>
-            <div style={{
-              padding: 16,
-              borderRadius: '50%',
-              background: 'var(--color-bg-surface)',
-              border: '1px solid var(--color-border)',
-            }}>
-              <LightningIcon />
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <p style={{ color: 'var(--color-fg)', fontWeight: 500 }}>No recent incidents</p>
-              <p style={{ color: 'var(--color-fg-subtle)', fontSize: 14, marginTop: 4 }}>
-                No events detected in the last {WINDOW_LABELS[timeWindow]}. Production is quiet.
-              </p>
-            </div>
-          </div>
+          <EmptyState
+            icon={<LightningIcon />}
+            heading="No recent incidents"
+            body={`No events detected in the last ${WINDOW_LABELS[timeWindow]}. Production is quiet.`}
+          />
         )}
 
         {/* Timeline */}
