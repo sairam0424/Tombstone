@@ -1,3 +1,5 @@
+import { useReducedMotion } from '../lib/useReducedMotion.js';
+
 interface SkeletonBoxProps {
   width?: string | number;
   height?: number;
@@ -36,6 +38,67 @@ export function SkeletonCard() {
       <SkeletonBox width="60%" height={16} />
       <SkeletonBox width="90%" height={12} />
       <SkeletonBox width="40%" height={12} />
+    </div>
+  );
+}
+
+/**
+ * Matches GovernanceDash stat card layout: [icon circle] [value] [label].
+ * Ported from Anvilry SkeletonStatCard.
+ */
+export function SkeletonStatCard() {
+  return (
+    <div
+      className="card-surface"
+      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', pointerEvents: 'none' }}
+      aria-hidden="true"
+    >
+      <div
+        className="skeleton-shimmer"
+        style={{ width: 32, height: 32, borderRadius: '50%', flexShrink: 0 }}
+      />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+        <div className="skeleton-shimmer" style={{ height: 14, width: 40, borderRadius: 4 }} />
+        <div className="skeleton-shimmer" style={{ height: 10, width: 80, borderRadius: 4 }} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Full-viewport skeleton for view-switching fallbacks.
+ * Pulsing cyan orb ring + skeleton lines. Ported from Anvilry.
+ */
+export function SkeletonViewTransition({ label }: { label?: string }) {
+  const reduced = useReducedMotion();
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 'calc(100vh - 60px)',
+        gap: 24,
+      }}
+      role="status"
+      aria-label={label ?? 'Loading…'}
+    >
+      {/* Orb ring — matches Anvilry accent aesthetics */}
+      <div
+        className={reduced ? undefined : 'pulse-orb'}
+        style={{
+          width: 64, height: 64, borderRadius: '50%',
+          border: '1px solid color-mix(in oklab, var(--color-accent) 30%, transparent)',
+          background: 'color-mix(in oklab, var(--color-accent) 5%, transparent)',
+        }}
+        aria-hidden="true"
+      />
+      <div style={{ width: 160, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="skeleton-shimmer" style={{ height: 10, width: '100%', borderRadius: 999 }} />
+        <div className="skeleton-shimmer" style={{ height: 10, width: '75%', borderRadius: 999, margin: '0 auto' }} />
+        <div className="skeleton-shimmer" style={{ height: 10, width: '50%', borderRadius: 999, margin: '0 auto' }} />
+      </div>
     </div>
   );
 }
