@@ -712,8 +712,8 @@ export default function GovernanceDash() {
 
       {/* ── Page Header ─────────────────────────────────────────────────────── */}
       <Section
-        label="SOC2 Compliance"
-        title="Governance"
+        label="GOVERNANCE"
+        title="Flag Health"
         titleAs="h1"
         className="mb-7"
       >
@@ -808,7 +808,7 @@ export default function GovernanceDash() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
               {/* Stale Flags table */}
-              <Reveal>
+              <Reveal delay={0.1}>
                 <SectionCard
                   title="Stale Flags"
                   subtitle={`${stale.length} flag${stale.length !== 1 ? 's' : ''} at 100% rollout for 30+ days`}
