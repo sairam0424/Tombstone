@@ -1,9 +1,8 @@
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import { useState, useCallback } from 'react';
-import { Activity } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { CommandPalette } from './components/CommandPalette.js';
-import { LiveFeed } from './components/LiveFeed.js';
+import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
@@ -146,7 +145,6 @@ export default function App() {
   const [env, setEnv] = useState<Env>('production');
   const [envOpen, setEnvOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [showFeed, setShowFeed] = useState(false);
   const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
 
   const openCmd = useCallback(() => setCmdOpen(true), []);
@@ -444,21 +442,8 @@ export default function App() {
               )}
             </div>
 
-            {/* Live feed toggle */}
-            <button
-              onClick={() => setShowFeed(v => !v)}
-              title="Toggle live feed"
-              style={{
-                width: 32, height: 32, borderRadius: 8,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: showFeed ? 'color-mix(in oklab, var(--color-accent) 10%, transparent)' : 'var(--color-bg-elevated, #1a1a1a)',
-                border: `1px solid ${showFeed ? 'var(--color-accent, #3b82f6)' : 'var(--color-border, #2a2a2a)'}`,
-                color: showFeed ? 'var(--color-accent, #3b82f6)' : 'var(--color-fg-muted, #6b7280)',
-                cursor: 'pointer',
-              }}
-            >
-              <Activity size={14} />
-            </button>
+            {/* SSE connection status */}
+            <ConnectionStatus env={env} />
 
             {/* Search / Cmd+K button */}
             <button
@@ -519,7 +504,6 @@ export default function App() {
               <Route path="/marketplace"         element={<Marketplace />} />
             </Routes>
           </main>
-          {showFeed && <LiveFeed env={env} />}
         </div>
       </div>
 

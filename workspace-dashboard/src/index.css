@@ -1,65 +1,95 @@
 @import "tailwindcss";
 
 /* ── Force dark bg — must beat Tailwind v4 preflight ── */
-html { background-color: #07080d !important; }
-body { background-color: #07080d !important; }
+html { background-color: oklch(7% 0.02 264) !important; }
+body { background-color: oklch(7% 0.02 264) !important; }
 
 /* ═══════════════════════════════════════════════════════
    DESIGN TOKENS
 ═══════════════════════════════════════════════════════ */
 @theme {
-  /* Backgrounds — deep ink */
-  --color-bg-base:     #07080d;
-  --color-bg-surface:  #0d0f17;
-  --color-bg-elevated: #141826;
-  --color-bg-overlay:  #1a1f30;
+  /* ── Backgrounds (deep ink) ── */
+  --color-bg-base:     oklch(7% 0.02 264);
+  --color-bg-surface:  oklch(10% 0.025 264);
+  --color-bg-elevated: oklch(13% 0.028 264);
+  --color-bg-overlay:  oklch(16% 0.03 264);
 
-  /* Borders */
-  --color-border:        #1f2433;
-  --color-border-strong: #2c3346;
-  --color-border-focus:  #38e1ff;
+  /* ── Borders ── */
+  --color-border:        oklch(22% 0.03 264);
+  --color-border-strong: oklch(28% 0.035 264);
+  --color-border-focus:  oklch(82% 0.18 200);
 
-  /* Text — AAA contrast */
-  --color-fg:        #e9ecf5;
-  --color-fg-muted:  #9aa3b8;
-  --color-fg-subtle: #747e99;
+  /* ── Text (AAA contrast on dark bg) ── */
+  --color-fg:        oklch(93% 0.02 264);
+  --color-fg-muted:  oklch(67% 0.04 264);
+  --color-fg-subtle: oklch(52% 0.04 264);
 
-  /* Accents */
-  --color-accent:        #38e1ff;
-  --color-accent-strong: #0fb8db;
-  --color-accent-dim:    color-mix(in oklab, #38e1ff 20%, transparent);
+  /* ── Accent (electric cyan) ── */
+  --color-accent:        oklch(82% 0.18 200);
+  --color-accent-strong: oklch(72% 0.2 200);
+  --color-accent-dim:    oklch(82% 0.18 200 / 20%);
 
-  --color-violet:        #a78bfa;
-  --color-violet-dim:    color-mix(in oklab, #a78bfa 20%, transparent);
+  /* ── Violet (secondary, AI motifs) ── */
+  --color-violet:     oklch(72% 0.19 305);
+  --color-violet-dim: oklch(72% 0.19 305 / 20%);
 
-  /* Semantic risk */
-  --color-risk-low:     #4ade80;
-  --color-risk-medium:  #fbbf24;
-  --color-risk-high:    #f87171;
-  --color-risk-blocked: #a78bfa;
+  /* ── Semantic risk (perceptually uniform severity scale) ── */
+  --color-risk-low:     oklch(74% 0.2 142);   /* emerald-green */
+  --color-risk-medium:  oklch(78% 0.17 85);   /* amber */
+  --color-risk-high:    oklch(65% 0.23 25);   /* red */
+  --color-risk-blocked: oklch(72% 0.19 305);  /* violet */
 
-  /* Semantic state */
-  --color-state-active:   #4ade80;
-  --color-state-draft:    #747e99;
-  --color-state-complete: #38e1ff;
-  --color-state-archived: #374151;
+  /* ── Semantic state ── */
+  --color-state-active:   oklch(74% 0.2 142);
+  --color-state-draft:    oklch(52% 0.04 264);
+  --color-state-complete: oklch(82% 0.18 200);
+  --color-state-archived: oklch(35% 0.025 264);
 
-  /* Semantic action */
-  --color-action-primary:   #38e1ff;
-  --color-action-danger:    #f87171;
-  --color-action-warning:   #fbbf24;
-  --color-action-success:   #4ade80;
+  /* ── Semantic action ── */
+  --color-action-primary:   oklch(82% 0.18 200);
+  --color-action-danger:    oklch(65% 0.23 25);
+  --color-action-warning:   oklch(78% 0.17 85);
+  --color-action-success:   oklch(74% 0.2 142);
 
-  /* Fonts */
+  /* ── Fonts ── */
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Radii */
+  /* ── Radii ── */
   --radius-sm:   4px;
   --radius-md:   8px;
   --radius-lg:   12px;
   --radius-xl:   16px;
   --radius-card: 12px;
   --radius-pill: 999px;
+}
+
+/* ── OKLCH Relative Color Variants ──────────────────────────────────────── */
+/* Auto-generate hover/focus/dim from base tokens without extra hex values.   */
+/* @supports fallback ensures old browsers still get the base color.           */
+:root {
+  /* Risk hover states — lightness +12% (medium capped at +0.07 to avoid near-white wash on high-luminance displays) */
+  --color-risk-low-hover:    oklch(from var(--color-risk-low)    calc(l + 0.12) c h);
+  --color-risk-medium-hover: oklch(from var(--color-risk-medium) calc(l + 0.07) c h);
+  --color-risk-high-hover:   oklch(from var(--color-risk-high)   calc(l + 0.12) c h);
+
+  /* Accent dim variants — lightness -20% */
+  --color-accent-subtle:  oklch(from var(--color-accent) calc(l - 0.20) c h / 15%);
+  --color-accent-glow:    oklch(from var(--color-accent) l c h / 40%);
+
+  /* Action danger — dim for disabled states */
+  --color-action-danger-dim: oklch(from var(--color-action-danger) calc(l - 0.15) c h / 30%);
+}
+
+/* Browsers without relative color support get the base values */
+@supports not (color: oklch(from red l c h)) {
+  :root {
+    --color-risk-low-hover:    #6ee7a0;
+    --color-risk-medium-hover: #fcd34d; /* amber-300 — close approximation, slightly more saturated than OKLCH equivalent */
+    --color-risk-high-hover:   #fca5a5;
+    --color-accent-subtle:     rgba(56, 225, 255, 0.15);
+    --color-accent-glow:       rgba(56, 225, 255, 0.40);
+    --color-action-danger-dim: rgba(248, 113, 113, 0.30);
+  }
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -224,15 +254,25 @@ body::before {
 
 /* ═══════════════════════════════════════════════════════
    ANIMATION 6: ROLLOUT BAR (@property)
+   Both --rollout-pct (width) and --fill-color (background)
+   are set as inline custom properties by RolloutBar so that
+   all animated values flow through CSS transitions uniformly.
 ═══════════════════════════════════════════════════════ */
 @property --rollout-pct {
   syntax: '<percentage>';
   inherits: false;
   initial-value: 0%;
 }
+@property --fill-color {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: transparent;
+}
 .rollout-bar-fill {
-  transition: --rollout-pct 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: --rollout-pct 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+              --fill-color 0.4s ease;
   width: var(--rollout-pct);
+  background: var(--fill-color);
 }
 @media (prefers-reduced-motion: reduce) {
   .rollout-bar-fill { transition: none; }
