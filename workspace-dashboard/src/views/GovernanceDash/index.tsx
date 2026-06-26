@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { API_URL, INTEL_URL, SDK_TOKEN } from '../../config.js';
 import { EvaluationChart, type TimeSeriesPoint } from '../../components/charts/EvaluationChart.js';
-import { Section, SkeletonStatCard, Reveal } from '../../components/ui/index.js';
+import { Section, Reveal, SkeletonStatCard, EmptyState } from '../../components/ui/index.js';
 
 interface StaleFlag {
   flag_key: string;
@@ -737,69 +737,80 @@ export default function GovernanceDash() {
         </div>
       )}
 
+      {!loading && !health && (
+        <EmptyState
+          heading="Governance data unavailable"
+          body="Could not load flag health from the intelligence service."
+        />
+      )}
+
       {health && !loading && (
         <>
           {/* ── Metric Cards Row ───────────────────────────────────────────── */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 12,
-            marginBottom: 16,
-          }}>
+          <Reveal delay={0}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, 1fr)',
+              gap: 12,
+              marginBottom: 16,
+            }}>
 
-            {/* Health Score — with ring */}
-            <StatCard
-              label="Health Score"
-              value={`${healthPct}%`}
-              color={healthColor}
-              sub={healthPct >= 80 ? 'Passing all checks' : healthPct >= 60 ? 'Needs attention' : 'Action required'}
-              ring={{ pct: healthPct, color: healthColor }}
-            />
+              {/* Health Score — with ring */}
+              <StatCard
+                label="Health Score"
+                value={`${healthPct}%`}
+                color={healthColor}
+                sub={healthPct >= 80 ? 'Passing all checks' : healthPct >= 60 ? 'Needs attention' : 'Action required'}
+                ring={{ pct: healthPct, color: healthColor }}
+              />
 
-            {/* Stale Flags */}
-            <StatCard
-              label="Stale Flags"
-              value={health.stale_flags}
-              color={health.stale_flags > 0 ? T.amber : T.green}
-              sub={health.stale_flags === 0 ? 'None detected' : `${health.stale_flags} flag${health.stale_flags !== 1 ? 's' : ''} need review`}
-            />
+              {/* Stale Flags */}
+              <StatCard
+                label="Stale Flags"
+                value={health.stale_flags}
+                color={health.stale_flags > 0 ? T.amber : T.green}
+                sub={health.stale_flags === 0 ? 'None detected' : `${health.stale_flags} flag${health.stale_flags !== 1 ? 's' : ''} need review`}
+              />
 
-            {/* Active Flags */}
-            <StatCard
-              label="Active Flags"
-              value={activeFlags}
-              color={T.blue}
-              sub="Not stale"
-            />
+              {/* Active Flags */}
+              <StatCard
+                label="Active Flags"
+                value={activeFlags}
+                color={T.blue}
+                sub="Not stale"
+              />
 
-            {/* Total Flags */}
-            <StatCard
-              label="Total Flags"
-              value={health.total_flags}
-              color={T.textPrimary}
-              sub="Across all projects"
-            />
-          </div>
+              {/* Total Flags */}
+              <StatCard
+                label="Total Flags"
+                value={health.total_flags}
+                color={T.textPrimary}
+                sub="Across all projects"
+              />
+            </div>
+          </Reveal>
 
           {/* ── Health Score Trend Chart ─────────────────────────────────────── */}
-          <div style={{
-            background: T.bg1,
-            border: `1px solid ${T.border}`,
-            borderRadius: 10,
-            marginBottom: 28,
-            overflow: 'hidden',
-          }}>
-            <EvaluationChart
-              data={healthTrend}
-              title="Health Score (24h)"
-              color={
-                healthPct >= 80 ? '#4ade80' :
-                healthPct >= 60 ? '#fbbf24' : '#f87171'
-              }
-              height={160}
-              yLabel="%"
-            />
-          </div>
+          <Reveal delay={0.08}>
+            <div style={{
+              background: T.bg1,
+              border: `1px solid ${T.border}`,
+              borderRadius: 10,
+              marginBottom: 28,
+              overflow: 'hidden',
+            }}>
+              <EvaluationChart
+                data={healthTrend}
+                title="Health Score (24h)"
+                color={
+                  healthPct >= 80 ? '#4ade80' :
+                  healthPct >= 60 ? '#fbbf24' : '#f87171'
+                }
+                height={160}
+                yLabel="%"
+              />
+            </div>
+          </Reveal>
 
           {/* ── Main Content: Two-column layout ─────────────────────────────── */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16, alignItems: 'start' }}>
@@ -808,7 +819,7 @@ export default function GovernanceDash() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
               {/* Stale Flags table */}
-              <Reveal delay={0.1}>
+              <Reveal delay={0.16}>
                 <SectionCard
                   title="Stale Flags"
                   subtitle={`${stale.length} flag${stale.length !== 1 ? 's' : ''} at 100% rollout for 30+ days`}
@@ -822,25 +833,29 @@ export default function GovernanceDash() {
               </Reveal>
 
               {/* Autonomous Rollout Status */}
-              <SectionCard
-                title="Autonomous Rollout Status"
-                subtitle="Flags managed by the ML rollout engine"
-              >
-                <AutonomousTable
-                  recs={autonomousRecs}
-                  applyingKey={applyingKey}
-                  onApply={(rec) => void handleApplyRec(rec)}
-                />
-              </SectionCard>
+              <Reveal delay={0.24}>
+                <SectionCard
+                  title="Autonomous Rollout Status"
+                  subtitle="Flags managed by the ML rollout engine"
+                >
+                  <AutonomousTable
+                    recs={autonomousRecs}
+                    applyingKey={applyingKey}
+                    onApply={(rec) => void handleApplyRec(rec)}
+                  />
+                </SectionCard>
+              </Reveal>
             </div>
 
             {/* Right column — Recent Activity */}
-            <SectionCard
-              title="Recent Activity"
-              subtitle="Last 7 days"
-            >
-              <ActivityList entries={activity} />
-            </SectionCard>
+            <Reveal delay={0.24}>
+              <SectionCard
+                title="Recent Activity"
+                subtitle="Last 7 days"
+              >
+                <ActivityList entries={activity} />
+              </SectionCard>
+            </Reveal>
           </div>
         </>
       )}
