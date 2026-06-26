@@ -96,6 +96,7 @@ func main() {
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
+	changeReqH := v1.NewChangeRequestHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -153,6 +154,13 @@ func main() {
 		r.Get("/compliance/evidence", complianceH.GetEvidence)
 		r.Get("/compliance/controls", complianceH.GetControls)
 		r.Get("/compliance/export", complianceH.ExportAuditLog)
+
+		// Change-request approval queue
+		r.Route("/change-requests", func(r chi.Router) {
+			r.Get("/", changeReqH.ListChangeRequests)
+			r.Post("/{id}/approve", changeReqH.ApproveChangeRequest)
+			r.Post("/{id}/reject", changeReqH.RejectChangeRequest)
+		})
 
 		// Break-glass endpoints: all require elevated roles.
 		// CreateToken and ListTokens require ADMIN (admin:admin permission).
