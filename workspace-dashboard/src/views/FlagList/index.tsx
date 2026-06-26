@@ -1,10 +1,12 @@
-import { useRef, useDeferredValue, useEffect, useState } from 'react';
+import { useRef, useDeferredValue, useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useQueryState } from 'nuqs';
 import { SkeletonRow } from '../../components/SkeletonRow.js';
 import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
 import { FlagCreateModal } from '../../components/FlagCreateModal.js';
+import { useDensity } from '../../hooks/useDensity.js';
+import { DensityToggle } from '../../components/DensityToggle.js';
 
 type Env = 'development' | 'staging' | 'production';
 
@@ -29,6 +31,43 @@ const STATE_BADGE: Record<string, { text: string; bg: string; border: string }> 
   COMPLETE: { text: '#60a5fa', bg: 'rgba(96,165,250,0.10)',  border: 'rgba(96,165,250,0.25)' },
   ARCHIVED: { text: '#4b5563', bg: 'rgba(75,85,99,0.08)',    border: 'rgba(75,85,99,0.18)' },
 };
+
+// ── RolloutBar — uses @property --rollout-pct for smooth width + color transition
+// Both animated properties (--rollout-pct for width, --fill-color for background)
+// are delivered as CSS custom properties so the .rollout-bar-fill class rule
+// transitions both symmetrically. See index.css ANIMATION 6.
+function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
+  const fillColor = !enabled
+    ? 'var(--color-border)'
+    : pct === 100
+    ? 'var(--color-risk-low)'
+    : pct >= 50
+    ? 'var(--color-risk-medium)'
+    : 'var(--color-accent)';
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
+      <div style={{
+        flex: 1, height: 4,
+        background: 'var(--color-bg-overlay)',
+        borderRadius: 2,
+        overflow: 'hidden',
+      }}>
+        <div
+          className="rollout-bar-fill"
+          style={{
+            '--rollout-pct': `${pct}%`,
+            '--fill-color': fillColor,
+            height: '100%',
+          } as React.CSSProperties}
+        />
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 32, textAlign: 'right' as const }}>
+        {pct}%
+      </span>
+    </div>
+  );
+}
 
 // Pulsing green dot keyframes injected once
 const PULSE_STYLE = `
@@ -61,6 +100,8 @@ export default function FlagList() {
   // useDeferredValue: adaptive interruptible search — no fixed debounce delay (React 19)
   const deferredSearch = useDeferredValue(search);
 
+  const { density, setDensity, rowHeight } = useDensity();
+
   const { data: flags = [], isLoading: flagsLoading } = useFlags();
   const { data: envStates = {}, isLoading: snapshotLoading } = useEnvSnapshot(env);
   const loading = flagsLoading || snapshotLoading;
@@ -75,10 +116,16 @@ export default function FlagList() {
   );
 
   const parentRef = useRef<HTMLDivElement>(null);
+
+  // useCallback ensures the estimateSize ref is replaced when rowHeight changes.
+  // TanStack Virtual v3 honours a new callback identity and re-estimates all rows,
+  // so switching density correctly resizes the virtual slot heights.
+  const estimateSize = useCallback(() => rowHeight, [rowHeight]);
+
   const virtualizer = useVirtualizer({
     count: loading ? 8 : filtered.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 52,
+    estimateSize,
     overscan: 5,
   });
 
@@ -209,6 +256,8 @@ export default function FlagList() {
             );
           })}
         </div>
+
+        <DensityToggle density={density} onChange={setDensity} />
       </div>
 
       {/* ── Table ── */}
@@ -252,7 +301,12 @@ export default function FlagList() {
             const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
             const pct = es?.rollout_pct ?? 0;
             const enabled = es?.enabled ?? false;
-            const fillColor = !enabled ? 'var(--color-border)' : pct === 100 ? 'var(--color-risk-low)' : pct >= 50 ? 'var(--color-risk-medium)' : 'var(--color-accent)';
+
+            // Derive vertical padding from rowHeight so density visually adapts.
+            // vRow.size equals the estimated rowHeight (set by estimateSize above).
+            // Using padding-top/bottom to fill the slot prevents content overflow
+            // clipping in Condensed (32px) and gaps in Spacious (72px).
+            const vPad = Math.max(0, Math.floor((vRow.size - 20) / 2));
 
             return (
               <div
@@ -262,10 +316,11 @@ export default function FlagList() {
                   display: 'grid',
                   gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
                   alignItems: 'center',
-                  padding: '0 16px',
+                  padding: `${vPad}px 16px`,
                   borderBottom: '1px solid var(--color-border)',
                   cursor: 'pointer',
                   transition: 'background 0.1s',
+                  boxSizing: 'border-box' as const,
                 }}
                 onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--color-bg-elevated)'; }}
                 onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
@@ -286,12 +341,7 @@ export default function FlagList() {
                   </span>
                 </div>
                 {/* Rollout */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ flex: 1, height: 4, background: 'var(--color-bg-overlay)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{ width: `${pct}%`, height: '100%', background: fillColor, borderRadius: 2, transition: 'width 0.5s ease' }} />
-                  </div>
-                  <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 30, textAlign: 'right' as const }}>{pct}%</span>
-                </div>
+                <RolloutBar pct={pct} enabled={enabled} />
                 {/* Type */}
                 <div><code style={{ fontSize: 11, color: 'var(--color-fg-muted)', background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 4, padding: '2px 6px' }}>{flag.flag_type}</code></div>
                 {/* State */}
@@ -305,13 +355,6 @@ export default function FlagList() {
           })}
         </div>
 
-        {!loading && filtered.length === 0 && (
-          <div style={{ padding: 64, textAlign: 'center' as const, color: 'var(--color-fg-subtle)' }}>
-            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.3 }}>{'⚑'}</div>
-            <div style={{ fontSize: 14, fontWeight: 500 }}>No flags yet. Create your first flag.</div>
-            <div style={{ fontSize: 12, marginTop: 6, color: 'var(--color-fg-subtle)' }}>Click "+ Create Flag" above to get started.</div>
-          </div>
-        )}
       </div>
 
       <FlagCreateModal open={createOpen} onClose={() => setCreateOpen(false)} />

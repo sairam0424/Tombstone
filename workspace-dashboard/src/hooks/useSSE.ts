@@ -21,7 +21,7 @@ export function useSSE(env: string) {
     const es = new EventSource(url);
 
     es.onopen = () => setConnected(true);
-    // No auto-reconnect implemented by design. LiveFeed UI shows connection status;
+    // No auto-reconnect implemented by design. ConnectionStatus component shows connection health;
     // manual page refresh recovers from disconnection.
     es.onerror = () => setConnected(false);
 

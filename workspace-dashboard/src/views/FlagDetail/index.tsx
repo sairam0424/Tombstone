@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { FlagHealthBadge } from '../../components/FlagHealthBadge.js';
 import { CircuitBreakerStatus } from '../../components/CircuitBreakerStatus.js';
 import { AutonomousRolloutToggle } from '../../components/AutonomousRolloutToggle.js';
@@ -93,9 +94,10 @@ const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
 // Small sub-components
 // ---------------------------------------------------------------------------
 
-function SectionCard({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+function SectionCard({ children, className = '', id }: { children: React.ReactNode; className?: string; id?: string }) {
   return (
     <div
+      id={id}
       className={`rounded-xl border p-6 ${className}`}
       style={{ background: '#111', borderColor: '#1a1a1a' }}
     >
@@ -155,6 +157,200 @@ function RolloutBar({ pct, envKey }: { pct: number; envKey: Env }) {
 }
 
 // ---------------------------------------------------------------------------
+// QuickActions — context strip mounted between flag header and env section
+// ---------------------------------------------------------------------------
+interface QuickActionsProps {
+  flagKey: string;
+  activeEnv: Env;
+  enabled: boolean;
+  isPending: boolean;
+  onToggle: () => void;
+  onRollback: () => void;
+}
+
+function QuickActions({ flagKey, activeEnv, enabled, isPending, onToggle, onRollback }: QuickActionsProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleClone = useCallback(() => {
+    navigator.clipboard.writeText(flagKey).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => null);
+  }, [flagKey]);
+
+  const handleAudit = useCallback(() => {
+    const el = document.getElementById('audit-log');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, []);
+
+  const envCfg = envConfig[activeEnv];
+
+  return (
+    <div
+      className="flex items-center gap-2 flex-wrap mb-8 px-4 py-3 rounded-xl border"
+      style={{ background: '#0d0d0d', borderColor: '#1a1a1a' }}
+    >
+      {/* Rollback button with confirmation dialog */}
+      <AlertDialog.Root>
+        <AlertDialog.Trigger asChild>
+          <button
+            disabled={isPending}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: 'color-mix(in oklab, var(--color-action-danger) 10%, transparent)',
+              border: '1px solid color-mix(in oklab, var(--color-action-danger) 25%, transparent)',
+              color: 'var(--color-action-danger)',
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 8a5 5 0 1 1 1.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              <path d="M3 11.5V8H6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Rollback
+          </button>
+        </AlertDialog.Trigger>
+
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay
+            className="fixed inset-0 z-50"
+            style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(2px)' }}
+          />
+          <AlertDialog.Content
+            className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-xl p-6 shadow-2xl w-full max-w-md"
+            style={{ background: '#111', border: '1px solid #2a2a2a' }}
+          >
+            <AlertDialog.Title className="text-base font-semibold text-white mb-2">
+              Roll back <span className="text-red-400 font-mono">{flagKey}</span>?
+            </AlertDialog.Title>
+            <AlertDialog.Description className="text-sm text-gray-400 mb-6 leading-relaxed">
+              This will immediately disable the flag in{' '}
+              <span className={`font-semibold ${envCfg.accent}`}>{envCfg.label}</span>{' '}
+              using the kill switch. All targeting rules will be preserved and the flag can be re-enabled at any time.
+            </AlertDialog.Description>
+            <div className="flex items-center justify-end gap-3">
+              <AlertDialog.Cancel asChild>
+                <button
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                  style={{
+                    background: '#1a1a1a',
+                    border: '1px solid #2a2a2a',
+                    color: '#9ca3af',
+                  }}
+                >
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  onClick={onRollback}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
+                  style={{
+                    background: '#7f1d1d',
+                    border: '1px solid #991b1b',
+                    color: '#fca5a5',
+                  }}
+                >
+                  Confirm Rollback
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+
+      {/* Toggle enabled/disabled */}
+      <button
+        onClick={onToggle}
+        disabled={isPending}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        style={{
+          background: enabled
+            ? 'color-mix(in oklab, var(--color-action-warning) 10%, transparent)'
+            : 'color-mix(in oklab, var(--color-action-success) 10%, transparent)',
+          border: enabled
+            ? '1px solid color-mix(in oklab, var(--color-action-warning) 25%, transparent)'
+            : '1px solid color-mix(in oklab, var(--color-action-success) 25%, transparent)',
+          color: enabled ? 'var(--color-action-warning)' : 'var(--color-action-success)',
+        }}
+      >
+        {enabled ? (
+          <>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="5" width="12" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M5.5 5V3.5a2.5 2.5 0 0 1 5 0V5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            Disable
+          </>
+        ) : (
+          <>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="7" width="12" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            Enable
+          </>
+        )}
+      </button>
+
+      {/* Clone — copies flag key to clipboard */}
+      <button
+        onClick={handleClone}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+        style={{
+          background: 'color-mix(in oklab, var(--color-accent) 8%, transparent)',
+          border: '1px solid color-mix(in oklab, var(--color-accent) 20%, transparent)',
+          color: copied ? 'var(--color-action-success)' : 'var(--color-accent)',
+        }}
+      >
+        {copied ? (
+          <>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Copied!
+          </>
+        ) : (
+          <>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="5" y="5" width="8" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M10 5V3.5A1.5 1.5 0 0 0 8.5 2H3.5A1.5 1.5 0 0 0 2 3.5v7A1.5 1.5 0 0 0 3.5 12H5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            Clone Key
+          </>
+        )}
+      </button>
+
+      {/* Audit — smooth scroll to audit log section */}
+      <button
+        onClick={handleAudit}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+        style={{
+          background: 'color-mix(in oklab, var(--color-violet) 8%, transparent)',
+          border: '1px solid color-mix(in oklab, var(--color-violet) 20%, transparent)',
+          color: 'var(--color-violet)',
+        }}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2 4h12M2 8h8M2 12h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+        Audit Log
+      </button>
+
+      {/* Env context pill — shows which environment the actions target */}
+      <span
+        className={`ml-auto inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium ${envCfg.badge}`}
+        title="Actions target this environment"
+      >
+        <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'currentColor', opacity: 0.7 }} />
+        {envCfg.label}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // EnvToggleButton — isolated per-env optimistic toggle
 // ---------------------------------------------------------------------------
 
@@ -195,6 +391,58 @@ function EnvToggleButton({
     >
       {isPending ? '…' : enabled ? 'Disable' : 'Enable'}
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ActiveEnvQuickActions — bridges useOptimisticToggle into QuickActions
+// ---------------------------------------------------------------------------
+
+function ActiveEnvQuickActions({
+  flagKey,
+  activeEnv,
+  currentEnvState,
+}: {
+  flagKey: string;
+  activeEnv: Env;
+  currentEnvState: EnvStateRow | undefined;
+}) {
+  const { enabled, toggle, isPending } = useOptimisticToggle(
+    flagKey,
+    activeEnv,
+    {
+      enabled: currentEnvState?.enabled ?? false,
+      rolloutPct: currentEnvState?.rollout_pct ?? 0,
+    },
+  );
+
+  const [rollbackPending, setRollbackPending] = useState(false);
+
+  const handleRollback = useCallback(async () => {
+    if (!flagKey || rollbackPending) return;
+    setRollbackPending(true);
+    try {
+      await fetch(`${API_URL}/api/v1/flags/${flagKey}/environments/${activeEnv}`, {
+        method: 'PATCH',
+        headers: { ...hdrs, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: false }),
+      });
+    } catch {
+      // silently ignore — state will reconcile on next snapshot refresh
+    } finally {
+      setRollbackPending(false);
+    }
+  }, [flagKey, activeEnv, rollbackPending]);
+
+  return (
+    <QuickActions
+      flagKey={flagKey}
+      activeEnv={activeEnv}
+      enabled={enabled}
+      isPending={isPending || rollbackPending}
+      onToggle={toggle}
+      onRollback={() => { void handleRollback(); }}
+    />
   );
 }
 
@@ -322,6 +570,13 @@ export default function FlagDetail() {
             <FlagHealthBadge state={flag.state} />
           </div>
         </div>
+
+        {/* Quick-actions context strip */}
+        <ActiveEnvQuickActions
+          flagKey={flag.key}
+          activeEnv={activeEnv}
+          currentEnvState={activeEnvState}
+        />
 
         {/* Two-column layout */}
         <div className="flex gap-6 items-start flex-col xl:flex-row">
@@ -565,7 +820,7 @@ export default function FlagDetail() {
             </SectionCard>
 
             {/* Audit log */}
-            <SectionCard>
+            <SectionCard id="audit-log">
               <SectionTitle>Audit Log</SectionTitle>
               <div className="text-gray-500 text-xs mb-3">Last 20 entries</div>
               {audit.length === 0 ? (
