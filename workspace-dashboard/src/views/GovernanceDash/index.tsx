@@ -608,6 +608,8 @@ export default function GovernanceDash() {
   const [applyingKey, setApplyingKey] = useState<string | null>(null);
   const [hoveredStale, setHoveredStale] = useState<string | null>(null);
 
+  const isIntelAvailable = !INTEL_URL.includes('localhost');
+
   const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
 
   // ── TanStack Query data fetching ──────────────────────────────────────────
@@ -700,6 +702,17 @@ export default function GovernanceDash() {
     timestamp: Date.now() - (23 - i) * 3_600_000,
     value: Math.max(60, (health?.health_score ?? 0.8) * 100 + Math.sin(i) * 5),
   }));
+
+  if (!isIntelAvailable) {
+    return (
+      <div style={{ padding: '32px 40px' }}>
+        <EmptyState
+          heading="Intelligence service offline"
+          body="GovernanceDash requires the intelligence service. Deploy evaluator + intelligence to Northflank to enable this view."
+        />
+      </div>
+    );
+  }
 
   return (
     <div style={{

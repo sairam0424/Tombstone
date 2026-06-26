@@ -148,9 +148,8 @@ export default function App() {
   const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
 
   const openCmd = useCallback(() => setCmdOpen(true), []);
-  const showShortcuts = useCallback(() => console.log('TODO: show shortcut map'), []);
 
-  useKeyboard({ 'cmd+k': openCmd, 'escape': () => { setCmdOpen(false); setEnvOpen(false); }, '?': showShortcuts });
+  useKeyboard({ 'cmd+k': openCmd, 'escape': () => { setCmdOpen(false); setEnvOpen(false); } });
 
   const pageName = (() => {
     if (location.pathname.startsWith('/flags/')) return 'Flag Detail';

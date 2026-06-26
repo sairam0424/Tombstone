@@ -1,7 +1,7 @@
 // workspace-dashboard/src/components/CommandPalette.tsx
 import { Command } from 'cmdk';
 import { useNavigate } from 'react-router-dom';
-import { Flag, Zap, CheckCircle, Shield, BarChart2, FlaskConical, GitBranch, HelpCircle, X } from 'lucide-react';
+import { Flag, Zap, CheckCircle, Shield, BarChart2, FlaskConical, GitBranch, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface FlagItem { key: string; name: string; state: string; }
@@ -121,17 +121,6 @@ export function CommandPalette({ open, onClose, flags }: Props) {
                   </Command.Group>
                 )}
 
-                <Command.Group heading="Help" style={{ padding: '0 8px 8px' }}>
-                  <Command.Item
-                    value="keyboard shortcuts help"
-                    onSelect={() => run(() => navigate('/?shortcuts=1'))}
-                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: 'var(--color-fg)' }}
-                  >
-                    <HelpCircle size={15} color="var(--color-fg-subtle)" />
-                    Keyboard shortcuts
-                    <kbd style={{ marginLeft: 'auto', fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'var(--color-bg-surface)', border: '1px solid var(--color-border)', color: 'var(--color-fg-muted)' }}>?</kbd>
-                  </Command.Item>
-                </Command.Group>
               </Command.List>
 
               <div style={{ borderTop: '1px solid var(--color-border)', padding: '8px 16px', display: 'flex', gap: 16 }}>

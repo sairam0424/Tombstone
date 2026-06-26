@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { API_URL, SDK_TOKEN } from '../../config.js';
 import { EmptyState } from '../../components/ui/index.js';
+import { useCurrentUser } from '../../hooks/useCurrentUser.js';
 
 interface ChangeRequest {
   id: string;
@@ -88,6 +89,7 @@ export default function ApprovalQueue() {
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
 
+  const { email: currentUserEmail } = useCurrentUser();
   const apiUrl = API_URL;
   const token = SDK_TOKEN;
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -105,7 +107,7 @@ export default function ApprovalQueue() {
     setActing(id);
     await fetch(`${apiUrl}/api/v1/change-requests/${id}/approve`, {
       method: 'POST', headers,
-      body: JSON.stringify({ approved_by: 'current-user@example.com' }),
+      body: JSON.stringify({ approved_by: currentUserEmail }),
     });
     setRequests(prev => prev.filter(r => r.id !== id));
     setActing(null);
@@ -117,7 +119,7 @@ export default function ApprovalQueue() {
     setActing(id);
     await fetch(`${apiUrl}/api/v1/change-requests/${id}/reject`, {
       method: 'POST', headers,
-      body: JSON.stringify({ rejected_by: 'current-user@example.com', reason }),
+      body: JSON.stringify({ rejected_by: currentUserEmail, reason }),
     });
     setRequests(prev => prev.filter(r => r.id !== id));
     setActing(null);
