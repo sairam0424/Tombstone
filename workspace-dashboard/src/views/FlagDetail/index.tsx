@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { FlagHealthBadge } from '../../components/FlagHealthBadge.js';
 import { CircuitBreakerStatus } from '../../components/CircuitBreakerStatus.js';
@@ -505,6 +506,41 @@ export default function FlagDetail() {
 
   const activeEnvState = envStates[activeEnv];
 
+  // ── Rollout % inline editing state ─────────────────────────────────────
+  const [editingRollout, setEditingRollout] = useState(false);
+  const [pendingRollout, setPendingRollout] = useState<number | null>(null);
+  const queryClient = useQueryClient();
+
+  const handleRolloutChange = useCallback(async (newPct: number) => {
+    if (!flagKey || !activeEnvState) return;
+    const prev = activeEnvState.rollout_pct;
+    // Optimistic update in snapshot cache
+    queryClient.setQueryData(['snapshot', activeEnv], (old: Record<string, EnvStateRow> | undefined) => {
+      if (!old || !flagKey) return old;
+      return { ...old, [flagKey]: { ...old[flagKey], rollout_pct: newPct } };
+    });
+    try {
+      const r = await fetch(`${API_URL}/api/v1/flags/${flagKey}/environments/${activeEnv}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${SDK_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: activeEnvState.enabled, rollout_pct: newPct }),
+      });
+      if (!r.ok) throw new Error(`${r.status}`);
+      toast.success(`Rollout set to ${newPct}%`, { description: flagKey });
+      void queryClient.invalidateQueries({ queryKey: ['snapshot', activeEnv] });
+    } catch (err) {
+      toast.error('Rollout update failed', { description: String(err) });
+      // Revert optimistic update
+      queryClient.setQueryData(['snapshot', activeEnv], (old: Record<string, EnvStateRow> | undefined) => {
+        if (!old || !flagKey) return old;
+        return { ...old, [flagKey]: { ...old[flagKey], rollout_pct: prev } };
+      });
+    } finally {
+      setEditingRollout(false);
+      setPendingRollout(null);
+    }
+  }, [flagKey, activeEnvState, activeEnv, queryClient]);
+
   // ── Loading / error states ──────────────────────────────────────────────
   if (flagLoading) {
     return (
@@ -699,9 +735,51 @@ export default function FlagDetail() {
                       <div className="text-gray-500 text-xs mb-1.5">Status</div>
                       <ToggleVisual enabled={activeEnvState.enabled} envKey={activeEnv} />
                     </div>
-                    <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
-                      <div className="text-gray-500 text-xs mb-1.5">Rollout %</div>
-                      <RolloutBar pct={activeEnvState.rollout_pct} envKey={activeEnv} />
+                    <div
+                      className="rounded-lg p-3"
+                      style={{ background: '#0d0d0d', border: `1px solid ${editingRollout ? 'var(--color-accent, #38e1ff)' : '#1a1a1a'}`, cursor: 'pointer', transition: 'border-color 0.15s' }}
+                      onClick={() => { setEditingRollout(true); setPendingRollout(activeEnvState.rollout_pct); }}
+                      title="Click to edit rollout %"
+                    >
+                      <div className="text-gray-500 text-xs mb-1.5" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Rollout %</span>
+                        {!editingRollout && <span style={{ color: 'var(--color-accent, #38e1ff)', fontSize: 10 }}>edit</span>}
+                      </div>
+                      {editingRollout ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} onClick={e => e.stopPropagation()}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={5}
+                              value={pendingRollout ?? activeEnvState.rollout_pct}
+                              onChange={e => setPendingRollout(Number(e.target.value))}
+                              style={{ flex: 1, accentColor: 'var(--color-accent, #38e1ff)' }}
+                              autoFocus
+                            />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-fg, #e9ecf5)', minWidth: 36, textAlign: 'right' as const }}>
+                              {pendingRollout ?? activeEnvState.rollout_pct}%
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              onClick={() => { void handleRolloutChange(pendingRollout ?? activeEnvState.rollout_pct); }}
+                              style={{ flex: 1, padding: '4px 0', borderRadius: 6, border: 'none', background: 'var(--color-accent, #38e1ff)', color: '#07080d', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => { setEditingRollout(false); setPendingRollout(null); }}
+                              style={{ flex: 1, padding: '4px 0', borderRadius: 6, border: '1px solid #1a1a1a', background: 'transparent', color: '#6b7280', fontSize: 11, cursor: 'pointer' }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <RolloutBar pct={activeEnvState.rollout_pct} envKey={activeEnv} />
+                      )}
                     </div>
                     {activeEnvState.safe_default != null && (
                       <div className="rounded-lg p-3" style={{ background: '#0d0d0d', border: '1px solid #1a1a1a' }}>
