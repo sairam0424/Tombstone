@@ -4,7 +4,9 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Report security issues to: **security@tombstone.io**
+Report security issues to: **sairam0424@github.com**
+
+For local self-hosted deployments, please open a GitHub issue with the security label.
 
 Include in your report:
 - Description of the vulnerability and its potential impact

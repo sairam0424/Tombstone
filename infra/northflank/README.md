@@ -1,5 +1,8 @@
 # Northflank Deployment — gateway + flag-api
 
+> **Note:** Tombstone v1.0.0 is **local-first self-hosted**. This guide is for v1.1+ cloud deployment only.
+> For v1.0 setup, see the root [README.md](../../README.md) and run `make dev` locally.
+
 Northflank Sandbox (free, always-on) hosts the two critical services.
 
 ## Why these two?

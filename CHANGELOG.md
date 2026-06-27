@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.0] - 2026-06-27
+
+### Added
+- Complete self-hosted platform — all 8 services run locally with `make dev`
+- React 19 dashboard with all views: FlagList, FlagDetail, ApprovalQueue, BreakGlass, IncidentTimeline, DependencyGraph, GovernanceDash, Experiments, Marketplace, SLOView
+- Inline rollout % slider in FlagDetail — click the Rollout % card to edit
+- CommandPalette (Cmd+K) with live flag search
+- OKLCH perceptually-uniform design system
+- TanStack Query v5 + React 19 concurrent patterns (useOptimistic, useDeferredValue)
+- Vite 8 + Rolldown build pipeline
+- Service availability gates via VITE_ENABLE_* env vars
+- ApprovalQueue auto-refresh every 30s
+- GovernanceDash + SLOView + Experiments all functional locally
+
+### Changed
+- Minimum deployment requirement: Docker + Make (no cloud accounts needed)
+- docker-compose.yml now enables all dashboard views for local development
+
+---
+
 ## [Unreleased]
 
 ---

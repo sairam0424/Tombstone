@@ -13,7 +13,7 @@ metrics from intelligence, writes to metrics/health.jsonl, and creates a
 signal when health_score < 0.8 or stale count > 50.
 
 **Entry point:** `scripts/loop-governance.sh`
-**Trigger:** weekly Monday 06:00 UTC (`.github/workflows/loop-governance.yml`)
+**Activation:** These loops run as local scripts. Activate by running: `bash scripts/loop-governance.sh`
 **APIs used:** flag-api `/api/v1/compliance/evidence`, intelligence `/api/v1/stale`
 
 ## Current focus
@@ -33,4 +33,5 @@ Collector writes to `domains/governance/metrics/health.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | health_score=X stale=Y -->
-2026-06-24 | Loop scaffolded and deployed to main. Weekly Monday cron wired (06:00 UTC). Pending GitHub Actions var TOMBSTONE_API_URL to activate.
+2026-06-24 | Loop scaffolded and deployed to main. Local script ready (weekly Monday 06:00 UTC schedule recommended).
+2026-06-27 | Converted to local-first v1.0.0 self-hosted activation via bash scripts/loop-governance.sh

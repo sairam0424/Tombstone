@@ -1,5 +1,8 @@
 # GitHub Actions Secrets + Variables — Tombstone
 
+> **Note:** These variables are for CI/CD and optional cloud deployment (v1.1+).
+> For Tombstone v1.0 self-hosted local development, these are not required. See the root [README.md](../README.md) for local setup.
+
 Configure these at: github.com/sairam0424/Tombstone/settings/secrets/actions
 
 ## Secrets (sensitive — never shown after save)

@@ -1,4 +1,7 @@
-# Tombstone Helm Chart
+# Tombstone Helm Chart — Kubernetes Deployment
+
+> **Note:** This is a **v1.1+ production deployment guide** for Kubernetes.
+> For Tombstone v1.0 local self-hosted development, use `make dev` from the root directory instead.
 
 Production Intelligence Layer for Feature Flags — Kubernetes deployment via Helm.
 

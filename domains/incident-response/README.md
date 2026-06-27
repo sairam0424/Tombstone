@@ -13,7 +13,7 @@ auto-rolls back. This loop captures that event, runs the causal correlator, and 
 a structured post-mortem doc — so each incident teaches the system.
 
 **Entry point:** `scripts/loop-incident-response.sh <flag_key> <environment>`
-**Trigger:** marketplace inbound webhook on `flag.rollback` or `circuit_breaker.trip` events
+**Activation:** These loops run as local scripts. Activate by running: `bash scripts/loop-incident-response.sh <flag_key> <environment>`
 **APIs used:** evaluator `/api/v1/flags/{key}/slo`, intelligence `/api/v1/correlate`
 
 ## Current focus
@@ -39,4 +39,5 @@ Collector writes to `domains/incident-response/metrics/trips.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | flag_key — what happened -->
-2026-06-24 | Loop scaffolded and deployed to main. Webhook trigger available via workflow_dispatch. Pending marketplace webhook wiring for auto-trigger on circuit trips.
+2026-06-24 | Loop scaffolded and deployed to main. Manual invocation via script ready. Webhook trigger available for event-driven automation.
+2026-06-27 | Converted to local-first v1.0.0 self-hosted activation via bash scripts/loop-incident-response.sh <flag_key> <environment>

@@ -1,6 +1,8 @@
 # Tombstone MCP Server
 
-**v2.0.1** — Use Tombstone feature-flag management from any MCP-compatible AI coding assistant (Claude Code, Cursor, VS Code Copilot, etc.).
+**v2.2.0** — Use Tombstone feature-flag management from any MCP-compatible AI coding assistant (Claude Code, Cursor, VS Code Copilot, etc.).
+
+Start with `make dev` from the repo root, then connect MCP to http://localhost:8081
 
 ## Setup
 
@@ -84,7 +86,7 @@ Or use `npx` after publishing to npm:
 
 ### Transport
 
-v2.0.1 uses **Streamable HTTP** (the current MCP standard transport). The endpoint is:
+v2.2.0 uses **Streamable HTTP** (the current MCP standard transport). The endpoint is:
 
 ```
 POST /api/mcp/mcp
@@ -101,7 +103,7 @@ Legacy SSE transport is not supported. Ensure your MCP client is on a version th
 
 ## Available Tools
 
-All 8 tools are available as of v2.0.1. Tools marked **v2** were added in v2.0.0.
+All 8 tools are available as of v2.2.0. Tools marked **v2** were added in v2.0.0.
 
 | Tool | Description | Key Parameters |
 |---|---|---|
@@ -158,6 +160,10 @@ Ask your AI assistant:
 - "Show me how to set up OpenFeature with Tombstone in TypeScript"
 
 ## Changelog
+
+### v2.2.0
+- Version aligned with Tombstone backend v2.2.0 / Dashboard v1.0.0 (self-hosted)
+- Local-first setup: connect to `http://localhost:8081` via `make dev`
 
 ### v2.0.1
 - Fix: Streamable HTTP transport endpoint path corrected to `/api/mcp/mcp`
