@@ -2,6 +2,12 @@
 
 Production intelligence layer for feature flags. Treats 5,000+ flags as a live causal graph of production behavior — combining flag delivery, blast-radius gating, circuit-breaker auto-rollback, and incident correlation in one self-hosted system.
 
+**Every competitor asks "how do I deliver a flag value?" Tombstone asks "which of my 5,000 active flags is responsible for what's happening in production right now?"**
+
+The things Tombstone adds that no other open-source flag system has: [circuit-breaker auto-rollback](#evaluator), [causal dependency graph + incident correlation](#intelligence), [ML-driven rollout recommendations](#intelligence) (Thompson Sampling + LinUCB contextual bandit), [Merkle-linked audit trail + Rekor transparency](#flag-api), and [CUPED + mSPRT experimentation](#intelligence).
+
+> **Evaluating Tombstone vs. alternatives?** See [docs/WHY_TOMBSTONE.md](docs/WHY_TOMBSTONE.md) — competitive comparison, use cases, honest caveats, and a detailed breakdown of every unique capability.
+
 ## Quick Start
 
 **Prerequisites:** Docker 20.10+, Docker Compose v2+, Make
@@ -172,6 +178,7 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 
 | Guide | What it covers |
 |-------|---------------|
+| [Why Tombstone](docs/WHY_TOMBSTONE.md) | USPs, competitive comparison, use cases, honest caveats — start here to evaluate |
 | [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
 | [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |
 | [Glossary](docs/GLOSSARY.md) | Blast radius, tombstoning, kill switch, circuit breaker, and more |
@@ -179,6 +186,7 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 | [Security](SECURITY.md) | Vulnerability reporting, self-hosted security checklist, JWT setup |
 | [Support](SUPPORT.md) | Where to get help — Discussions, Issues, Security |
 
+**Evaluating Tombstone?** Read [Why Tombstone](docs/WHY_TOMBSTONE.md) — competitive comparison and use cases.
 **New to feature flags?** Start with the [User Guide](docs/USER_GUIDE.md).
 **Just ran `make dev`?** Go to [Getting Started](docs/GETTING_STARTED.md).
 **Something broken?** Check [Troubleshooting](#troubleshooting) below or open a [GitHub Issue](https://github.com/sairam0424/Tombstone/issues/new?template=bug_report.md).
@@ -212,13 +220,13 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
      +----------+
 ```
 
-**flag-api** — The control plane. All flag CRUD, approval workflows, four-eyes sign-off, Merkle-linked audit trail, tombstoning (Knight Capital pattern), OPA RBAC, break-glass emergency tokens.
+<a name="flag-api"></a>**flag-api** — The control plane. All flag CRUD, approval workflows, four-eyes sign-off, Merkle-linked audit trail, tombstoning (Knight Capital pattern), OPA RBAC, break-glass emergency tokens.
 
 **gateway** — The data plane. SDK connections via SSE, Redis Streams fan-out, real-time flag updates to all connected clients.
 
-**evaluator** — The safety layer. Blast-radius scoring per flag, circuit-breaker auto-rollback at error thresholds, SLO tracking.
+<a name="evaluator"></a>**evaluator** — The safety layer. Blast-radius scoring per flag, circuit-breaker auto-rollback at error thresholds (5% errors / 100 requests / 10s window), SLO tracking.
 
-**intelligence** — The ML layer. 3-model ensemble anomaly detection (Z-score + Isolation Forest + EWMA), stale flag detection, LinUCB rollout recommendations, CUPED variance reduction, warehouse connectors (BigQuery, Snowflake, Databricks).
+<a name="intelligence"></a>**intelligence** — The ML layer. 3-model ensemble anomaly detection (Z-score + Isolation Forest + EWMA), Thompson Sampling + LinUCB contextual bandit rollout recommendations, CUPED variance reduction, mSPRT sequential testing, experiment collision detection, causal dependency graph, incident correlation ("What Changed?"), NLP semantic flag search (BAAI/bge-m3 + BM25 + RRF fusion).
 
 ---
 
