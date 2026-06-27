@@ -2,6 +2,10 @@ import { useState } from 'react';
 import { INTEL_URL, ENABLE_INTELLIGENCE } from '../../config.js';
 import { EmptyState, Reveal } from '../../components/ui/index.js';
 
+// ── Demo data flag ───────────────────────────────────────────────────────────
+
+const IS_DEMO_DATA = true;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface ExperimentResult {
@@ -620,6 +624,27 @@ export default function Experiments() {
         );
       })()}
 
+      {/* ── Demo data warning banner ───────────────────────────────────── */}
+      {IS_DEMO_DATA && (
+        <div style={{
+          background: 'color-mix(in oklab, #fbbf24 10%, transparent)',
+          border: `1px solid color-mix(in oklab, #fbbf24 30%, transparent)`,
+          borderRadius: 8,
+          padding: '10px 14px',
+          marginBottom: 20,
+          display: 'flex',
+          gap: 8,
+          fontSize: 12,
+          color: '#fbbf24',
+          alignItems: 'flex-start',
+        }}>
+          <span style={{ fontSize: 14, marginTop: 0, flexShrink: 0 }}>⚠</span>
+          <span>
+            <strong>Demo data</strong> — These are example experiments. Connect your warehouse DSN in the analysis panel to run real A/B tests.
+          </span>
+        </div>
+      )}
+
       {/* ── Section label ──────────────────────────────────────────────── */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16,
@@ -628,7 +653,7 @@ export default function Experiments() {
           All Experiments
         </h2>
         <span style={{ fontSize: 12, color: T.dim }}>
-          {MOCK_EXPERIMENTS.length} total
+          {MOCK_EXPERIMENTS.length} total <span style={{ color: '#fbbf24' }}>(demo)</span>
         </span>
       </div>
 

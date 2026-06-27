@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_URL, SDK_TOKEN } from '../../config.js';
 import { EmptyState } from '../../components/ui/index.js';
 import { useCurrentUser } from '../../hooks/useCurrentUser.js';
@@ -85,23 +86,24 @@ function formatTimestamp(ts: number): string {
 }
 
 export default function ApprovalQueue() {
-  const [requests, setRequests] = useState<ChangeRequest[]>([]);
-  const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const { email: currentUserEmail } = useCurrentUser();
   const apiUrl = API_URL;
   const token = SDK_TOKEN;
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-  useEffect(() => {
-    setLoading(true);
-    fetch(`${apiUrl}/api/v1/change-requests?status=PENDING`, { headers })
-      .then(r => r.json())
-      .then((d: { requests?: ChangeRequest[] }) => setRequests(d.requests ?? []))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
+  const { data: requests = [], isLoading: loading } = useQuery({
+    queryKey: ['change-requests', 'PENDING'],
+    queryFn: async (): Promise<ChangeRequest[]> => {
+      const r = await fetch(`${apiUrl}/api/v1/change-requests?status=PENDING`, { headers });
+      if (!r.ok) return [];
+      const d = await r.json() as { requests?: ChangeRequest[] };
+      return d.requests ?? [];
+    },
+    refetchInterval: 30_000,
+  });
 
   const approve = async (id: string) => {
     setActing(id);
@@ -109,7 +111,7 @@ export default function ApprovalQueue() {
       method: 'POST', headers,
       body: JSON.stringify({ approved_by: currentUserEmail }),
     });
-    setRequests(prev => prev.filter(r => r.id !== id));
+    void queryClient.invalidateQueries({ queryKey: ['change-requests', 'PENDING'] });
     setActing(null);
   };
 
@@ -121,7 +123,7 @@ export default function ApprovalQueue() {
       method: 'POST', headers,
       body: JSON.stringify({ rejected_by: currentUserEmail, reason }),
     });
-    setRequests(prev => prev.filter(r => r.id !== id));
+    void queryClient.invalidateQueries({ queryKey: ['change-requests', 'PENDING'] });
     setActing(null);
   };
 

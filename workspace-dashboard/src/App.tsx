@@ -5,6 +5,7 @@ import { CommandPalette } from './components/CommandPalette.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { ENABLE_INTELLIGENCE, ENABLE_MARKETPLACE } from './config.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
+import { useFlags } from './hooks/useFlags.js';
 
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
@@ -123,7 +124,8 @@ export default function App() {
   const [env, setEnv] = useState<Env>('production');
   const [envOpen, setEnvOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
+  const { data: flagsData = [] } = useFlags();
+  const flags = flagsData.map(f => ({ key: f.key, name: f.name, state: f.state }));
 
   const nav: { heading: string; items: NavItem[] }[] = [
     {
