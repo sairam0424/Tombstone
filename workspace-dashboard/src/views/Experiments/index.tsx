@@ -1,7 +1,6 @@
 import { useState } from 'react';
-import { INTEL_URL } from '../../config.js';
+import { INTEL_URL, ENABLE_INTELLIGENCE } from '../../config.js';
 import { EmptyState, Reveal } from '../../components/ui/index.js';
-import { useFeatureFlag } from "../../hooks/useFeatureFlags.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -325,7 +324,7 @@ function Field({
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function Experiments() {
-  const isIntelAvailable = useFeatureFlag('feature-intelligence-service');
+  const isIntelAvailable = ENABLE_INTELLIGENCE;
   const [form, setForm] = useState<FormState>({
     flagKey: '',
     metricName: 'conversion',

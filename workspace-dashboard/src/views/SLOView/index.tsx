@@ -14,7 +14,7 @@ import {
   PolarAngleAxis,
 } from 'recharts';
 import { useFlagSLO, type SLOWindow, type SLOHistoryPoint } from '../../hooks/useFlagSLO.js';
-import { useFeatureFlag } from "../../hooks/useFeatureFlags.js";
+import { ENABLE_EVALUATOR } from '../../config.js';
 import { EmptyState } from '../../components/ui/index.js';
 
 // ── Circuit state badge ───────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ const WINDOWS: { label: string; value: SLOWindow }[] = [
 export default function SLOView() {
   const { key } = useParams<{ key: string }>();
   const [selectedWindow, setSelectedWindow] = useState<SLOWindow>('7d');
-  const isEvalAvailable = useFeatureFlag('feature-evaluator-service');
+  const isEvalAvailable = ENABLE_EVALUATOR;
   const { data, loading, error } = useFlagSLO(key ?? '', selectedWindow);
 
   if (!isEvalAvailable) {

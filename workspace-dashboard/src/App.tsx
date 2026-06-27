@@ -3,8 +3,9 @@ import { useState, useCallback } from 'react';
 import { Toaster } from 'sonner';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
+import { ENABLE_INTELLIGENCE, ENABLE_MARKETPLACE } from './config.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
-import { useFeatureFlags } from './hooks/useFeatureFlags.js';
+
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
 import SLOView from './views/SLOView/index.js';
@@ -123,7 +124,6 @@ export default function App() {
   const [envOpen, setEnvOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
-  const featureFlags = useFeatureFlags();
 
   const nav: { heading: string; items: NavItem[] }[] = [
     {
@@ -142,11 +142,11 @@ export default function App() {
       heading: 'INTELLIGENCE',
       items: [
         { to: '/graph',       label: 'Causal Graph',  icon: <IconShare /> },
-        ...(featureFlags['feature-intelligence-service'] ? [
+        ...(ENABLE_INTELLIGENCE ? [
           { to: '/governance',  label: 'Governance',    icon: <IconBarChart /> },
           { to: '/experiments', label: 'Experiments',   icon: <IconBeaker /> },
         ] : []),
-        ...(featureFlags['feature-marketplace-service'] ? [
+        ...(ENABLE_MARKETPLACE ? [
           { to: '/marketplace', label: 'Marketplace',   icon: <IconPuzzle /> },
         ] : []),
       ],
