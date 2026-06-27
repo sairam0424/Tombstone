@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { API_URL, INTEL_URL, SDK_TOKEN } from '../../config.js';
+import { API_URL, SDK_TOKEN, INTEL_URL, ENABLE_INTELLIGENCE } from '../../config.js';
+
 import { EvaluationChart, type TimeSeriesPoint } from '../../components/charts/EvaluationChart.js';
 import { Section, Reveal, SkeletonStatCard, EmptyState } from '../../components/ui/index.js';
 
@@ -608,7 +609,7 @@ export default function GovernanceDash() {
   const [applyingKey, setApplyingKey] = useState<string | null>(null);
   const [hoveredStale, setHoveredStale] = useState<string | null>(null);
 
-  const isIntelAvailable = !INTEL_URL.includes('localhost');
+  const isIntelAvailable = ENABLE_INTELLIGENCE;
 
   const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
 
@@ -708,7 +709,7 @@ export default function GovernanceDash() {
       <div style={{ padding: '32px 40px' }}>
         <EmptyState
           heading="Intelligence service offline"
-          body="GovernanceDash requires the intelligence service. Deploy evaluator + intelligence to Northflank to enable this view."
+          body="Enable the 'feature-intelligence-service' flag in Tombstone when the intelligence service is deployed."
         />
       </div>
     );
