@@ -119,6 +119,9 @@ services:
     env_file: .env
     environment:
       PORT: "8083"
+      EMBEDDING_BACKEND: local
+      CONSUMER_BACKEND: kafka
+      TOMBSTONE_ENVIRONMENTS: production
     ports:
       - "8083:8083"
     restart: unless-stopped
