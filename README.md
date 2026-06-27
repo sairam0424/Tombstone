@@ -41,26 +41,21 @@ The dashboard opens at **http://localhost:3000**.
 
 ## Configuration
 
-Copy and edit the environment file:
-
 ```bash
 cp infra/.env.example infra/.env
 ```
 
-**Required changes** (edit `infra/.env`):
+**That's it for local development.** The defaults work out of the box — no changes needed to run `make dev`.
 
-```bash
-POSTGRES_PASSWORD=your-secure-password        # Change from default
-# ⚠ Also update DB_URL to match your POSTGRES_PASSWORD:
-DB_URL=postgres://tombstone:your-secure-password@postgres:5432/tombstone?sslmode=disable
-
-JWT_SECRET=your-32-char-minimum-secret-key    # Min 32 chars
-FLAG_API_TOKEN=your-dev-sdk-token             # Token for SDK auth
-```
-
-> **Tip:** Generate a secure JWT_SECRET with: `openssl rand -hex 32`
-
-Everything else has working defaults for local development.
+> **For production deployments**, edit `infra/.env` and change these three values:
+>
+> | Variable | What to set | How |
+> |----------|-------------|-----|
+> | `POSTGRES_PASSWORD` | Strong random password | Any password — also update `DB_URL` to match |
+> | `JWT_SECRET` | 64-char random hex | `openssl rand -hex 32` |
+> | `FLAG_API_TOKEN` | Your SDK token | Any secret string your apps will use |
+>
+> See [SECURITY.md](SECURITY.md) for the full self-hosted security checklist.
 
 ---
 
