@@ -178,6 +178,13 @@ services:
     environment:
       VITE_API_URL: http://localhost:8081
       VITE_GATEWAY_URL: http://localhost:8080
+      VITE_EVAL_URL: http://localhost:8082
+      VITE_INTEL_URL: http://localhost:8083
+      VITE_MARKETPLACE_URL: http://localhost:8086
+      VITE_SDK_TOKEN: sdk-dev-token-change-in-prod
+      VITE_ENABLE_INTELLIGENCE: "true"
+      VITE_ENABLE_EVALUATOR: "true"
+      VITE_ENABLE_MARKETPLACE: "true"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
