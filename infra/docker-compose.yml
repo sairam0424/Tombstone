@@ -179,6 +179,9 @@ services:
       - flag-api
       - gateway
     environment:
+      # VITE_* vars are inlined at build/serve time into browser JS.
+      # localhost resolves via published host ports from the user's browser — correct for CSR SPAs.
+      # Do NOT replace with Docker service names (flag-api, gateway, etc.) — that breaks browser fetches.
       VITE_API_URL: http://localhost:8081
       VITE_GATEWAY_URL: http://localhost:8080
       VITE_EVAL_URL: http://localhost:8082

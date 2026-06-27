@@ -40,4 +40,9 @@ Thumbs.db
 # Go workspace sum (regenerated)
 go.work.sum
 infra/.env.secrets
-infra/.env
+
+# Private scratch workspace — never commit
+scratch-pad/
+
+# TypeScript build cache
+**/*.tsbuildinfo

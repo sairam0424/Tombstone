@@ -7,26 +7,6 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [1.0.0] - 2026-06-27
-
-### Added
-- Complete self-hosted platform — all 8 services run locally with `make dev`
-- React 19 dashboard with all views: FlagList, FlagDetail, ApprovalQueue, BreakGlass, IncidentTimeline, DependencyGraph, GovernanceDash, Experiments, Marketplace, SLOView
-- Inline rollout % slider in FlagDetail — click the Rollout % card to edit
-- CommandPalette (Cmd+K) with live flag search
-- OKLCH perceptually-uniform design system
-- TanStack Query v5 + React 19 concurrent patterns (useOptimistic, useDeferredValue)
-- Vite 8 + Rolldown build pipeline
-- Service availability gates via VITE_ENABLE_* env vars
-- ApprovalQueue auto-refresh every 30s
-- GovernanceDash + SLOView + Experiments all functional locally
-
-### Changed
-- Minimum deployment requirement: Docker + Make (no cloud accounts needed)
-- docker-compose.yml now enables all dashboard views for local development
-
----
-
 ## [Unreleased]
 
 ---
@@ -255,8 +235,15 @@ Initial production release of Tombstone (formerly FlagMind). Covers Phases 1–4
 - `TombstoneProvider` — React context provider wrapping the core SDK.
 - `useFlag(key)`, `useFlagVariation(key, defaultValue)`, `useTombstoneClient()` hooks.
 
-**workspace-dashboard** (React 19, Vite, Tailwind v4):
+**workspace-dashboard** (React 19, Vite 8 + Rolldown, Tailwind v4, OKLCH design system):
 - Production intelligence UI: flag list, flag detail with audit timeline, kill-switch panel, blast radius visualization, "What Changed?" incident query, anomaly chart.
+- All views: FlagList, FlagDetail, ApprovalQueue, BreakGlass, IncidentTimeline, DependencyGraph, GovernanceDash, Experiments, Marketplace, SLOView.
+- Inline rollout % slider in FlagDetail — click the Rollout % card to edit inline.
+- CommandPalette (Cmd+K) with live NLP flag search.
+- TanStack Query v5 + React 19 concurrent patterns (useOptimistic, useDeferredValue, useTransition).
+- Service availability gates via `VITE_ENABLE_INTELLIGENCE`, `VITE_ENABLE_EVALUATOR`, `VITE_ENABLE_MARKETPLACE` env vars.
+- ApprovalQueue auto-refresh every 30s; GovernanceDash, SLOView, and Experiments all functional locally.
+- Zero-config local dev: `cp infra/.env.example infra/.env && make dev` starts the complete platform.
 
 **workspace-cli** (`@tombstone/cli`, Commander):
 - `tombstone flags list`, `tombstone flags get <key>`, `tombstone flags kill <key>`, `tombstone flags create`, `tombstone blast-radius <key>`.
