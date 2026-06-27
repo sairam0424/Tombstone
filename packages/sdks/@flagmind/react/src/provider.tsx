@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { TombstoneClient } from '@tombstone/core';
-import type { TombstoneClientConfig } from '@tombstone/core';
+import { TombstoneClient } from '@tomb-stone/core';
+import type { TombstoneClientConfig } from '@tomb-stone/core';
 
 interface TombstoneContextValue {
   client: TombstoneClient | null;

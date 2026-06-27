@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { EvaluationContext, EvaluationResult } from '@tombstone/core';
+import type { EvaluationContext, EvaluationResult } from '@tomb-stone/core';
 import { useTombstoneContext } from './provider.js';
 
 // Primary evaluation hook — synchronous, reactive on SSE flag updates.
