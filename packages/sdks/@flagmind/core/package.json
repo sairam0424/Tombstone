@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/core",
+  "name": "@tomb-stone/core",
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone Node.js SDK — in-process flag evaluation with SSE streaming",

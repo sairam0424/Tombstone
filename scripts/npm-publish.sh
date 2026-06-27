@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes all @tombstone/* packages to npm in dependency order.
+# Publishes all @tomb-stone/* packages to npm in dependency order.
 # Prerequisites:
 #   1. npm login (or set NPM_TOKEN env var)
 #   2. 2FA enabled on your npm account
@@ -28,12 +28,12 @@ publish_pkg() {
 }
 
 # Order: eval first (no deps), then core (may reference eval), then rest
-publish_pkg "packages/sdk-wasm"              "@tombstone/eval"
-publish_pkg "packages/sdks/@flagmind/core"   "@tombstone/core"
-publish_pkg "packages/sdks/@flagmind/react"  "@tombstone/react"
-publish_pkg "packages/sdks/@flagmind/edge"   "@tombstone/edge"
-publish_pkg "workspace-cli"                  "@tombstone/cli"
-publish_pkg "workspace-mcp"                  "@tombstone/mcp"
+publish_pkg "packages/sdk-wasm"              "@tomb-stone/eval"
+publish_pkg "packages/sdks/@flagmind/core"   "@tomb-stone/core"
+publish_pkg "packages/sdks/@flagmind/react"  "@tomb-stone/react"
+publish_pkg "packages/sdks/@flagmind/edge"   "@tomb-stone/edge"
+publish_pkg "workspace-cli"                  "@tomb-stone/cli"
+publish_pkg "workspace-mcp"                  "@tomb-stone/mcp"
 
 echo ""
 echo "✅ All packages published"

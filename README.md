@@ -94,11 +94,11 @@ bash scripts/dev-local.sh logs <svc>  # Tail service logs (e.g. flag-api, gatewa
 ### TypeScript / Node.js
 
 ```bash
-npm install @tombstone/core
+npm install @tomb-stone/core
 ```
 
 ```typescript
-import { TombstoneClient } from '@tombstone/core';
+import { TombstoneClient } from '@tomb-stone/core';
 
 const client = new TombstoneClient({
   apiUrl: 'http://localhost:8081',
@@ -136,11 +136,11 @@ enabled = client.is_enabled("checkout-v2", {"user_id": "user-123"})
 ### React
 
 ```bash
-npm install @tombstone/react
+npm install @tomb-stone/react
 ```
 
 ```tsx
-import { TombstoneProvider, useFlag } from '@tombstone/react';
+import { TombstoneProvider, useFlag } from '@tomb-stone/react';
 
 function App() {
   return (

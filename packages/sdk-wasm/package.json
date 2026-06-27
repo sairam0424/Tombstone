@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/eval",
+  "name": "@tomb-stone/eval",
   "version": "0.1.0",
   "description": "Zero-dependency evaluation engine for Tombstone — WASM-ready, runs in any JS runtime",
   "type": "module",

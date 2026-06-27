@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/cli",
+  "name": "@tomb-stone/cli",
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone CLI — manage feature flags, blast radius, and kill switches from the terminal",

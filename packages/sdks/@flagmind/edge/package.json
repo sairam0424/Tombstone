@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/edge",
+  "name": "@tomb-stone/edge",
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone Edge SDK — sub-1ms flag evaluation on Cloudflare Workers via KV",

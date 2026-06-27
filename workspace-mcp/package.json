@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/mcp",
+  "name": "@tomb-stone/mcp",
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone MCP server — use Tombstone from any AI coding assistant",
