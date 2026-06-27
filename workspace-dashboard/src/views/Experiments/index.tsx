@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { INTEL_URL } from '../../config.js';
 import { EmptyState, Reveal } from '../../components/ui/index.js';
+import { useFeatureFlag } from "../../hooks/useFeatureFlags.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -324,6 +325,7 @@ function Field({
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function Experiments() {
+  const isIntelAvailable = useFeatureFlag('feature-intelligence-service');
   const [form, setForm] = useState<FormState>({
     flagKey: '',
     metricName: 'conversion',
@@ -337,6 +339,14 @@ export default function Experiments() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+
+  if (!isIntelAvailable) {
+    return (
+      <div style={{ padding: "32px 40px" }}>
+        <EmptyState heading="Intelligence service offline" body="Enable the 'feature-intelligence-service' flag in Tombstone when the intelligence service is deployed." />
+      </div>
+    );
+  }
 
   const run = async () => {
     setRunning(true);
