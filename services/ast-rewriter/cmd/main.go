@@ -13,9 +13,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/ast-rewriter/internal/rewriter"
-	"github.com/tombstone/ast-rewriter/internal/scanner"
-	"github.com/tombstone/ast-rewriter/internal/telemetry"
+	"github.com/sairam0424/Tombstone/services/ast-rewriter/internal/rewriter"
+	"github.com/sairam0424/Tombstone/services/ast-rewriter/internal/scanner"
+	"github.com/sairam0424/Tombstone/services/ast-rewriter/internal/telemetry"
 )
 
 // ---- request / response types ------------------------------------------------

@@ -13,11 +13,11 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	v1 "github.com/tombstone/marketplace/internal/api/v1"
-	"github.com/tombstone/marketplace/internal/integrations"
-	"github.com/tombstone/marketplace/internal/registry"
-	"github.com/tombstone/marketplace/internal/telemetry"
-	"github.com/tombstone/marketplace/internal/webhook"
+	v1 "github.com/sairam0424/Tombstone/services/marketplace/internal/api/v1"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/registry"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/telemetry"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/webhook"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
     "regexp"
     "strings"
 
-    "github.com/tombstone/gitops-sync/internal/parser"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/parser"
 )
 
 // Naming convention: team.service.feature (dot-notation, all lowercase, no spaces)

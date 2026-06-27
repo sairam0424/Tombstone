@@ -1,4 +1,4 @@
-module github.com/tombstone/gateway
+module github.com/sairam0424/Tombstone/services/gateway
 
 go 1.25.0
 

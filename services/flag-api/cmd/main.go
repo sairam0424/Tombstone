@@ -18,12 +18,12 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	v1 "github.com/tombstone/flag-api/internal/api/v1"
-	"github.com/tombstone/flag-api/internal/middleware"
-	"github.com/tombstone/flag-api/internal/scheduler"
-	"github.com/tombstone/flag-api/internal/telemetry"
-	"github.com/tombstone/flag-api/internal/tlsutil"
-	"github.com/tombstone/flag-api/internal/transparency"
+	v1 "github.com/sairam0424/Tombstone/services/flag-api/internal/api/v1"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/middleware"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/scheduler"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/telemetry"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/tlsutil"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/transparency"
 )
 
 func main() {

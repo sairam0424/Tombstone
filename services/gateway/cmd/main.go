@@ -16,9 +16,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	v1 "github.com/tombstone/gateway/internal/api/v1"
-	"github.com/tombstone/gateway/internal/hub"
-	"github.com/tombstone/gateway/internal/telemetry"
+	v1 "github.com/sairam0424/Tombstone/services/gateway/internal/api/v1"
+	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
+	"github.com/sairam0424/Tombstone/services/gateway/internal/telemetry"
 )
 
 func main() {

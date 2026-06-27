@@ -12,7 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/evaluator/internal/tlsutil"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/tlsutil"
 )
 
 // RollbackRequest describes an automatic or manual rollback action.

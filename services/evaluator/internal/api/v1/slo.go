@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/evaluator/internal/circuit"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/circuit"
 )
 
 const (

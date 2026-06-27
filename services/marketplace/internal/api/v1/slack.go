@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/tombstone/marketplace/internal/integrations"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
 )
 
 // HandleSlackCommands handles POST /api/v1/marketplace/slack/commands

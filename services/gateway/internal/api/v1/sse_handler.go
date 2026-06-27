@@ -8,7 +8,7 @@ import (
 	"time"
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/tombstone/gateway/internal/hub"
+	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
 	"go.uber.org/zap"
 )
 

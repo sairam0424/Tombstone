@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/gateway/internal/tlsutil"
+	"github.com/sairam0424/Tombstone/services/gateway/internal/tlsutil"
 )
 
 type SnapshotProxy struct {

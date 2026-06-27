@@ -14,7 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
-	v1alpha1 "github.com/tombstone-io/tombstone/services/tombstone-operator/api/v1alpha1"
+	v1alpha1 "github.com/sairam0424/Tombstone/services/tombstone-operator/api/v1alpha1"
 )
 
 const (

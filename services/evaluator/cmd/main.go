@@ -18,12 +18,12 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/evaluator/internal/blast"
-	"github.com/tombstone/evaluator/internal/circuit"
-	"github.com/tombstone/evaluator/internal/middleware"
-	"github.com/tombstone/evaluator/internal/rollback"
-	"github.com/tombstone/evaluator/internal/telemetry"
-	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/blast"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/circuit"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/middleware"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/rollback"
+	"github.com/sairam0424/Tombstone/services/evaluator/internal/telemetry"
+	apiv1 "github.com/sairam0424/Tombstone/services/evaluator/internal/api/v1"
 )
 
 func main() {

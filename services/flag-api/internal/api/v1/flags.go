@@ -17,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/flag-api/internal/transparency"
+	"github.com/sairam0424/Tombstone/services/flag-api/internal/transparency"
 )
 
 type FlagHandler struct {

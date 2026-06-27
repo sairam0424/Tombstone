@@ -8,9 +8,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
-	"github.com/tombstone/marketplace/internal/integrations"
-	"github.com/tombstone/marketplace/internal/registry"
-	"github.com/tombstone/marketplace/internal/webhook"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/registry"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/webhook"
 )
 
 // Handler bundles the registry and dispatcher used by all route handlers.

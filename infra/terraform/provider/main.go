@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/tombstone/terraform-provider-tombstone/internal/provider"
+	"github.com/sairam0424/Tombstone/infra/terraform/provider/internal/provider"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/plugin"
 )
 

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/tombstone/gateway/internal/hub"
+	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
 	"go.uber.org/zap"
 )
 

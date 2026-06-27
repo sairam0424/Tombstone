@@ -12,10 +12,10 @@ import (
     "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
     "go.uber.org/zap"
 
-    "github.com/tombstone/gitops-sync/internal/parser"
-    "github.com/tombstone/gitops-sync/internal/syncer"
-    "github.com/tombstone/gitops-sync/internal/telemetry"
-    "github.com/tombstone/gitops-sync/internal/validator"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/parser"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/syncer"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/telemetry"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/validator"
 )
 
 func main() {

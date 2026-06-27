@@ -1,4 +1,4 @@
-module github.com/tombstone/ast-rewriter
+module github.com/sairam0424/Tombstone/services/ast-rewriter
 
 go 1.25.0
 

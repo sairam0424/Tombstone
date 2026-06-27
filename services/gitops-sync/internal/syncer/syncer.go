@@ -9,7 +9,7 @@ import (
     "strings"
     "time"
 
-    "github.com/tombstone/gitops-sync/internal/parser"
+    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/parser"
     "go.uber.org/zap"
 )
 

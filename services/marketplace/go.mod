@@ -1,4 +1,4 @@
-module github.com/tombstone/marketplace
+module github.com/sairam0424/Tombstone/services/marketplace
 
 go 1.25.0
 

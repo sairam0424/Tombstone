@@ -10,7 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/sairam0424/Tombstone/services/marketplace/internal/registry"
 )
 
 // FlagEvent carries the payload dispatched to integration webhooks.

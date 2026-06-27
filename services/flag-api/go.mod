@@ -1,4 +1,4 @@
-module github.com/tombstone/flag-api
+module github.com/sairam0424/Tombstone/services/flag-api
 
 go 1.25.0
 

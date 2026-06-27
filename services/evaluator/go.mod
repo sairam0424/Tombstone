@@ -1,4 +1,4 @@
-module github.com/tombstone/evaluator
+module github.com/sairam0424/Tombstone/services/evaluator
 
 go 1.25.0
 

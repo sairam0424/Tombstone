@@ -1,4 +1,4 @@
-module github.com/tombstone/gitops-sync
+module github.com/sairam0424/Tombstone/services/gitops-sync
 
 go 1.25.0
 

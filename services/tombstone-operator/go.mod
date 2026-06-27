@@ -1,4 +1,4 @@
-module github.com/tombstone-io/tombstone/services/tombstone-operator
+module github.com/sairam0424/Tombstone/services/tombstone-operator
 
 go 1.25.0
 

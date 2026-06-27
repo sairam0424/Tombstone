@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tombstone/terraform-provider-tombstone/internal/datasources"
-	"github.com/tombstone/terraform-provider-tombstone/internal/resources"
+	"github.com/sairam0424/Tombstone/infra/terraform/provider/internal/datasources"
+	"github.com/sairam0424/Tombstone/infra/terraform/provider/internal/resources"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"go.uber.org/zap"
