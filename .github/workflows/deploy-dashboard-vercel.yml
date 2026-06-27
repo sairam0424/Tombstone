@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'workspace-dashboard/**'
+      - 'package-lock.json'
       - '.github/workflows/deploy-dashboard-vercel.yml'
   workflow_dispatch:
 
@@ -32,6 +33,7 @@ jobs:
         run: npm run build
 
       - name: Deploy to Vercel
+        if: ${{ secrets.VERCEL_TOKEN != '' }}
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -39,3 +41,7 @@ jobs:
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
           working-directory: workspace-dashboard
           vercel-args: '--prod'
+
+      - name: Skip deploy (VERCEL_TOKEN not configured)
+        if: ${{ secrets.VERCEL_TOKEN == '' }}
+        run: echo "VERCEL_TOKEN not set — skipping deploy. Set it in repo secrets to enable."
