@@ -51,9 +51,14 @@ cp infra/.env.example infra/.env
 
 ```bash
 POSTGRES_PASSWORD=your-secure-password        # Change from default
+# ⚠ Also update DB_URL to match your POSTGRES_PASSWORD:
+DB_URL=postgres://tombstone:your-secure-password@postgres:5432/tombstone?sslmode=disable
+
 JWT_SECRET=your-32-char-minimum-secret-key    # Min 32 chars
 FLAG_API_TOKEN=your-dev-sdk-token             # Token for SDK auth
 ```
+
+> **Tip:** Generate a secure JWT_SECRET with: `openssl rand -hex 32`
 
 Everything else has working defaults for local development.
 
