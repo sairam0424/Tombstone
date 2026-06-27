@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- VS Code extension icon — 128x128, dark bg -->
+  <rect width="128" height="128" rx="16" fill="#0d1117"/>
+
+  <!-- Tombstone shape centered -->
+  <path d="
+    M 32 116
+    L 32 58
+    A 32 32 0 0 1 96 58
+    L 96 116
+    Z
+  " fill="#1a1a2e" stroke="#58a6ff" stroke-width="2.5" stroke-linejoin="round"/>
+
+  <!-- Epitaph lines -->
+  <line x1="42" y1="78" x2="86" y2="78" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="48" y1="90" x2="80" y2="90" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+  <line x1="52" y1="101" x2="76" y2="101" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Base -->
+  <rect x="22" y="114" width="84" height="6" rx="2" fill="#1a1a2e" stroke="#58a6ff" stroke-width="2"/>
+  <rect x="16" y="118" width="96" height="5" rx="2" fill="#1a1a2e" stroke="#58a6ff" stroke-width="1.5"/>
+</svg>
