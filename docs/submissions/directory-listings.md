@@ -101,3 +101,11 @@ cd workspace-vscode-ext
 vsce package
 vsce publish
 ```
+
+---
+
+## Published Articles
+
+| Platform | URL | Date |
+|----------|-----|------|
+| dev.to (intro post) | https://dev.to/sai_ram_0000/i-built-a-self-hosted-feature-flag-platform-that-auto-rolls-back-bad-flags-heres-why-2m0k | 2026-06-28 |
