@@ -44,5 +44,8 @@ infra/.env.secrets
 # Private scratch workspace — never commit
 scratch-pad/
 
+# Superpowers session plan files — may contain credentials/tokens
+docs/superpowers/
+
 # TypeScript build cache
 **/*.tsbuildinfo
