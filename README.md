@@ -146,6 +146,28 @@ function CheckoutButton() {
 
 ---
 
+## What Is in v1.0.0
+
+This is the first stable self-hosted release of Tombstone. Everything runs locally with `make dev`.
+
+| Feature | Status |
+|---------|--------|
+| Flag CRUD with rollout slider | Stable |
+| Four-eyes approval | Stable |
+| Break-glass tokens | Stable |
+| Real-time SSE | Stable |
+| Incident timeline | Stable |
+| Causal dependency graph | Stable |
+| Governance + stale detection | Stable |
+| Circuit-breaker auto-rollback | Stable |
+| TypeScript/Python/React SDKs | Stable |
+| MCP server | Stable |
+| Cmd+K command palette | Stable |
+
+Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra/ for those guides.
+
+---
+
 ## Architecture
 
 ```

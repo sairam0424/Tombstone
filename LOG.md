@@ -30,6 +30,10 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-06-27 · v1.0.0-local shipped — self-hosted release · #release
+What: All 8 services running via make dev, React 19 dashboard all views functional, CONTRIBUTING/CODE_OF_CONDUCT/GitHub templates/GETTING_STARTED/GLOSSARY/Python+Ruby SDK READMEs added.
+Refs: README.md (updated, v1.0.0 section), SECURITY.md (updated, self-hosted checklist), packages/sdks/flagmind-python/README.md (new), packages/sdks/flagmind-ruby/README.md (new).
+
 ## 2026-06-24 · v2.1.0 shipped — all 10 phases complete · #infra #loop #harness
 What: Redis Streams (Phase 4.1), Slack HTTP routes + governance loop, mTLS (Phase 6.1), Argos LLM rule generation (Phase 3.2) merged to main. All 32 items from the 10-phase beast/ultimate upgrade plan are fully implemented.
 Refs: Pull requests #44 #45 #46 #47 #48 merged. Tombstone v2.1.0 on main.

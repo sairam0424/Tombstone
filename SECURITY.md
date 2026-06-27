@@ -1,5 +1,32 @@
 # Security Policy
 
+## Self-Hosted Security Checklist
+
+Before exposing Tombstone to a network, complete this checklist:
+
+**Required (Critical)**
+- [ ] Change POSTGRES_PASSWORD from default — strong random password (min 16 chars)
+- [ ] Change JWT_SECRET — use openssl rand -hex 32
+- [ ] Change FLAG_API_TOKEN — unique SDK token per environment
+
+**Generating a secure JWT_SECRET:**
+```bash
+# Option 1: openssl
+openssl rand -hex 32
+# Option 2: Python
+python3 -c "import secrets; print(secrets.token_hex(32))"
+# Option 3: Node.js
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+**Recommended**
+- [ ] Place services behind reverse proxy with TLS
+- [ ] Set MTLS_ENABLED=true if services exposed beyond localhost
+- [ ] Configure OPA policies in services/flag-api/policies/ for your RBAC needs
+- [ ] Do not expose Kafka, Redis, or PostgreSQL ports externally
+
+---
+
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
