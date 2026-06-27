@@ -12,6 +12,18 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && node --experimental-vm-modules ../../node_modules/.bin/mocha 'dist/tests/*.test.js'"
   },
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "wasm",
+    "cloudflare-workers",
+    "deno",
+    "edge",
+    "zero-dependency",
+    "openfeature",
+    "self-hosted",
+    "tombstone"
+  ],
   "devDependencies": {
     "typescript": "~5.8.2",
     "@types/node": "^22.0.0",

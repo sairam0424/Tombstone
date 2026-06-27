@@ -13,5 +13,16 @@
     "@cloudflare/workers-types": "^4.0.0",
     "typescript": "~5.8.2"
   },
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "openfeature",
+    "cloudflare-workers",
+    "edge",
+    "self-hosted",
+    "devops",
+    "typescript",
+    "tombstone"
+  ],
   "engines": { "node": ">=18" }
 }

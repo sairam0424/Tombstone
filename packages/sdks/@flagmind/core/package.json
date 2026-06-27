@@ -23,6 +23,20 @@
       "default": "./dist/admin.js"
     }
   },
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "feature-management",
+    "openfeature",
+    "circuit-breaker",
+    "blast-radius",
+    "self-hosted",
+    "devops",
+    "platform-engineering",
+    "typescript",
+    "sdk",
+    "tombstone"
+  ],
   "engines": { "node": ">=18" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

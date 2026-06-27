@@ -1,5 +1,10 @@
 # Tombstone
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/sairam0424/Tombstone/actions/workflows/ci.yml/badge.svg)](https://github.com/sairam0424/Tombstone/actions/workflows/ci.yml)
+[![OpenFeature](https://img.shields.io/badge/OpenFeature-compatible-blueviolet)](https://openfeature.dev)
+[![Go Report Card](https://goreportcard.com/badge/github.com/sairam0424/Tombstone)](https://goreportcard.com/report/github.com/sairam0424/Tombstone)
+
 Production intelligence layer for feature flags. Treats 5,000+ flags as a live causal graph of production behavior — combining flag delivery, blast-radius gating, circuit-breaker auto-rollback, and incident correlation in one self-hosted system.
 
 **Every competitor asks "how do I deliver a flag value?" Tombstone asks "which of my 5,000 active flags is responsible for what's happening in production right now?"**
@@ -179,6 +184,7 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 | Guide | What it covers |
 |-------|---------------|
 | [Why Tombstone](docs/WHY_TOMBSTONE.md) | USPs, competitive comparison, use cases, honest caveats — start here to evaluate |
+| [Discoverability Roadmap](docs/DISCOVERABILITY.md) | GitHub topics, OSS launch strategy, awesome-go, CNCF, OpenFeature — how to grow Tombstone |
 | [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
 | [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |
 | [Glossary](docs/GLOSSARY.md) | Blast radius, tombstoning, kill switch, circuit breaker, and more |
