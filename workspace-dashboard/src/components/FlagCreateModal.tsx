@@ -23,7 +23,7 @@ const flagSchema = z.object({
     .regex(/^[a-z0-9][a-z0-9-_]*$/, 'Lowercase, numbers, hyphens, underscores only'),
   name:        z.string().min(1, 'Name required').max(80),
   description: z.string().max(200).optional(),
-  flag_type:   z.enum(['boolean', 'string', 'number', 'json']),
+  flag_type:   z.enum(['BOOLEAN', 'STRING', 'INTEGER', 'JSON']),
   rules:       z.array(ruleSchema),
   rollout_pct: z.number().min(0).max(100),
   enabled:     z.boolean(),
@@ -39,7 +39,7 @@ async function createFlag(data: FlagFormData): Promise<void> {
       Authorization: `Bearer ${SDK_TOKEN}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(data),
+    body: JSON.stringify({ ...data, owner_id: 'sdk:dashboard-sdk' }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: 'Unknown error' })) as { message?: string };
@@ -104,7 +104,7 @@ export function FlagCreateModal({ open, onClose }: Props) {
   const { register, control, handleSubmit, watch, trigger, formState: { errors } } = useForm<FlagFormData>({
     resolver: zodResolver(flagSchema),
     defaultValues: {
-      flag_type:   'boolean',
+      flag_type:   'BOOLEAN',
       rules:       [],
       rollout_pct: 0,
       enabled:     false,
@@ -214,7 +214,7 @@ export function FlagCreateModal({ open, onClose }: Props) {
                           borderRadius: 8, padding: '8px 12px', fontSize: 13, color: 'var(--color-fg)',
                           outline: 'none', cursor: 'pointer',
                         }}>
-                          {['boolean', 'string', 'number', 'json'].map(t => (
+                          {['BOOLEAN', 'STRING', 'INTEGER', 'JSON'].map(t => (
                             <option key={t} value={t}>{t}</option>
                           ))}
                         </select>
