@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { API_URL, SDK_TOKEN, INTEL_URL, ENABLE_INTELLIGENCE } from '../../config.js';
 
 import { EvaluationChart, type TimeSeriesPoint } from '../../components/charts/EvaluationChart.js';
@@ -687,8 +688,10 @@ export default function GovernanceDash() {
           rollout_pct: rec.recommended_pct,
         }),
       });
-    } catch {
-      // silently ignore
+    } catch (err) {
+      toast.error("Failed to apply recommendation", {
+        description: err instanceof Error ? err.message : "Rollout update failed",
+      });
     } finally {
       setApplyingKey(null);
     }
