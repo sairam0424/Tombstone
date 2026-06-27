@@ -17,6 +17,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # ---- runtime stage ----
 FROM alpine:3.20
+LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
+      org.opencontainers.image.description="Tombstone ast-rewriter service" \
+      org.opencontainers.image.licenses="MIT"
 
 RUN apk add --no-cache ca-certificates tzdata
 

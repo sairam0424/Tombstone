@@ -9,6 +9,10 @@ keywords:
   - intelligence
   - circuit-breaker
   - blast-radius
-home: https://github.com/Not-Humans-World/Tombstone
+home: https://github.com/sairam0424/Tombstone
+sources:
+  - https://github.com/sairam0424/Tombstone
 maintainers:
-  - name: Tombstone Team
+  - name: Tombstone
+    email: support@tombstone.dev
+    url: https://github.com/sairam0424/Tombstone

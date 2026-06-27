@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/sairam0424/Tombstone/actions/workflows/ci.yml/badge.svg)](https://github.com/sairam0424/Tombstone/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/sairam0424/Tombstone/graph/badge.svg)](https://codecov.io/gh/sairam0424/Tombstone)
 [![OpenFeature](https://img.shields.io/badge/OpenFeature-compatible-blueviolet)](https://openfeature.dev)
 [![Go Report Card](https://goreportcard.com/badge/github.com/sairam0424/Tombstone)](https://goreportcard.com/report/github.com/sairam0424/Tombstone)
 

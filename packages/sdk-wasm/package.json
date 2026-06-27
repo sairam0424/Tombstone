@@ -8,6 +8,10 @@
   "exports": {
     ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }
   },
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && node --experimental-vm-modules ../../node_modules/.bin/mocha 'dist/tests/*.test.js'"

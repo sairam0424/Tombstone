@@ -3,6 +3,19 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone MCP server — use Tombstone from any AI coding assistant",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "feature-flags",
+    "tombstone",
+    "ai",
+    "devops"
+  ],
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
+  "mcpName": "io.github.sairam0424/tombstone",
   "bin": { "flagmind-mcp": "./dist/index.js" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

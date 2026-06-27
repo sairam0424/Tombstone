@@ -22,6 +22,10 @@
     "typescript",
     "tombstone"
   ],
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "test": "npx vitest run"

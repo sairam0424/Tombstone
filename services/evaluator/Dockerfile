@@ -8,6 +8,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     GOWORK=off CGO_ENABLED=0 GOOS=linux go build -o /evaluator ./cmd/main.go
 
 FROM alpine:3.19
+LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
+      org.opencontainers.image.description="Tombstone evaluator service" \
+      org.opencontainers.image.licenses="MIT"
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /evaluator /evaluator
 EXPOSE 8082

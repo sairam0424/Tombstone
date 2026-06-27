@@ -37,6 +37,10 @@
     "sdk",
     "tombstone"
   ],
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "engines": { "node": ">=18" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

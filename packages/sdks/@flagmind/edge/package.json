@@ -8,6 +8,10 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
   },
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "scripts": { "build": "tsc -p tsconfig.build.json" },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",

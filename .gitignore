@@ -7,7 +7,9 @@ infra/.env
 services/*/bin/
 services/*/main
 infra/terraform/provider/main
-**/main
+# Go binary named 'main' — only match files, not directories
+services/**/main
+packages/**/main
 
 # Python
 **/__pycache__/
