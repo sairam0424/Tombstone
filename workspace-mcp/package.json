@@ -11,7 +11,7 @@
     "ai",
     "devops"
   ],
-  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "repository": { "type": "git", "url": "git+https://github.com/sairam0424/Tombstone.git" },
   "homepage": "https://github.com/sairam0424/Tombstone",
   "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
   "license": "MIT",
