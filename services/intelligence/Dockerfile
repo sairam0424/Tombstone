@@ -9,7 +9,7 @@ COPY pyproject.toml ./
 COPY app/ app/
 
 # Install all dependencies (including sentence-transformers — large, cached layer)
-RUN uv pip install --system .
+RUN uv pip install --system --refresh .
 
 # Pre-download BAAI/bge-m3 embedding model (~400MB) at BUILD time.
 # This bakes the model into the Docker image layer so container startup is fast.
