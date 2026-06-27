@@ -126,7 +126,7 @@ func RewriteWithJscodeshift(ctx context.Context, repoPath, flagKey, winningVaria
 	if err != nil {
 		return nil, fmt.Errorf("creating temp dir for transform: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	transformPath := filepath.Join(tmpDir, "transform.cjs")
 	script := transformScript(flagKey, winningVariant)

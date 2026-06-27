@@ -79,7 +79,7 @@ func (h *SCIMHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		writeSCIMError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []SCIMUser
 	for rows.Next() {
@@ -268,7 +268,7 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 		h.logger.Error("scim detect orphans query", zap.Error(err), zap.String("owner", userEmail))
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var affectedKeys []string
 	for rows.Next() {

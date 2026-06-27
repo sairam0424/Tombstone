@@ -111,7 +111,7 @@ func (h *FlagHandler) ListFlags(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	flags := []Flag{}
 	for rows.Next() {
@@ -335,7 +335,7 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(r.Context(), `UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1`, key)
 	if err != nil {

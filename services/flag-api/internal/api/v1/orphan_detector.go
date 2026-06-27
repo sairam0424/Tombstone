@@ -61,7 +61,7 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 		od.logger.Error("orphan detector query failed", zap.Error(err))
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type orphan struct {
 		flagKey string

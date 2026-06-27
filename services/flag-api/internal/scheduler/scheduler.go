@@ -80,7 +80,7 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 		logger.Error("scheduler: query pending changes failed", zap.Error(err))
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var due []pendingChange
 	for rows.Next() {

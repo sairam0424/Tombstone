@@ -20,7 +20,7 @@ import (
 
 func main() {
     logger, _ := zap.NewProduction()
-    defer logger.Sync()
+    defer func() { _ = logger.Sync() }()
 
     initCtx := context.Background()
 
@@ -55,7 +55,7 @@ func main() {
     r := chi.NewRouter()
 
     r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-        fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
+        _, _ = fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
     })
 
     // POST /api/v1/sync — triggered by CI/CD webhook on merge

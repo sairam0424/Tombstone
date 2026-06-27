@@ -78,7 +78,7 @@ func (s *SnapshotProxy) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"upstream unavailable"}`, http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -136,7 +136,7 @@ func (h *PrerequisiteHandler) ListPrerequisites(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	prereqs := []Prerequisite{}
 	for rows.Next() {
@@ -194,7 +194,7 @@ func (h *PrerequisiteHandler) detectCycle(r *http.Request, flagKey, startKey str
 	if err != nil {
 		return nil // non-fatal: allow the insert if we can't walk the graph
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var nextKey string

@@ -111,7 +111,7 @@ func (r *RekorClient) SubmitAuditEntry(ctx context.Context, entryJSON []byte) (l
 		log.Printf("[rekor] warn: POST failed: %v", doErr)
 		return "", 0, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Printf("[rekor] warn: unexpected status %d", resp.StatusCode)

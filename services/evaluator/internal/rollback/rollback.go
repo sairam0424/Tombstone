@@ -83,7 +83,7 @@ func (e *Executor) Execute(ctx context.Context, req RollbackRequest) error {
 	if err != nil {
 		return fmt.Errorf("kill switch call failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("kill switch returned HTTP %d", resp.StatusCode)
 	}

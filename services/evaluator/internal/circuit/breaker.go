@@ -2,7 +2,6 @@ package circuit
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,7 +21,6 @@ const (
 type Breaker struct {
 	rdb    *redis.Client
 	logger *zap.Logger
-	mu     sync.Mutex
 	// Configurable thresholds
 	ErrorRateThreshold float64       // default 0.05 (5%)
 	MinRequests        int64         // default 100

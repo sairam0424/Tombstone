@@ -85,7 +85,7 @@ func (s *Syncer) flagExists(ctx context.Context, key string) (bool, error) {
     if err != nil {
         return false, err
     }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
     return resp.StatusCode == http.StatusOK, nil
 }
 
@@ -107,7 +107,7 @@ func (s *Syncer) createFlag(ctx context.Context, def *parser.FlagDefinition, pro
     if err != nil {
         return err
     }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
     if resp.StatusCode >= 400 {
         return fmt.Errorf("HTTP %d", resp.StatusCode)
     }
@@ -129,7 +129,7 @@ func (s *Syncer) updateEnvironment(ctx context.Context, key, env string, enabled
     if err != nil {
         return err
     }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
     if resp.StatusCode >= 400 {
         return fmt.Errorf("HTTP %d", resp.StatusCode)
     }

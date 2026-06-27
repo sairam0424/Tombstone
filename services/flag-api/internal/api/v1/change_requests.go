@@ -63,7 +63,7 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	requests := []ChangeRequest{}
 	for rows.Next() {

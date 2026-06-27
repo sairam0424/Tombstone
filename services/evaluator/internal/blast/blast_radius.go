@@ -64,7 +64,7 @@ func (c *Calculator) Compute(ctx context.Context, flagKey, environment string, n
 		LIMIT 10
 	`, flagKey, environment)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var k string
 			if rows.Scan(&k) == nil {
@@ -131,7 +131,7 @@ func HandleBlastRadius(calc *Calculator) http.HandlerFunc {
 		}
 		pct := 100
 		if p := q.Get("rollout_pct"); p != "" {
-			fmt.Sscanf(p, "%d", &pct)
+			_, _ = fmt.Sscanf(p, "%d", &pct)
 		}
 
 		result, err := calc.Compute(r.Context(), flagKey, env, pct)
@@ -141,7 +141,7 @@ func HandleBlastRadius(calc *Calculator) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(BlastRadiusResponse{
+		_ = json.NewEncoder(w).Encode(BlastRadiusResponse{
 			FlagKey:       flagKey,
 			Environment:   env,
 			NewRolloutPct: pct,

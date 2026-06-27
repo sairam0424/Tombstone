@@ -28,7 +28,7 @@ import (
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	initCtx := context.Background()
 
@@ -112,7 +112,7 @@ func main() {
 	r.Use(rateMw.RateLimit)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"status":"ok"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
 	})
 
 	// SDK telemetry ingest endpoint
@@ -141,7 +141,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"rolled_back":true}`)
+		_, _ = fmt.Fprintln(w, `{"rolled_back":true}`)
 	})
 
 	// Blast radius endpoint (only mounted when DB is available)
@@ -154,7 +154,7 @@ func main() {
 		flagKey := chi.URLParam(r, "flagKey")
 		state := breaker.GetState(r.Context(), flagKey)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
+		_, _ = fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
 	})
 
 	// Per-flag SLO dashboard endpoint

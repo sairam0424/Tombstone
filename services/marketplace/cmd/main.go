@@ -22,7 +22,7 @@ import (
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer logger.Sync() //nolint:errcheck
+	defer func() { _ = logger.Sync() }() //nolint:errcheck
 
 	initCtx := context.Background()
 

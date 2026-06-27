@@ -183,7 +183,7 @@ func (h *ScheduledHandler) ListSchedule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	changes := []ScheduledChange{}
 	for rows.Next() {

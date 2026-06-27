@@ -52,7 +52,7 @@ func (b *Broadcaster) Run(ctx context.Context) {
 func (b *Broadcaster) subscribe(ctx context.Context) error {
 	// PSUBSCRIBE matches all stream channels across all environments
 	pubsub := b.rdb.PSubscribe(ctx, "stream:*:updates")
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	b.logger.Info("broadcaster subscribed to Redis pub/sub")
 

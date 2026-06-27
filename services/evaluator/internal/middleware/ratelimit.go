@@ -92,7 +92,7 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprintf(w, `{"error":"rate limit exceeded","retry_after":%d}`, retryAfter)
+			_, _ = fmt.Fprintf(w, `{"error":"rate limit exceeded","retry_after":%d}`, retryAfter)
 			return
 		}
 

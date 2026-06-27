@@ -69,7 +69,7 @@ func (s *EdgeSyncer) SyncSnapshot(ctx context.Context, environment string, snaps
 		s.logger.Warn("edge sync: KV write failed", zap.Error(err), zap.String("env", environment))
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		s.logger.Warn("edge sync: KV returned error status",
