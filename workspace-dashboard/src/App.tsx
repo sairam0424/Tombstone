@@ -4,6 +4,7 @@ import { Toaster } from 'sonner';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
+import { useFeatureFlags } from './hooks/useFeatureFlags.js';
 import FlagList from './views/FlagList/index.js';
 import FlagDetail from './views/FlagDetail/index.js';
 import SLOView from './views/SLOView/index.js';
@@ -93,30 +94,6 @@ const IconPlus = () => (
 
 interface NavItem { to: string; label: string; icon: React.ReactNode; end?: boolean; }
 
-const nav: { heading: string; items: NavItem[] }[] = [
-  {
-    heading: 'FLAGS',
-    items: [{ to: '/', label: 'All Flags', icon: <IconFlag />, end: true }],
-  },
-  {
-    heading: 'OPERATIONS',
-    items: [
-      { to: '/incident',    label: 'What Changed?', icon: <IconLightning /> },
-      { to: '/approvals',   label: 'Approvals',     icon: <IconCheckCircle /> },
-      { to: '/break-glass', label: 'Break-Glass',   icon: <IconShield /> },
-    ],
-  },
-  {
-    heading: 'INTELLIGENCE',
-    items: [
-      { to: '/graph',       label: 'Causal Graph',  icon: <IconShare /> },
-      { to: '/governance',  label: 'Governance',    icon: <IconBarChart /> },
-      { to: '/experiments', label: 'Experiments',   icon: <IconBeaker /> },
-      { to: '/marketplace', label: 'Marketplace',   icon: <IconPuzzle /> },
-    ],
-  },
-];
-
 // Map route → page name for breadcrumb
 const PAGE_NAMES: Record<string, string> = {
   '/':            'All Flags',
@@ -146,6 +123,35 @@ export default function App() {
   const [envOpen, setEnvOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [flags] = useState<{ key: string; name: string; state: string }[]>([]);
+  const featureFlags = useFeatureFlags();
+
+  const nav: { heading: string; items: NavItem[] }[] = [
+    {
+      heading: 'FLAGS',
+      items: [{ to: '/', label: 'All Flags', icon: <IconFlag />, end: true }],
+    },
+    {
+      heading: 'OPERATIONS',
+      items: [
+        { to: '/incident',    label: 'What Changed?', icon: <IconLightning /> },
+        { to: '/approvals',   label: 'Approvals',     icon: <IconCheckCircle /> },
+        { to: '/break-glass', label: 'Break-Glass',   icon: <IconShield /> },
+      ],
+    },
+    {
+      heading: 'INTELLIGENCE',
+      items: [
+        { to: '/graph',       label: 'Causal Graph',  icon: <IconShare /> },
+        ...(featureFlags['feature-intelligence-service'] ? [
+          { to: '/governance',  label: 'Governance',    icon: <IconBarChart /> },
+          { to: '/experiments', label: 'Experiments',   icon: <IconBeaker /> },
+        ] : []),
+        ...(featureFlags['feature-marketplace-service'] ? [
+          { to: '/marketplace', label: 'Marketplace',   icon: <IconPuzzle /> },
+        ] : []),
+      ],
+    },
+  ];
 
   const openCmd = useCallback(() => setCmdOpen(true), []);
 

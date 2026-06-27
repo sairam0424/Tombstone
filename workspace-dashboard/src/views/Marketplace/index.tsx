@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { Puzzle } from 'lucide-react';
 import { MARKETPLACE_URL } from '../../config.js';
 import { EmptyState, Reveal } from '../../components/ui/index.js';
+import { useFeatureFlag } from '../../hooks/useFeatureFlags.js';
 
 interface Integration {
   id: string;
@@ -67,11 +69,24 @@ const STATUS_STYLES: Record<StatusKey, { dot: string; label: string; bg: string;
 };
 
 export default function Marketplace() {
+  const isMarketplaceAvailable = useFeatureFlag('feature-marketplace-service');
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState('all');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  if (!isMarketplaceAvailable) {
+    return (
+      <div style={{ padding: '32px 40px' }}>
+        <EmptyState
+          icon={<Puzzle size={40} />}
+          heading="Marketplace service offline"
+          body="Enable the 'feature-marketplace-service' flag in Tombstone when the marketplace service is deployed."
+        />
+      </div>
+    );
+  }
 
   async function fetchIntegrations() {
     try {
