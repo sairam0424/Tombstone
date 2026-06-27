@@ -19,8 +19,7 @@ jobs:
           node-version: '22'
 
       - name: Install dashboard deps
-        working-directory: workspace-dashboard
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build dashboard
         working-directory: workspace-dashboard
