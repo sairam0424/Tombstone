@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_URL, SDK_TOKEN } from '../../config.js';
 
 interface BGToken {
@@ -12,7 +13,7 @@ interface BGToken {
 }
 
 export default function BreakGlassView() {
-  const [tokens, setTokens] = useState<BGToken[]>([]);
+  const queryClient = useQueryClient();
   const [creating, setCreating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [form, setForm] = useState({ scope: 'all-flags', expiresInHours: 4, incidentRef: '' });
@@ -21,14 +22,15 @@ export default function BreakGlassView() {
   const token = SDK_TOKEN;
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-  const loadTokens = () => {
-    fetch(`${apiUrl}/api/v1/break-glass/tokens`, { headers })
-      .then(r => r.json())
-      .then((d: { tokens?: BGToken[] }) => setTokens(d.tokens ?? []))
-      .catch(console.error);
-  };
-
-  useEffect(() => { loadTokens(); }, []);
+  const { data: tokens = [] } = useQuery({
+    queryKey: ['break-glass-tokens'],
+    queryFn: async (): Promise<BGToken[]> => {
+      const r = await fetch(`${apiUrl}/api/v1/break-glass/tokens`, { headers });
+      if (!r.ok) return [];
+      const d = await r.json() as { tokens?: BGToken[] };
+      return d.tokens ?? [];
+    },
+  });
 
   const create = async () => {
     setCreating(true);
@@ -44,7 +46,7 @@ export default function BreakGlassView() {
       const data = await res.json() as { token?: string };
       if (data.token) {
         setNewToken(data.token);
-        loadTokens();
+        queryClient.invalidateQueries({ queryKey: ['break-glass-tokens'] });
       }
     } finally {
       setCreating(false);
