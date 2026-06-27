@@ -508,10 +508,10 @@ export default function FlagDetail() {
   // ── Loading / error states ──────────────────────────────────────────────
   if (flagLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: '#0a0a0a' }}>
-        <div className="flex items-center gap-3 text-gray-500">
-          <div className="w-4 h-4 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
-          <span className="text-sm">Loading flag…</span>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0a0a0a' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: '#6b7280' }}>
+          <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid #3b82f6', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite' }} />
+          <span style={{ fontSize: 13 }}>Loading flag…</span>
         </div>
       </div>
     );
@@ -519,15 +519,11 @@ export default function FlagDetail() {
 
   if (flagError || !flag) {
     return (
-      <div className="min-h-screen p-8" style={{ background: '#0a0a0a' }}>
-        <Link
-          to="/"
-          className="inline-flex items-center gap-1.5 text-sm transition-colors hover:text-gray-300"
-          style={{ color: '#6b7280' }}
-        >
+      <div style={{ minHeight: '100vh', padding: '32px', background: '#0a0a0a' }}>
+        <Link to="/" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#6b7280', textDecoration: 'none' }}>
           ← All Flags
         </Link>
-        <p className="text-red-400 mt-6 text-sm">
+        <p style={{ color: '#f87171', marginTop: 24, fontSize: 13 }}>
           {flagError ? String(flagError) : 'Flag not found'}
         </p>
       </div>
