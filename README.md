@@ -257,8 +257,13 @@ make down                  # Stop the stack first
 make dev                   # Rebuild
 ```
 
-**Intelligence service slow to start**
-The intelligence service downloads the BAAI/bge-m3 embedding model on first run (~400MB). This is a one-time download cached in the Docker image. Subsequent starts are fast.
+**First `make dev` takes longer than expected**
+The intelligence service image bundles the BAAI/bge-m3 embedding model (~400MB). Docker downloads and caches it during the **first build only** — you'll see it in the build output. Every subsequent `make dev` uses the cached layer and starts in seconds.
+
+```
+Step N/N : RUN python3 -c "from sentence_transformers..."
+ ---> Downloading BAAI/bge-m3...   ← this is normal, wait ~2-5min
+```
 
 ---
 
