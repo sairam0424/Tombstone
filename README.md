@@ -173,6 +173,23 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 
 ---
 
+## Documentation
+
+| Guide | What it covers |
+|-------|---------------|
+| [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
+| [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |
+| [Glossary](docs/GLOSSARY.md) | Blast radius, tombstoning, kill switch, circuit breaker, and more |
+| [Contributing](CONTRIBUTING.md) | How to set up dev environment and submit PRs |
+| [Security](SECURITY.md) | Vulnerability reporting, self-hosted security checklist, JWT setup |
+| [Support](SUPPORT.md) | Where to get help — Discussions, Issues, Security |
+
+**New to feature flags?** Start with the [User Guide](docs/USER_GUIDE.md).
+**Just ran `make dev`?** Go to [Getting Started](docs/GETTING_STARTED.md).
+**Something broken?** Check [Troubleshooting](#troubleshooting) below or open a [GitHub Issue](https://github.com/sairam0424/Tombstone/issues/new?template=bug_report.md).
+
+---
+
 ## Architecture
 
 ```
