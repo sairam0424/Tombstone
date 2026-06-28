@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PGPASSWORD=dev psql -h localhost -U tombstone -d tombstone <<'SQL'
+# Read password from infra/.env if it exists, otherwise use default
+PGPASS="${POSTGRES_PASSWORD:-tombstone-local-dev}"
+PGPASSWORD="$PGPASS" psql -h localhost -p 5433 -U tombstone -d tombstone <<'SQL'
 -- Seed sample flags for local development (idempotent)
 INSERT INTO flags (id, key, project_id, name, description, flag_type, state, owner_id, safe_default)
 VALUES

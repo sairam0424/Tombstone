@@ -1,206 +1,298 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+// workspace-dashboard/src/views/DependencyGraph/index.tsx
+import { useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { GitBranch, ZoomIn, ZoomOut, Maximize2, RefreshCw } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { API_URL, SDK_TOKEN } from '../../config.js';
 
-type Win = '1h' | '6h' | '24h' | '7d';
-const WIN_SEC: Record<Win, number> = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
+const BLAST_COLOR: Record<string, string> = {
+  HIGH:    '#f87171',
+  MEDIUM:  '#fbbf24',
+  LOW:     '#4ade80',
+  BLOCKED: '#a78bfa',
+};
+const DEFAULT_COLOR = '#4ade80';
 
-interface GNode { flagKey: string; enabled: boolean; rolloutPct: number; state: string; ownerId: string; x?: number; y?: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null; }
-interface GEdge { source: string | GNode; target: string | GNode; weight: number; coChangeCount: number; }
-interface Graph { nodes: GNode[]; edges: GEdge[]; generatedAt: number; eventCount: number; }
+interface FlagNode {
+  id: string;
+  name: string;
+  blast_radius?: string;
+}
+
+interface GraphData {
+  nodes: FlagNode[];
+  links: { source: string; target: string }[];
+}
+
+const hdrs = { Authorization: `Bearer ${SDK_TOKEN}` };
+
+// Parse a hex color string like '#f87171' → [r, g, b, a] in 0-1 range
+function hexToRgba(hex: string): [number, number, number, number] {
+  const clean = hex.replace('#', '');
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  return [r, g, b, 1.0];
+}
+
+// Build Float32Arrays expected by Cosmos.gl v2 API
+function buildCosmosData(nodes: FlagNode[], links: { source: string; target: string }[]) {
+  const n = nodes.length;
+  const idToIndex = new Map(nodes.map((node, i) => [node.id, i]));
+
+  // Random initial positions spread over a [-1, 1] grid
+  const pointPositions = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    pointPositions[i * 2]     = (Math.random() - 0.5) * 2;
+    pointPositions[i * 2 + 1] = (Math.random() - 0.5) * 2;
+  }
+
+  // RGBA per point
+  const pointColors = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const hex = BLAST_COLOR[nodes[i].blast_radius ?? 'LOW'] ?? DEFAULT_COLOR;
+    const [r, g, b, a] = hexToRgba(hex);
+    pointColors[i * 4]     = r;
+    pointColors[i * 4 + 1] = g;
+    pointColors[i * 4 + 2] = b;
+    pointColors[i * 4 + 3] = a;
+  }
+
+  // Point sizes (all same)
+  const pointSizes = new Float32Array(n).fill(5);
+
+  // Links as [sourceIdx, targetIdx, ...]
+  const validLinks = links.filter(
+    l => idToIndex.has(l.source) && idToIndex.has(l.target)
+  );
+  const linkArray = new Float32Array(validLinks.length * 2);
+  for (let i = 0; i < validLinks.length; i++) {
+    linkArray[i * 2]     = idToIndex.get(validLinks[i].source)!;
+    linkArray[i * 2 + 1] = idToIndex.get(validLinks[i].target)!;
+  }
+
+  return { pointPositions, pointColors, pointSizes, linkArray, idToIndex };
+}
 
 export default function DependencyGraph() {
-  const svgRef = useRef<SVGSVGElement>(null);
-  const simRef = useRef<unknown>(null);
-  const [graph, setGraph] = useState<Graph | null>(null);
-  const [selected, setSelected] = useState<GNode | null>(null);
-  const [win, setWin] = useState<Win>('6h');
-  const [env, setEnv] = useState('production');
-  const [loading, setLoading] = useState(false);
-  const [killing, setKilling] = useState(false);
+  const navigate = useNavigate();
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const cosmosRef = useRef<unknown>(null);
+  // Keep a stable reference to the nodes array so onClick can look up by index
+  const nodesRef = useRef<FlagNode[]>([]);
 
-  const INTEL = 'http://localhost:8083';
-  const API = 'http://localhost:8081';
-  const TOK = 'sdk-dev-token-change-in-prod';
-
-  const fetchGraph = useCallback(async () => {
-    setLoading(true);
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      const from = now - WIN_SEC[win];
-      const r = await fetch(
-        INTEL + '/api/v1/dependency-graph?environment=' + env + '&from_unix=' + from + '&to_unix=' + now,
-        { method: 'POST' }
-      );
-      if (r.ok) setGraph(await r.json());
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  }, [win, env]);
-
-  useEffect(() => { fetchGraph(); }, [fetchGraph]);
-
-  useEffect(() => {
-    if (!graph || !svgRef.current || !graph.nodes.length) return;
-    import('d3').then(d3 => {
-      const el = svgRef.current!;
-      const W = el.parentElement?.clientWidth || 900;
-      const H = el.parentElement?.clientHeight || 600;
-      const svg = d3.select(el).attr('width', W).attr('height', H);
-      svg.selectAll('*').remove();
-      const g = svg.append('g');
-      svg.call(
-        d3.zoom<SVGSVGElement, unknown>()
-          .scaleExtent([0.2, 4])
-          .on('zoom', e => g.attr('transform', e.transform))
-      );
-
-      const nodes: GNode[] = graph.nodes.map(n => ({ ...n }));
-      const links: GEdge[] = graph.edges.map(e => ({ ...e }));
-
-      const sim = d3.forceSimulation(nodes as d3.SimulationNodeDatum[])
-        .force('link', d3.forceLink(links).id((d: d3.SimulationNodeDatum) => (d as GNode).flagKey).distance(130))
-        .force('charge', d3.forceManyBody().strength(-250))
-        .force('center', d3.forceCenter(W / 2, H / 2))
-        .force('collide', d3.forceCollide(30));
-      simRef.current = sim;
-
-      const link = g.append('g').selectAll('line').data(links).join('line')
-        .attr('stroke', '#30363d')
-        .attr('stroke-width', (d: GEdge) => Math.min(4, d.coChangeCount + 1))
-        .attr('stroke-opacity', (d: GEdge) => 0.15 + d.weight * 0.75);
-
-      const drag = d3.drag<SVGGElement, GNode>()
-        .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-        .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-        .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; });
-
-      const node = g.append('g').selectAll<SVGGElement, GNode>('g').data(nodes).join('g')
-        .attr('cursor', 'pointer')
-        .call(drag)
-        .on('click', (_, d) => setSelected(d));
-
-      node.append('circle').attr('r', 16)
-        .attr('fill', (d: GNode) => d.enabled ? '#1a3520' : '#1a1a22')
-        .attr('stroke', (d: GNode) => d.enabled ? '#3fb950' : '#30363d')
-        .attr('stroke-width', 2);
-
-      node.append('text').attr('dy', 30).attr('text-anchor', 'middle')
-        .attr('font-size', '9px').attr('fill', '#6e7681')
-        .text((d: GNode) => { const p = d.flagKey.split('.'); return p[p.length - 1].slice(0, 12); });
-
-      sim.on('tick', () => {
-        link
-          .attr('x1', (d: GEdge) => (d.source as GNode).x || 0)
-          .attr('y1', (d: GEdge) => (d.source as GNode).y || 0)
-          .attr('x2', (d: GEdge) => (d.target as GNode).x || 0)
-          .attr('y2', (d: GEdge) => (d.target as GNode).y || 0);
-        node.attr('transform', (d: GNode) => 'translate(' + (d.x || 0) + ',' + (d.y || 0) + ')');
-      });
-    });
-    return () => {
-      if (simRef.current) (simRef.current as { stop: () => void }).stop();
-    };
-  }, [graph]);
-
-  const killFlag = async (flagKey: string) => {
-    setKilling(true);
-    try {
-      await fetch(API + '/api/v1/flags/' + flagKey + '/kill', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + TOK, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ environment: env, reason: 'kill from dependency graph' }),
-      });
-      setSelected(null);
-      fetchGraph();
-    } finally { setKilling(false); }
-  };
-
-  const btnStyle = (active: boolean, col: string): React.CSSProperties => ({
-    padding: '6px 13px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-    border: '1px solid ' + (active ? col : '#21262d'),
-    background: active ? col + '18' : 'transparent',
-    color: active ? col : '#6e7681', transition: 'all 0.15s',
+  const { data: graphData, isLoading, refetch } = useQuery({
+    queryKey: ['graph', 'flags'],
+    queryFn: async (): Promise<GraphData> => {
+      const r = await fetch(`${API_URL}/api/v1/flags`, { headers: hdrs });
+      if (!r.ok) throw new Error('Failed to fetch flags');
+      const d = await r.json() as {
+        flags?: Array<{ key: string; name: string; flag_type: string; prerequisite_flags?: string[] }>;
+      };
+      const flags = d.flags ?? [];
+      return {
+        nodes: flags.map(f => ({ id: f.key, name: f.name || f.key })),
+        links: flags.flatMap(f =>
+          (f.prerequisite_flags ?? []).map(dep => ({ source: f.key, target: dep }))
+        ),
+      };
+    },
+    // Fallback demo data shown while waiting for API
+    placeholderData: {
+      nodes: [
+        { id: 'auth-v2',      name: 'Auth V2',     blast_radius: 'HIGH' },
+        { id: 'new-checkout', name: 'New Checkout', blast_radius: 'MEDIUM' },
+        { id: 'dark-mode',    name: 'Dark Mode',    blast_radius: 'LOW' },
+        { id: 'feature-x',   name: 'Feature X',    blast_radius: 'LOW' },
+      ],
+      links: [
+        { source: 'new-checkout', target: 'auth-v2' },
+        { source: 'feature-x',   target: 'new-checkout' },
+      ],
+    },
   });
 
+  // Init (or reinit) Cosmos.gl whenever data changes
+  useEffect(() => {
+    if (!canvasRef.current || !graphData || graphData.nodes.length === 0) return;
+
+    let cancelled = false;
+
+    import('@cosmograph/cosmos').then(mod => {
+      if (cancelled || !canvasRef.current) return;
+
+      // Destroy previous instance before creating a new one
+      const prev = cosmosRef.current as { destroy?: () => void } | null;
+      prev?.destroy?.();
+      cosmosRef.current = null;
+
+      nodesRef.current = graphData.nodes;
+      const { pointPositions, pointColors, pointSizes, linkArray } =
+        buildCosmosData(graphData.nodes, graphData.links);
+
+      // Cosmos.gl v2 constructor: Graph(div, config)
+      // TypeScript types are accurate in beta — cast via unknown to allow our ref type
+      const GraphClass = mod.Graph as unknown as new (
+        div: HTMLDivElement,
+        config: Record<string, unknown>
+      ) => {
+        setPointPositions: (pos: Float32Array) => void;
+        setPointColors: (colors: Float32Array) => void;
+        setPointSizes: (sizes: Float32Array) => void;
+        setLinks: (links: Float32Array) => void;
+        render: () => void;
+        fitView: (duration?: number) => void;
+        zoom: (value: number, duration?: number) => void;
+        pause: () => void;
+        destroy: () => void;
+      };
+
+      const cosmos = new GraphClass(canvasRef.current, {
+        backgroundColor: '#07080d',
+        pointSize: 5,
+        linkColor: '#1f2433',
+        linkWidth: 1,
+        simulationRepulsion: 0.5,
+        simulationLinkDistance: 80,
+        simulationGravity: 0.1,
+        fitViewDelay: 300,
+        fitViewPadding: 0.2,
+        enableDrag: true,
+        hoveredPointCursor: 'pointer',
+        renderHoveredPointRing: true,
+        // onClick receives point index (number | undefined) in Cosmos v2
+        onClick: (index: number | undefined) => {
+          if (index != null) {
+            const node = nodesRef.current[index];
+            if (node) navigate(`/flags/${node.id}`);
+          }
+        },
+      });
+
+      cosmos.setPointPositions(pointPositions);
+      cosmos.setPointColors(pointColors);
+      cosmos.setPointSizes(pointSizes);
+      cosmos.setLinks(linkArray);
+      cosmos.render();
+
+      cosmosRef.current = cosmos;
+    });
+
+    return () => {
+      cancelled = true;
+      const cosmos = cosmosRef.current as { destroy?: () => void } | null;
+      cosmos?.destroy?.();
+      cosmosRef.current = null;
+    };
+  }, [graphData, navigate]);
+
+  const handleZoomIn  = useCallback(() => {
+    (cosmosRef.current as { zoom?: (v: number) => void } | null)?.zoom?.(3);
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    (cosmosRef.current as { zoom?: (v: number) => void } | null)?.zoom?.(0.5);
+  }, []);
+
+  const handleFit = useCallback(() => {
+    (cosmosRef.current as { fitView?: () => void } | null)?.fitView?.();
+  }, []);
+
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#080c14' }}>
-      <div style={{ padding: '20px 28px 14px', borderBottom: '1px solid #21262d' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e6edf3', margin: '0 0 4px' }}>Causal Dependency Graph</h1>
-            <p style={{ fontSize: 13, color: '#6e7681', margin: 0 }}>
-              Flags changed together within 5 min — thicker edges = stronger coupling
-              {graph ? ' · ' + graph.nodes.length + ' nodes · ' + graph.edges.length + ' edges · ' + graph.eventCount + ' events' : ''}
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            {(['development', 'staging', 'production'] as const).map(e =>
-              <button key={e} onClick={() => setEnv(e)} style={btnStyle(env === e, '#58a6ff')}>{e}</button>
-            )}
-            <div style={{ width: 1, background: '#21262d', margin: '0 3px' }} />
-            {(['1h', '6h', '24h', '7d'] as Win[]).map(w =>
-              <button key={w} onClick={() => setWin(w)} style={btnStyle(win === w, '#3fb950')}>{w}</button>
-            )}
-            <button onClick={fetchGraph} style={btnStyle(false, '#58a6ff')}>↻</button>
-          </div>
+    <div style={{
+      padding: '24px 32px',
+      display: 'flex',
+      flexDirection: 'column',
+      height: 'calc(100vh - 60px)',
+      gap: 16,
+    }}>
+
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-fg)', margin: '0 0 4px' }}>
+            Causal Graph
+          </h1>
+          <p style={{ fontSize: 13, color: 'var(--color-fg-subtle)', margin: 0 }}>
+            {isLoading
+              ? 'Loading…'
+              : `${graphData?.nodes.length ?? 0} flags · ${graphData?.links.length ?? 0} dependencies`}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { icon: ZoomIn,    label: 'Zoom in',  fn: handleZoomIn },
+            { icon: ZoomOut,   label: 'Zoom out', fn: handleZoomOut },
+            { icon: Maximize2, label: 'Fit',      fn: handleFit },
+            { icon: RefreshCw, label: 'Refresh',  fn: () => void refetch() },
+          ].map(({ icon: Icon, label, fn }) => (
+            <button
+              key={label}
+              onClick={fn}
+              title={label}
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 8,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'var(--color-bg-elevated)',
+                border: '1px solid var(--color-border)',
+                color: 'var(--color-fg-muted)',
+                cursor: 'pointer',
+              }}
+            >
+              <Icon size={14} />
+            </button>
+          ))}
         </div>
       </div>
 
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {loading && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#484f58' }}>
-            Building graph…
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 16 }}>
+        {Object.entries(BLAST_COLOR).map(([label, color]) => (
+          <div
+            key={label}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 11,
+              color: 'var(--color-fg-subtle)',
+            }}
+          >
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
+            {label}
           </div>
-        )}
-        {!loading && graph && !graph.nodes.length && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#484f58', textAlign: 'center' }}>
-            <div style={{ fontSize: 40, marginBottom: 8 }}>◎</div>
-            No co-occurrences in this window.<br />
-            <span style={{ fontSize: 12 }}>Try a wider time range or make some flag changes first.</span>
-          </div>
-        )}
-        <svg ref={svgRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+        ))}
+      </div>
 
-        {selected && (
-          <div style={{ position: 'absolute', top: 16, right: 16, width: 256, background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-              <code style={{ fontSize: 11, color: '#58a6ff', wordBreak: 'break-all', maxWidth: 200 }}>{selected.flagKey}</code>
-              <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', color: '#484f58', cursor: 'pointer', fontSize: 18, padding: 0 }}>×</button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-              {[
-                { l: 'Status', v: selected.enabled ? 'ENABLED' : 'DISABLED', c: selected.enabled ? '#3fb950' : '#484f58' },
-                { l: 'Rollout', v: selected.rolloutPct + '%', c: '#e6edf3' },
-                { l: 'State', v: selected.state, c: '#8b949e' },
-                { l: 'Owner', v: (selected.ownerId || '').split('@')[0], c: '#8b949e' },
-              ].map(s => (
-                <div key={s.l} style={{ background: '#161b22', borderRadius: 6, padding: '7px 10px' }}>
-                  <div style={{ fontSize: 10, color: '#484f58', marginBottom: 2 }}>{s.l}</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: s.c, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.v}</div>
-                </div>
-              ))}
-            </div>
-            {selected.enabled && (
-              <button
-                onClick={() => killFlag(selected.flagKey)}
-                disabled={killing}
-                style={{
-                  width: '100%', padding: 8, borderRadius: 6, fontSize: 12, fontWeight: 600,
-                  background: '#300', border: '1px solid #611', color: '#ff7b7b', cursor: 'pointer',
-                }}
-              >
-                {killing ? 'Disabling…' : '⚡ Kill Switch — ' + env}
-              </button>
-            )}
+      {/* Canvas */}
+      <div style={{
+        flex: 1,
+        borderRadius: 12,
+        border: '1px solid var(--color-border)',
+        overflow: 'hidden',
+        background: '#07080d',
+        position: 'relative',
+      }}>
+        {isLoading && (
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--color-fg-subtle)',
+            flexDirection: 'column',
+            gap: 12,
+          }}>
+            <GitBranch size={40} style={{ opacity: 0.3 }} />
+            <div style={{ fontSize: 14 }}>Loading dependency graph…</div>
           </div>
         )}
-
-        <div style={{ position: 'absolute', bottom: 16, left: 16, background: '#0d1117', border: '1px solid #21262d', borderRadius: 8, padding: '8px 14px', display: 'flex', gap: 14, fontSize: 11, color: '#6e7681' }}>
-          {[{ c: '#3fb950', l: 'Enabled' }, { c: '#484f58', l: 'Disabled' }].map(i =>
-            <div key={i.l} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: i.c }} />{i.l}
-            </div>
-          )}
-          <span style={{ borderLeft: '1px solid #21262d', paddingLeft: 12 }}>Thicker = more co-changes</span>
-        </div>
+        <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
       </div>
     </div>
   );

@@ -8,6 +8,11 @@
   "engines": {
     "vscode": "^1.90.0"
   },
+  "icon": "images/icon.png",
+  "galleryBanner": { "color": "#0d1117", "theme": "dark" },
+  "repository": { "type": "git", "url": "https://github.com/sairam0424/Tombstone" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
   "categories": [
     "Other"
   ],

@@ -84,7 +84,7 @@ func (d *Dispatcher) deliver(ctx context.Context, i registry.Integration, event 
 		)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		d.logger.Info("webhook: delivered",

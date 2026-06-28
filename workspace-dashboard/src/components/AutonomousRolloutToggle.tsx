@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { INTEL_URL } from '../config.js';
 
 interface PosteriorData {
   alpha: number;
@@ -23,8 +24,6 @@ interface Props {
   environment: string;
   currentRolloutPct: number;
 }
-
-const INTEL_URL = 'http://localhost:8083';
 
 export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPct }: Props) {
   const [posterior, setPosterior] = useState<PosteriorData | null>(null);

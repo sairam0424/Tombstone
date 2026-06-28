@@ -1,0 +1,66 @@
+name: Deploy Dashboard to Vercel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workspace-dashboard/**'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-dashboard-vercel.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dashboard deps
+        run: npm ci --ignore-scripts
+
+      - name: Build dashboard
+        working-directory: workspace-dashboard
+        env:
+          VITE_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          VITE_GATEWAY_URL: ${{ vars.TOMBSTONE_GATEWAY_URL }}
+          VITE_INTEL_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          VITE_EVAL_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
+          VITE_SDK_TOKEN: ${{ secrets.TOMBSTONE_SDK_TOKEN }}
+        run: npm run build
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ vars.VERCEL_DEPLOY_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dashboard deps
+        run: npm ci --ignore-scripts
+
+      - name: Build dashboard
+        working-directory: workspace-dashboard
+        env:
+          VITE_API_URL: ${{ vars.TOMBSTONE_API_URL }}
+          VITE_GATEWAY_URL: ${{ vars.TOMBSTONE_GATEWAY_URL }}
+          VITE_INTEL_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
+          VITE_EVAL_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
+          VITE_SDK_TOKEN: ${{ secrets.TOMBSTONE_SDK_TOKEN }}
+        run: npm run build
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: workspace-dashboard
+          vercel-args: '--prod'

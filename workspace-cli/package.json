@@ -1,7 +1,19 @@
 {
-  "name": "@tombstone/cli",
+  "name": "@tomb-stone/cli",
   "version": "0.1.0",
   "type": "module",
+  "description": "Tombstone CLI — manage feature flags, blast radius, and kill switches from the terminal",
+  "keywords": [
+    "feature-flags",
+    "cli",
+    "tombstone",
+    "devops",
+    "kill-switch"
+  ],
+  "repository": { "type": "git", "url": "git+https://github.com/sairam0424/Tombstone.git" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "bin": { "tombstone": "./dist/index.js" },
   "scripts": {
     "build": "tsc",

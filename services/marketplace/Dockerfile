@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -15,6 +15,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # ── runtime stage ─────────────────────────────────────────────────────────────
 FROM alpine:3.19
+LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
+      org.opencontainers.image.description="Tombstone marketplace service" \
+      org.opencontainers.image.licenses="MIT"
 
 RUN apk add --no-cache ca-certificates tzdata
 

@@ -243,7 +243,7 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	mac := hmac.New(sha256.New, []byte(secret))
 
@@ -271,7 +271,7 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		}
 
 		mac.Write(line)
-		fmt.Fprintf(w, "%s\n", line)
+		_, _ = fmt.Fprintf(w, "%s\n", line)
 		lineCount++
 	}
 
@@ -282,5 +282,5 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		"line_count":  lineCount,
 		"exported_at": time.Now().Unix(),
 	})
-	fmt.Fprintf(w, "%s\n", sigLine)
+	_, _ = fmt.Fprintf(w, "%s\n", sigLine)
 }

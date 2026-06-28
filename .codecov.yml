@@ -1,0 +1,27 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 60%
+        threshold: 5%
+    patch:
+      default:
+        target: 50%
+
+comment:
+  layout: "reach,diff,flags"
+  behavior: default
+
+flags:
+  go:
+    paths:
+      - services/
+    carryforward: true
+  python:
+    paths:
+      - services/intelligence/
+    carryforward: true
+  typescript:
+    paths:
+      - packages/
+    carryforward: true

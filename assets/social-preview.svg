@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#0d1117"/>
+
+  <!-- Subtle grid lines -->
+  <line x1="0" y1="1" x2="1280" y2="1" stroke="#21262d" stroke-width="1"/>
+  <line x1="0" y1="639" x2="1280" y2="639" stroke="#21262d" stroke-width="1"/>
+
+  <!-- Left accent bar -->
+  <rect x="72" y="100" width="4" height="440" rx="2" fill="#58a6ff"/>
+
+  <!-- Mini tombstone icon -->
+  <g transform="translate(96, 108) scale(0.22)">
+    <path d="M 136 480 L 136 220 A 120 120 0 0 1 376 220 L 376 480 Z" fill="#21262d" stroke="#58a6ff" stroke-width="8"/>
+    <line x1="176" y1="320" x2="336" y2="320" stroke="#58a6ff" stroke-width="6" stroke-linecap="round"/>
+    <line x1="196" y1="356" x2="316" y2="356" stroke="#58a6ff" stroke-width="5" stroke-linecap="round"/>
+    <rect x="104" y="476" width="304" height="20" rx="4" fill="#21262d" stroke="#58a6ff" stroke-width="6"/>
+    <rect x="80" y="490" width="352" height="14" rx="4" fill="#21262d" stroke="#58a6ff" stroke-width="5"/>
+  </g>
+
+  <!-- Title -->
+  <text x="200" y="190" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="88" font-weight="700" fill="#f0f6fc" letter-spacing="-2">Tombstone</text>
+
+  <!-- Tagline -->
+  <text x="200" y="258" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="30" fill="#8b949e" letter-spacing="0.2">Production intelligence layer for feature flags</text>
+
+  <!-- Divider -->
+  <line x1="200" y1="296" x2="900" y2="296" stroke="#21262d" stroke-width="1.5"/>
+
+  <!-- Feature badges row -->
+  <!-- Badge 1 -->
+  <rect x="200" y="324" width="292" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="346" y="351" font-family="'Segoe UI', system-ui, sans-serif" font-size="17" fill="#58a6ff" text-anchor="middle" font-weight="500">⚡ Circuit-Breaker Auto-Rollback</text>
+
+  <!-- Badge 2 -->
+  <rect x="508" y="324" width="224" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="620" y="351" font-family="'Segoe UI', system-ui, sans-serif" font-size="17" fill="#58a6ff" text-anchor="middle" font-weight="500">🎯 Blast Radius Gates</text>
+
+  <!-- Badge 3 -->
+  <rect x="748" y="324" width="222" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="859" y="351" font-family="'Segoe UI', system-ui, sans-serif" font-size="17" fill="#58a6ff" text-anchor="middle" font-weight="500">🧠 ML-Driven Rollout</text>
+
+  <!-- Second row badges -->
+  <!-- Badge 4 -->
+  <rect x="200" y="384" width="194" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="297" y="409" font-family="'Segoe UI', system-ui, sans-serif" font-size="15" fill="#3fb950" text-anchor="middle" font-weight="500">🔗 OpenFeature SDK</text>
+
+  <!-- Badge 5 -->
+  <rect x="410" y="384" width="188" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="504" y="409" font-family="'Segoe UI', system-ui, sans-serif" font-size="15" fill="#3fb950" text-anchor="middle" font-weight="500">🔒 Merkle Audit Trail</text>
+
+  <!-- Badge 6 -->
+  <rect x="614" y="384" width="178" height="40" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="703" y="409" font-family="'Segoe UI', system-ui, sans-serif" font-size="15" fill="#3fb950" text-anchor="middle" font-weight="500">📊 5,000+ Flags</text>
+
+  <!-- Bottom bar -->
+  <rect x="0" y="560" width="1280" height="80" fill="#161b22"/>
+  <line x1="0" y1="560" x2="1280" y2="560" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Bottom left: quick start -->
+  <text x="96" y="592" font-family="'Courier New', monospace" font-size="20" fill="#3fb950">$ make dev</text>
+  <text x="96" y="618" font-family="'Segoe UI', system-ui, sans-serif" font-size="16" fill="#6e7681">All 8 services start in one command · Self-hosted · MIT License</text>
+
+  <!-- Bottom right: GitHub -->
+  <text x="1184" y="605" font-family="'Segoe UI', system-ui, sans-serif" font-size="18" fill="#8b949e" text-anchor="end">github.com/sairam0424/Tombstone</text>
+
+  <!-- Stack pills bottom right -->
+  <text x="1184" y="628" font-family="'Segoe UI', system-ui, sans-serif" font-size="14" fill="#6e7681" text-anchor="end">Go · Python · TypeScript</text>
+</svg>
