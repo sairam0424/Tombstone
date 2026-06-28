@@ -7,7 +7,9 @@ infra/.env
 services/*/bin/
 services/*/main
 infra/terraform/provider/main
-**/main
+# Go binary named 'main' — only match files, not directories
+services/**/main
+packages/**/main
 
 # Python
 **/__pycache__/
@@ -34,5 +36,20 @@ Thumbs.db
 **/*.test
 **/testdata/tmp/
 
+# Claude Code worktrees
+.claude/worktrees/
+
 # Go workspace sum (regenerated)
 go.work.sum
+infra/.env.secrets
+
+# Private scratch workspace — never commit
+scratch-pad/
+
+# Superpowers session plan files — may contain credentials/tokens
+# Note: plans/ subdir is intentionally tracked (no secrets, implementation plans only)
+docs/superpowers/plans/.gitignore
+
+# TypeScript build cache
+**/*.tsbuildinfo
+.gstack/
