@@ -13,14 +13,35 @@ metrics from intelligence, writes to metrics/health.jsonl, and creates a
 signal when health_score < 0.8 or stale count > 50.
 
 **Entry point:** `scripts/loop-governance.sh`
-**Trigger:** weekly Monday 06:00 UTC (`.github/workflows/loop-governance.yml`)
+**Activation:** These loops run as local scripts. Activate by running: `bash scripts/loop-governance.sh`
 **APIs used:** flag-api `/api/v1/compliance/evidence`, intelligence `/api/v1/stale`
+
+## Alert thresholds
+
+| Metric | Threshold | Action |
+|--------|-----------|--------|
+| `health_score` | < 0.80 | Log alert + send Slack message (if `SLACK_WEBHOOK_URL` set) + create signal file |
+| `stale_count` | > 50 | Log alert + send Slack message (if `SLACK_WEBHOOK_URL` set) + create signal file |
+
+The alert is a single Slack message sent via `curl POST` to `SLACK_WEBHOOK_URL`.
+If `SLACK_WEBHOOK_URL` is not set, the condition is logged but no HTTP call is made — the loop never errors out on missing webhook config.
+Signal file is always written to `signals/governance-alert-YYYY-MM-DD.md` (idempotent — one per day).
+
+## Environment variables
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `FLAG_API_URL` | no | `http://localhost:8081` | flag-api base URL |
+| `INTELLIGENCE_URL` | no | `http://localhost:8083` | intelligence service base URL |
+| `SLACK_WEBHOOK_URL` | no | — | Incoming webhook URL for alert messages |
+| `TOMBSTONE_API_URL` | no | — | Used in Slack message review link (falls back to `FLAG_API_URL`) |
 
 ## Current focus
 - Wire weekly cron trigger and verify first metrics write
 
 ## Backlog
 - [ ] Wire weekly cron and verify metrics collector runs clean
+- [x] Add Slack alert when health_score < 0.80 or stale_count > 50 (done 2026-06-28)
 - [ ] Add health trend chart to dashboard (7-week rolling)
 - [ ] Create governance-YYYY-WW.md doc when health < 0.8 for 2+ consecutive weeks
 - [ ] SOC2 evidence export integration
@@ -33,4 +54,6 @@ Collector writes to `domains/governance/metrics/health.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | health_score=X stale=Y -->
-2026-06-24 | Loop scaffolded and deployed to main. Weekly Monday cron wired (06:00 UTC). Pending GitHub Actions var TOMBSTONE_API_URL to activate.
+2026-06-24 | Loop scaffolded and deployed to main. Local script ready (weekly Monday 06:00 UTC schedule recommended).
+2026-06-27 | Converted to local-first v1.0.0 self-hosted activation via bash scripts/loop-governance.sh
+2026-06-28 | Added Slack alert-sending when health_score < 0.80 or stale_count > 50; SLACK_WEBHOOK_URL is optional (logs only if unset)

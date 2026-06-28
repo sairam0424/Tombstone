@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,15 +25,18 @@ type SlackApp struct {
 	botToken      string // SLACK_BOT_TOKEN (xoxb-...)
 	signingSecret string // SLACK_SIGNING_SECRET
 	apiURL        string // flag-api URL for fetching flag state
+	flagAPIToken  string // FLAG_API_TOKEN — Bearer token for flag-api RBAC (flags:kill_switch)
 	httpClient    *http.Client
 }
 
 // NewSlackApp constructs a SlackApp with the given credentials and flag-api URL.
-func NewSlackApp(botToken, signingSecret, apiURL string) *SlackApp {
+// flagAPIToken must carry the flags:kill_switch RBAC permission on flag-api.
+func NewSlackApp(botToken, signingSecret, apiURL, flagAPIToken string) *SlackApp {
 	return &SlackApp{
 		botToken:      botToken,
 		signingSecret: signingSecret,
 		apiURL:        apiURL,
+		flagAPIToken:  flagAPIToken,
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -100,6 +104,13 @@ type Confirm struct {
 	Confirm TextObj `json:"confirm"`
 	Deny    TextObj `json:"deny"`
 	Style   string  `json:"style,omitempty"` // "danger"
+}
+
+// HasSigningSecret reports whether a signing secret was provided at construction time.
+// Use this as the guard condition for signature verification — it uses the same value
+// as VerifySignature, preventing the split-brain where os.Getenv and s.signingSecret diverge.
+func (s *SlackApp) HasSigningSecret() bool {
+	return s.signingSecret != ""
 }
 
 // VerifySignature verifies a Slack request signature using timing-safe HMAC-SHA256.
@@ -492,8 +503,33 @@ func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	}, nil
 }
 
+// isAuthorizedKillSwitchUser returns true when the Slack user ID is allowed to
+// execute kill switches. Authorization is controlled by the SLACK_KILL_SWITCH_ALLOWED_USERS
+// env var — a comma-separated list of Slack user IDs (e.g. "U0123ABCD,U9876ZXYW").
+// When the env var is not set, all users are denied (fail-closed).
+func (s *SlackApp) isAuthorizedKillSwitchUser(slackUserID string) bool {
+	allowed := os.Getenv("SLACK_KILL_SWITCH_ALLOWED_USERS")
+	if allowed == "" {
+		return false // fail-closed: no explicit allowlist → nobody allowed
+	}
+	for _, uid := range strings.Split(allowed, ",") {
+		if strings.TrimSpace(uid) == slackUserID {
+			return true
+		}
+	}
+	return false
+}
+
 // executeKillSwitch calls flag-api to disable a flag and posts confirmation.
+// Requires action.UserID to be in SLACK_KILL_SWITCH_ALLOWED_USERS — fail-closed.
 func (s *SlackApp) executeKillSwitch(action BlockAction) error {
+	if !s.isAuthorizedKillSwitchUser(action.UserID) {
+		return s.postResponse(action.ResponseURL, SlackMessage{
+			ResponseType: "ephemeral",
+			Text:         "⛔ You are not authorized to execute kill switches. Contact a Tombstone admin.",
+		})
+	}
+
 	parts := strings.SplitN(action.Value, "|", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("kill_switch_confirm: malformed value %q", action.Value)
@@ -516,6 +552,7 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 		return fmt.Errorf("kill switch: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.flagAPIToken)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

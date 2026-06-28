@@ -1,9 +1,31 @@
 [project]
-name = "tombstone"
+name = "tombstone-sdk"
 version = "0.1.0"
-description = "FlagMind Python SDK — server-side feature flag evaluation"
+description = "Tombstone Python SDK — server-side feature flag evaluation with OpenFeature support"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Tombstone", email = "support@tombstone.dev" }]
+keywords = ["feature-flags", "tombstone", "openfeature", "devops", "self-hosted"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries",
+]
 dependencies = ["httpx>=0.27.0", "mmh3>=4.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/sairam0424/Tombstone"
+Issues = "https://github.com/sairam0424/Tombstone/issues"
+Repository = "https://github.com/sairam0424/Tombstone"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tombstone"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
 
 [tool.uv]
 dev-dependencies = ["pytest>=8.0.0"]

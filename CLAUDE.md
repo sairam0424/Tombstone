@@ -4,7 +4,7 @@ Tombstone is the **production intelligence layer** for feature flags at scale. I
 
 **Core thesis:** Every competitor asks "how do I deliver a flag value?" — Tombstone asks "which of my 5,000 active flags is responsible for what's happening in production right now?"
 
-**Current version: v2.0.1**
+**Current version: v1.1.0**
 
 ## Architecture
 
