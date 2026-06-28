@@ -112,3 +112,5 @@ vsce publish
 | dev.to (comparison post) | https://dev.to/sai_ram_0000/tombstone-vs-unleash-vs-flagsmith-vs-flipt-vs-growthbook-feature-flag-platforms-compared-2026-5cb3 | 2026-06-28 |
 | dev.to (comparison post) | https://dev.to/sai_ram_0000/tombstone-vs-unleash-vs-flagsmith-vs-flipt-vs-growthbook-feature-flag-platforms-compared-2026-5cb3 | 2026-06-28 |
 | dev.to (full story / main article) | https://dev.to/sai_ram_0000/how-i-built-tombstone-a-self-hosted-feature-flag-intelligence-platform-to-prevent-the-next-knight-10lp | 2026-06-28 |
+| DevOps Weekly (email) | gareth@morethanseven.net | 2026-06-28 |
+| Go Weekly (email) | peter@cooperpress.com | 2026-06-28 |
