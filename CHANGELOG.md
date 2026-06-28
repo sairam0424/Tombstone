@@ -11,6 +11,53 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.0] - 2026-06-28
+
+First increment of the public self-hosted release. All changes are backward-compatible — `make dev` and existing `.env` files continue to work without modification.
+
+### Added
+
+**Slack Integration (marketplace service)**
+- `POST /api/v1/marketplace/slack/commands` — slash command handler (`/tombstone status`, `kill`, `list`, `search`)
+- `POST /api/v1/marketplace/slack/actions` — block action handler (Kill Switch button, dismiss)
+- Signature verification using `SLACK_SIGNING_SECRET` via timing-safe HMAC-SHA256
+- Kill switch authorization gated by `SLACK_KILL_SWITCH_ALLOWED_USERS` (comma-separated Slack user IDs, fail-closed)
+
+**Governance Loop**
+- `scripts/loop-governance.sh` now sends Slack alerts when `health_score < 0.80` or `stale_count > 50`
+- Requires `SLACK_WEBHOOK_URL`; gracefully skips when unset
+- `domains/governance/README.md` — charter, cadence, metrics thresholds, activation vars
+
+**Redis Streams (flag delivery)**
+- flag-api publishes events to `tombstone:stream:{environment}` via `XADD` alongside legacy `PUBLISH`
+- gateway defaults to `CONSUMER_BACKEND: streams` — uses `XREADGROUP`/`XACK` consumer group (`gateway-workers`)
+- Kafka is now optional (only needed if `CONSUMER_BACKEND=kafka`); marked as such in `docker-compose.yml` and README
+
+**Test Coverage**
+- flag-api: CreateFlag validation (table-driven), Merkle chain integrity, audit hash
+- evaluator: blast radius tier classification (BLOCKED/HIGH/MEDIUM/LOW), rollback execution mock
+- gateway: SSE hub multi-client broadcast, backpressure lag event
+- flag-api/tlsutil: full PKI chain + mTLS round-trip integration test, TLS 1.3 enforcement, opt-in fallback
+
+### Changed
+- `.env.example`: added `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_WEBHOOK_URL`, `SLACK_KILL_SWITCH_ALLOWED_USERS`
+- `.env.example` `CONSUMER_BACKEND` documentation corrected: `=redis` → `=streams`
+- Kafka service in `docker-compose.yml` marked `# Optional — only needed if CONSUMER_BACKEND=kafka`
+
+### Fixed
+- Slack kill switch now correctly sets `Authorization: Bearer <FLAG_API_TOKEN>` on flag-api requests (was silently failing with 401)
+- Slack signature guard and HMAC key now use the same startup snapshot (`HasSigningSecret()`) — eliminates split-brain if env var changes post-startup
+
+---
+
+## [1.0.0] - 2026-06-27
+
+First public self-hosted release. See prior CHANGELOG entries for full development history.
+
+---
+
+<!-- Internal development versions below — not public releases -->
+
 ## [2.2.0] - 2026-06-24
 
 ### Added — Fly.io Free-Tier Deployment

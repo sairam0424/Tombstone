@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.0.0
+## What Is in v1.1.0
 
-This is the first stable self-hosted release of Tombstone. Everything runs locally with `make dev`.
+This is the v1.1.0 self-hosted release of Tombstone. Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -175,8 +175,11 @@ This is the first stable self-hosted release of Tombstone. Everything runs local
 | TypeScript/Python/React SDKs | Stable |
 | MCP server | Stable |
 | Cmd+K command palette | Stable |
+| Slack slash commands + kill switch | Stable |
+| Redis Streams flag delivery | Stable |
+| Governance loop Slack alerts | Stable |
 
-Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra/ for those guides.
+Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.1.0 details.
 
 ---
 
