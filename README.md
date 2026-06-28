@@ -186,6 +186,7 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 |-------|---------------|
 | [Why Tombstone](docs/WHY_TOMBSTONE.md) | USPs, competitive comparison, use cases, honest caveats — start here to evaluate |
 | [Discoverability Roadmap](docs/DISCOVERABILITY.md) | GitHub topics, OSS launch strategy, awesome-go, CNCF, OpenFeature — how to grow Tombstone |
+| [Discoverability Log](docs/DISCOVERABILITY_LOG.md) | Every distribution action taken — packages published, articles live, PRs open, newsletters sent |
 | [Submission Guide](docs/SUBMISSION_GUIDE.md) | Every platform where Tombstone can be listed — 77 platforms, prioritized by effort/impact with exact URLs and steps |
 | [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
 | [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |
