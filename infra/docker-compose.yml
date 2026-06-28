@@ -33,6 +33,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
+    # Optional — only needed if CONSUMER_BACKEND=kafka
     image: confluentinc/cp-kafka:7.6.0
     depends_on: [zookeeper]
     ports:
@@ -82,6 +83,7 @@ services:
       FLAG_API_URL: http://flag-api:8081
       MTLS_ENABLED: ${MTLS_ENABLED:-false}
       CERTS_DIR: /certs
+      CONSUMER_BACKEND: streams
     ports:
       - "8080:8080"
     restart: unless-stopped

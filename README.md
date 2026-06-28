@@ -47,7 +47,7 @@ The dashboard opens at **http://localhost:3000**.
 | **marketplace** | http://localhost:8086 | Integrations: Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear |
 | **PostgreSQL** | localhost:5433 | Primary store + pgvector |
 | **Redis** | localhost:6380 | Pub/sub, Streams |
-| **Kafka** | localhost:9092 | Event bus |
+| **Kafka** | localhost:9092 | Event bus (optional — only needed if `CONSUMER_BACKEND=kafka`) |
 
 ---
 
