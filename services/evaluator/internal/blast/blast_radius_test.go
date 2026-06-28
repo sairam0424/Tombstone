@@ -4,6 +4,52 @@ import (
 	"testing"
 )
 
+// classifyBlastRadius is a thin adapter so table tests can call scoreRisk
+// via a plain function signature without constructing a full Calculator.
+func classifyBlastRadius(trafficPct float64, depCount int, errorDelta float64) string {
+	c := &Calculator{}
+	r := &BlastRadiusResult{
+		TrafficPctAffected:   trafficPct,
+		DependentFlagsCount:  depCount,
+		HistoricalErrorDelta: errorDelta,
+	}
+	return string(c.scoreRisk(r))
+}
+
+// TestBlastRadiusTier exercises the four canonical tier boundaries.
+// Thresholds (from blast_radius.go):
+//
+//	BLOCKED : traffic >= 50 AND errorDelta > 0.05
+//	HIGH    : traffic >= 25 OR depCount > 5
+//	MEDIUM  : traffic >= 10 OR depCount > 2
+//	LOW     : everything else
+func TestBlastRadiusTier(t *testing.T) {
+	cases := []struct {
+		trafficPct float64
+		depCount   int
+		errorDelta float64
+		wantTier   string
+	}{
+		// BLOCKED: 60 % traffic + 6 % error delta (both conditions met)
+		{0.60 * 100, 3, 0.06, "BLOCKED"},
+		// HIGH: 30 % traffic triggers the >= 25 branch
+		{0.30 * 100, 2, 0.03, "HIGH"},
+		// MEDIUM: 15 % traffic triggers the >= 10 branch
+		{0.15 * 100, 1, 0.01, "MEDIUM"},
+		// LOW: 5 % traffic, no deps, no history
+		{0.05 * 100, 0, 0.00, "LOW"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantTier, func(t *testing.T) {
+			got := classifyBlastRadius(tc.trafficPct, tc.depCount, tc.errorDelta)
+			if got != tc.wantTier {
+				t.Errorf("classifyBlastRadius(traffic=%.0f, deps=%d, delta=%.2f) = %s, want %s",
+					tc.trafficPct, tc.depCount, tc.errorDelta, got, tc.wantTier)
+			}
+		})
+	}
+}
+
 // TestScoreRisk verifies the risk scoring logic without a database.
 // scoreRisk is pure logic — deterministic, no I/O.
 func TestScoreRisk(t *testing.T) {
