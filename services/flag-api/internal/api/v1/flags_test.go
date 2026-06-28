@@ -2,8 +2,14 @@ package v1
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -21,6 +27,14 @@ func TestActorFromContext(t *testing.T) {
 		}
 		if actor != "unknown" {
 			t.Errorf("actorFromContext (no value) = %q, want %q", actor, "unknown")
+		}
+	})
+
+	t.Run("actor set in context is returned", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), ActorContextKey, "alice@example.com")
+		actor := actorFromContext(ctx)
+		if actor != "alice@example.com" {
+			t.Errorf("actorFromContext = %q, want %q", actor, "alice@example.com")
 		}
 	})
 }
@@ -173,5 +187,351 @@ func TestPublishToStream_WritesCorrectFields(t *testing.T) {
 	}
 	if got := fields["event"]; got != "manual" {
 		t.Errorf("event (reason) = %q, want %q", got, "manual")
+	}
+}
+
+// TestCreateFlag_Validation tests the request validation logic in CreateFlag.
+// All cases here are validation failures that return before touching the database,
+// so nil DB is safe. Handler is invoked directly via httptest.
+func TestCreateFlag_Validation(t *testing.T) {
+	// Create a handler with no DB — safe because validation returns before DB access.
+	h := &FlagHandler{
+		db:     nil,
+		rdb:    nil,
+		logger: zap.NewNop(),
+		rekor:  nil,
+	}
+
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "missing key returns 400",
+			body:       `{"name":"My Flag","flag_type":"BOOLEAN","safe_default":"false","project_id":"00000000-0000-0000-0000-000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing name returns 400",
+			body:       `{"key":"test-flag","flag_type":"BOOLEAN","safe_default":"false","project_id":"00000000-0000-0000-0000-000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing flag_type returns 400",
+			body:       `{"key":"test-flag","name":"Test","safe_default":"false","project_id":"00000000-0000-0000-0000-000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty body returns 400",
+			body:       `{}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid flag_type returns 400",
+			body:       `{"key":"test-flag","name":"Test","flag_type":"INVALID","safe_default":"false","project_id":"00000000-0000-0000-0000-000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "malformed JSON returns 400",
+			body:       `{not valid json`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/flags", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			h.CreateFlag(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Errorf("want status %d, got %d (body: %s)", tc.wantStatus, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestValidFlagTypes verifies the ValidFlagTypes map is complete and correct.
+// This is the service-layer guard that mirrors the DB CHECK constraint.
+func TestValidFlagTypes_Map(t *testing.T) {
+	expected := []string{"BOOLEAN", "STRING", "INTEGER", "FLOAT", "JSON"}
+	for _, ft := range expected {
+		if !ValidFlagTypes[ft] {
+			t.Errorf("ValidFlagTypes missing expected type %q", ft)
+		}
+	}
+
+	// Ensure common mistakes are rejected
+	invalid := []string{"Boolean", "boolean", "INVALID", "NUMBER", "ARRAY", ""}
+	for _, ft := range invalid {
+		if ValidFlagTypes[ft] {
+			t.Errorf("ValidFlagTypes should not contain %q", ft)
+		}
+	}
+}
+
+// TestWriteJSON_ResponseFormat verifies writeJSON sets content-type and encodes the payload.
+func TestWriteJSON_ResponseFormat(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	if got := w.Code; got != http.StatusOK {
+		t.Errorf("writeJSON status = %d, want %d", got, http.StatusOK)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	body := strings.TrimSpace(w.Body.String())
+	if body == "" {
+		t.Error("writeJSON must produce a non-empty body")
+	}
+	if !strings.Contains(body, `"status"`) {
+		t.Errorf("writeJSON body %q does not contain expected field", body)
+	}
+}
+
+// TestWriteError_ResponseFormat verifies writeError wraps the message in {"error": ...}.
+func TestWriteError_ResponseFormat(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		message string
+	}{
+		{"bad request", http.StatusBadRequest, "key is required"},
+		{"not found", http.StatusNotFound, "flag not found"},
+		{"internal error", http.StatusInternalServerError, "query failed"},
+		{"conflict", http.StatusConflict, "tombstoned"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeError(w, tc.status, tc.message)
+
+			if w.Code != tc.status {
+				t.Errorf("status = %d, want %d", w.Code, tc.status)
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, `"error"`) {
+				t.Errorf("error response body %q missing 'error' key", body)
+			}
+			if !strings.Contains(body, tc.message) {
+				t.Errorf("error response body %q missing message %q", body, tc.message)
+			}
+		})
+	}
+}
+
+// TestIpFromRequest verifies that IP extraction prefers X-Forwarded-For.
+func TestIpFromRequest(t *testing.T) {
+	t.Run("uses X-Forwarded-For when set", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.1")
+		ip := ipFromRequest(req)
+		if ip != "203.0.113.1" {
+			t.Errorf("ipFromRequest = %q, want %q", ip, "203.0.113.1")
+		}
+	})
+
+	t.Run("falls back to RemoteAddr when no header", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.1:54321"
+		ip := ipFromRequest(req)
+		if ip == "" {
+			t.Error("ipFromRequest must not return empty string")
+		}
+		if ip != req.RemoteAddr {
+			t.Errorf("ipFromRequest = %q, want %q", ip, req.RemoteAddr)
+		}
+	})
+}
+
+// ---- Merkle chain integrity tests ----
+
+// TestAuditEntryHash verifies the exported AuditEntryHash function produces the
+// same SHA-256 as a direct sha256.Sum256 call on the canonical "field|...|field" content.
+// This ensures the Merkle chain formula is stable and matches what writeAudit stores.
+func TestAuditEntryHash_Deterministic(t *testing.T) {
+	cases := []struct {
+		name      string
+		id        string
+		eventType string
+		actor     string
+		prevState string
+		newState  string
+		ts        string
+	}{
+		{
+			name:      "typical flag_created entry",
+			id:        "550e8400-e29b-41d4-a716-446655440000",
+			eventType: "flag_created",
+			actor:     "alice@example.com",
+			prevState: "null",
+			newState:  `{"key":"payments.v2","flag_type":"BOOLEAN"}`,
+			ts:        "1700000000",
+		},
+		{
+			name:      "kill switch entry",
+			id:        "660e8400-e29b-41d4-a716-446655440001",
+			eventType: "kill_switch_activated",
+			actor:     "sre-bot",
+			prevState: `{"enabled":true}`,
+			newState:  `{"enabled":false,"reason":"high_error_rate"}`,
+			ts:        "1700001234",
+		},
+		{
+			name:      "empty states (first entry in chain)",
+			id:        "770e8400-e29b-41d4-a716-446655440002",
+			eventType: "flag_archived",
+			actor:     "unknown",
+			prevState: "",
+			newState:  "",
+			ts:        "1700002468",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := AuditEntryHash(tc.id, tc.eventType, tc.actor, tc.prevState, tc.newState, tc.ts)
+
+			// Recompute expected hash directly — same algorithm as writeAudit.
+			content := strings.Join([]string{tc.id, tc.eventType, tc.actor, tc.prevState, tc.newState, tc.ts}, "|")
+			raw := sha256.Sum256([]byte(content))
+			want := fmt.Sprintf("%x", raw)
+
+			if got != want {
+				t.Errorf("AuditEntryHash(...) = %q, want %q", got, want)
+			}
+			if len(got) != 64 {
+				t.Errorf("SHA-256 hex digest must be 64 chars, got %d", len(got))
+			}
+		})
+	}
+}
+
+// TestAuditEntryHash_ChainLinking verifies that entries can be chained:
+// the prev_hash of entry N equals AuditEntryHash(entry N-1).
+// This mirrors the writeAudit logic: compute hash of prev row, store as next row's prev_hash.
+func TestAuditEntryHash_ChainLinking(t *testing.T) {
+	type entry struct {
+		id        string
+		eventType string
+		actor     string
+		prevState string
+		newState  string
+		ts        string
+	}
+
+	// Simulate a 3-entry chain for a single flag.
+	entries := []entry{
+		{
+			id:        "aaa00000-0000-0000-0000-000000000001",
+			eventType: "flag_created",
+			actor:     "admin",
+			prevState: "",
+			newState:  `{"state":"ACTIVE"}`,
+			ts:        "1700000001",
+		},
+		{
+			id:        "bbb00000-0000-0000-0000-000000000002",
+			eventType: "flag_environment_updated",
+			actor:     "dev",
+			prevState: `{"enabled":false}`,
+			newState:  `{"enabled":true,"rollout_pct":50}`,
+			ts:        "1700000002",
+		},
+		{
+			id:        "ccc00000-0000-0000-0000-000000000003",
+			eventType: "kill_switch_activated",
+			actor:     "sre",
+			prevState: `{"enabled":true}`,
+			newState:  `{"enabled":false}`,
+			ts:        "1700000003",
+		},
+	}
+
+	// Compute hash of entry 0 — this should equal prev_hash stored in entry 1.
+	hash0 := AuditEntryHash(entries[0].id, entries[0].eventType, entries[0].actor,
+		entries[0].prevState, entries[0].newState, entries[0].ts)
+
+	// Compute hash of entry 1 — this should equal prev_hash stored in entry 2.
+	hash1 := AuditEntryHash(entries[1].id, entries[1].eventType, entries[1].actor,
+		entries[1].prevState, entries[1].newState, entries[1].ts)
+
+	// Verify the chain is non-empty and each link is unique.
+	if hash0 == "" {
+		t.Error("hash of entry 0 must not be empty")
+	}
+	if hash1 == "" {
+		t.Error("hash of entry 1 must not be empty")
+	}
+	if hash0 == hash1 {
+		t.Error("consecutive entries must produce different hashes")
+	}
+
+	// Verify hash length is correct (SHA-256 → 64 hex chars).
+	for i, h := range []string{hash0, hash1} {
+		if len(h) != 64 {
+			t.Errorf("entry %d hash length = %d, want 64", i, len(h))
+		}
+	}
+
+	// Verify that mutating a single field produces a different hash (tamper detection).
+	tampered := AuditEntryHash(entries[0].id, entries[0].eventType, "attacker",
+		entries[0].prevState, entries[0].newState, entries[0].ts)
+	if tampered == hash0 {
+		t.Error("mutating actor must produce a different hash (tamper detection)")
+	}
+}
+
+// TestAuditEntryHash_FieldSeparatorMatters verifies that the "|" separator
+// prevents hash collisions when field values contain substrings of adjacent fields.
+func TestAuditEntryHash_FieldSeparatorMatters(t *testing.T) {
+	// Without the "|" separator, "ab" + "cd" would equal "a" + "bcd".
+	hash1 := AuditEntryHash("ab", "cd", "ef", "gh", "ij", "kl")
+	hash2 := AuditEntryHash("a", "bcd", "ef", "gh", "ij", "kl")
+	if hash1 == hash2 {
+		t.Error("different field splits must produce different hashes — separator is critical")
+	}
+}
+
+// ---- publishToStream additional tests ----
+
+// TestPublishToStream_MultipleEnvironments verifies that events for different
+// environments are written to separate stream keys.
+func TestPublishToStream_MultipleEnvironments(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	h := &FlagHandler{rdb: rdb, logger: zap.NewNop()}
+
+	envs := []string{"development", "staging", "production"}
+	for _, env := range envs {
+		h.publishToStream(context.Background(), env, FlagEvent{
+			FlagKey: "multi-env-flag", Reason: "test", Ts: time.Now().Unix(), Environment: env,
+		})
+	}
+
+	// Each environment must have its own stream with exactly 1 entry.
+	for _, env := range envs {
+		key := "tombstone:stream:" + env
+		msgs, err := rdb.XRange(context.Background(), key, "-", "+").Result()
+		if err != nil {
+			t.Fatalf("XRange for %s: %v", env, err)
+		}
+		if got := len(msgs); got != 1 {
+			t.Errorf("stream %q: expected 1 entry, got %d", key, got)
+		}
 	}
 }

@@ -65,6 +65,26 @@ type CreateFlagRequest struct {
 	SafeDefault string `json:"safe_default"`
 }
 
+// ValidFlagTypes is the exhaustive set of flag types accepted at the service layer.
+// This mirrors the DB CHECK constraint so we catch invalid types before hitting Postgres.
+var ValidFlagTypes = map[string]bool{
+	"BOOLEAN": true,
+	"STRING":  true,
+	"INTEGER": true,
+	"FLOAT":   true,
+	"JSON":    true,
+}
+
+// AuditEntryHash computes the deterministic Merkle hash for an audit log row.
+// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
+// This is the same algorithm used by writeAudit — exported so tests can verify
+// chain integrity without a database.
+func AuditEntryHash(id, eventType, actor, prevState, newState, ts string) string {
+	content := strings.Join([]string{id, eventType, actor, prevState, newState, ts}, "|")
+	hashBytes := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", hashBytes)
+}
+
 type UpdateEnvironmentRequest struct {
 	Enabled    bool   `json:"enabled"`
 	RolloutPct int    `json:"rollout_pct"`
@@ -135,6 +155,10 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Key == "" || req.Name == "" || req.FlagType == "" {
 		writeError(w, http.StatusBadRequest, "key, name, flag_type are required")
+		return
+	}
+	if !ValidFlagTypes[req.FlagType] {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid flag_type %q: must be one of BOOLEAN, STRING, INTEGER, FLOAT, JSON", req.FlagType))
 		return
 	}
 	if req.ProjectID == "" {
