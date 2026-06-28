@@ -63,6 +63,18 @@ mkdir -p "$SIGNALS_DIR"
 NEEDS_SIGNAL=$(python3 -c "print('yes' if $HEALTH_SCORE < $HEALTH_THRESHOLD or $STALE_COUNT > $STALE_THRESHOLD else 'no')" 2>/dev/null || echo no)
 
 if [ "$NEEDS_SIGNAL" = "yes" ]; then
+    log "ALERT: health_score=$HEALTH_SCORE stale_count=$STALE_COUNT — thresholds breached (health<0.80 or stale>50)"
+    if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+        curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"Tombstone governance alert: health_score=$HEALTH_SCORE (threshold: 0.80), stale_flags=$STALE_COUNT (threshold: 50). Review: ${TOMBSTONE_API_URL:-$FLAG_API_URL}/governance\"}" \
+            >/dev/null 2>&1 \
+            && log "Slack alert sent." \
+            || log "Slack alert failed (non-fatal)."
+    else
+        log "SLACK_WEBHOOK_URL not set — skipping Slack notification."
+    fi
+
     SIGNAL_FILE="$SIGNALS_DIR/governance-alert-$DATE.md"
     if [ ! -f "$SIGNAL_FILE" ]; then
         cat > "$SIGNAL_FILE" << EOF
