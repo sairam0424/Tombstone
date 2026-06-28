@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/tlsutil"
+	"github.com/tombstone/flag-api/internal/tlsutil"
 )
 
 // TestGenerateCACert verifies that a CA cert is generated with correct properties.

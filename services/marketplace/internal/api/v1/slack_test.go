@@ -9,10 +9,10 @@ import (
 
 	"go.uber.org/zap"
 
-	v1 "github.com/sairam0424/Tombstone/services/marketplace/internal/api/v1"
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/registry"
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/webhook"
+	v1 "github.com/tombstone/marketplace/internal/api/v1"
+	"github.com/tombstone/marketplace/internal/integrations"
+	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/tombstone/marketplace/internal/webhook"
 )
 
 // newTestHandler builds a Handler wired with a real SlackApp (botToken/signingSecret
@@ -80,9 +80,13 @@ func TestHandleSlackCommands_NoSecret_StatusCommand(t *testing.T) {
 // SLACK_SIGNING_SECRET is set but the request carries no signature headers, the
 // handler returns HTTP 401.
 func TestHandleSlackCommands_SignatureRequired_MissingHeaders(t *testing.T) {
-	t.Setenv("SLACK_SIGNING_SECRET", "test-secret-value")
-
-	h := newTestHandler("http://localhost:8081")
+	// Construct SlackApp with a real signing secret — HasSigningSecret() returns true.
+	// Do NOT use t.Setenv here: the handler reads s.signingSecret (set at construction),
+	// not os.Getenv, so the env var is irrelevant.
+	reg := registry.NewRegistry(nil, zap.NewNop())
+	dispatcher := webhook.NewDispatcher(reg, zap.NewNop())
+	h := v1.NewHandler(reg, dispatcher, zap.NewNop())
+	h.SetSlackApp(integrations.NewSlackApp("", "test-secret-value", "http://localhost:8081", ""))
 
 	body := "command=%2Ftombstone&text=status+checkout-v2&user_id=U123&channel_id=C123"
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/marketplace/slack/commands", strings.NewReader(body))
