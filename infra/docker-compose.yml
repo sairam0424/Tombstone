@@ -121,6 +121,10 @@ services:
     env_file: .env
     environment:
       PORT: "8083"
+      EMBEDDING_BACKEND: local
+      # Intelligence uses Kafka for telemetry events; gateway uses Redis Streams for flag delivery
+      CONSUMER_BACKEND: kafka
+      TOMBSTONE_ENVIRONMENTS: production
     ports:
       - "8083:8083"
     restart: unless-stopped
@@ -178,8 +182,18 @@ services:
       - flag-api
       - gateway
     environment:
+      # VITE_* vars are inlined at build/serve time into browser JS.
+      # localhost resolves via published host ports from the user's browser — correct for CSR SPAs.
+      # Do NOT replace with Docker service names (flag-api, gateway, etc.) — that breaks browser fetches.
       VITE_API_URL: http://localhost:8081
       VITE_GATEWAY_URL: http://localhost:8080
+      VITE_EVAL_URL: http://localhost:8082
+      VITE_INTEL_URL: http://localhost:8083
+      VITE_MARKETPLACE_URL: http://localhost:8086
+      VITE_SDK_TOKEN: sdk-dev-token-change-in-prod
+      VITE_ENABLE_INTELLIGENCE: "true"
+      VITE_ENABLE_EVALUATOR: "true"
+      VITE_ENABLE_MARKETPLACE: "true"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine

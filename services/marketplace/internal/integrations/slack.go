@@ -24,15 +24,18 @@ type SlackApp struct {
 	botToken      string // SLACK_BOT_TOKEN (xoxb-...)
 	signingSecret string // SLACK_SIGNING_SECRET
 	apiURL        string // flag-api URL for fetching flag state
+	flagAPIToken  string // FLAG_API_TOKEN — Bearer token for flag-api RBAC (flags:kill_switch)
 	httpClient    *http.Client
 }
 
 // NewSlackApp constructs a SlackApp with the given credentials and flag-api URL.
-func NewSlackApp(botToken, signingSecret, apiURL string) *SlackApp {
+// flagAPIToken must carry the flags:kill_switch RBAC permission on flag-api.
+func NewSlackApp(botToken, signingSecret, apiURL, flagAPIToken string) *SlackApp {
 	return &SlackApp{
 		botToken:      botToken,
 		signingSecret: signingSecret,
 		apiURL:        apiURL,
+		flagAPIToken:  flagAPIToken,
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -516,6 +519,7 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 		return fmt.Errorf("kill switch: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.flagAPIToken)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

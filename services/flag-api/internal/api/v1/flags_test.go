@@ -39,17 +39,6 @@ func TestActorFromContext(t *testing.T) {
 	})
 }
 
-// TestWriteError verifies the response format is correct JSON.
-// This is the error path used by every handler — format must be stable.
-func TestFlagTypeValidation(t *testing.T) {
-	validTypes := []string{"BOOLEAN", "STRING", "INTEGER", "FLOAT", "JSON"}
-	for _, ft := range validTypes {
-		if ft == "" {
-			t.Errorf("flag type %q is empty", ft)
-		}
-	}
-}
-
 // TestFlagLifecycleStateNames verifies the state strings match what the DB CHECK constraint expects.
 // If these drift, INSERT statements will fail with constraint violations.
 func TestFlagLifecycleStateNames(t *testing.T) {

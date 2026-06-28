@@ -131,24 +131,30 @@ func TestWriteAndLoadCerts(t *testing.T) {
 	}
 }
 
-// TestMTLSOptIn verifies that when MTLS_ENABLED is unset the plain HTTP path works
-// without requiring any cert files.
-func TestMTLSOptIn(t *testing.T) {
-	if err := os.Unsetenv("MTLS_ENABLED"); err != nil {
-		t.Fatalf("unset MTLS_ENABLED: %v", err)
+// TestLoadClientTLSConfig_ReturnNilWhenMTLSDisabled verifies that LoadClientTLSConfig
+// returns an error (not a usable config) when no cert files are present on disk.
+// This underpins the opt-in contract: callers MUST gate on MTLS_ENABLED=true before
+// calling LoadClientTLSConfig, because the function always attempts to read cert files
+// and will return an error when they are absent. When MTLS_ENABLED is unset, callers
+// skip this function entirely and use the default http.Client without TLS.
+func TestLoadClientTLSConfig_ReturnNilWhenMTLSDisabled(t *testing.T) {
+	t.Setenv("MTLS_ENABLED", "")
+
+	// Confirm that MTLS_ENABLED is not "true" — callers must not invoke LoadClientTLSConfig.
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		t.Fatal("MTLS_ENABLED should not be true in this test")
 	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL) //nolint:noctx // test-only plain GET
-	if err != nil {
-		t.Fatalf("plain HTTP: %v", err)
+	// When no cert files exist, LoadClientTLSConfig must return an error.
+	// This verifies that the function cannot silently succeed with an empty/missing
+	// cert directory — callers that skip the MTLS_ENABLED gate would get an error,
+	// not a dangerously unconfigured TLS config.
+	emptyDir := t.TempDir()
+	cfg, err := tlsutil.LoadClientTLSConfig(emptyDir)
+	if err == nil {
+		t.Error("LoadClientTLSConfig with no cert files should return an error, got nil")
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	if cfg != nil {
+		t.Error("LoadClientTLSConfig with no cert files should return nil config, got non-nil")
 	}
 }

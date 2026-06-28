@@ -21,7 +21,7 @@ func newTestHandler(flagAPIURL string) *v1.Handler {
 	reg := registry.NewRegistry(nil, zap.NewNop())
 	dispatcher := webhook.NewDispatcher(reg, zap.NewNop())
 	h := v1.NewHandler(reg, dispatcher, zap.NewNop())
-	slackApp := integrations.NewSlackApp("", "", flagAPIURL)
+	slackApp := integrations.NewSlackApp("", "", flagAPIURL, "")
 	h.SetSlackApp(slackApp)
 	return h
 }
