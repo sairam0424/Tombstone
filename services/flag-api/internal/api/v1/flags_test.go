@@ -2,7 +2,12 @@ package v1
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 // TestActorFromContext verifies the actor extraction returns a safe default
@@ -100,5 +105,73 @@ func TestTombstoneErrorMessage(t *testing.T) {
 		if !found {
 			t.Errorf("tombstone error message %q missing expected substring %q", msg, needle)
 		}
+	}
+}
+
+// TestPublishToStream_WritesCorrectFields verifies that publishToStream writes a single
+// entry to the correct Redis Stream key with the required fields populated.
+// Uses miniredis so no real Redis instance is needed.
+func TestPublishToStream_WritesCorrectFields(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	h := &FlagHandler{
+		db:     &sql.DB{}, // not used by publishToStream
+		rdb:    rdb,
+		logger: zap.NewNop(),
+		rekor:  nil,
+	}
+
+	env := "development"
+	event := FlagEvent{
+		FlagKey:     "my-feature",
+		Enabled:     true,
+		RolloutPct:  50,
+		Reason:      "manual",
+		Ts:          1700000000,
+		Environment: env,
+	}
+
+	h.publishToStream(context.Background(), env, event)
+
+	streamKey := "tombstone:stream:" + env
+
+	// Verify exactly one entry was written.
+	msgs, err := rdb.XRange(context.Background(), streamKey, "-", "+").Result()
+	if err != nil {
+		t.Fatalf("XRange: %v", err)
+	}
+	if got := len(msgs); got != 1 {
+		t.Fatalf("expected 1 stream entry, got %d", got)
+	}
+
+	// Verify required fields are present and non-empty.
+	fields := msgs[0].Values
+	for _, required := range []string{"event", "flag_key", "environment", "payload"} {
+		v, ok := fields[required]
+		if !ok {
+			t.Errorf("stream entry missing field %q", required)
+			continue
+		}
+		if s, _ := v.(string); s == "" {
+			t.Errorf("stream entry field %q is empty", required)
+		}
+	}
+
+	// Spot-check specific values.
+	if got := fields["flag_key"]; got != "my-feature" {
+		t.Errorf("flag_key = %q, want %q", got, "my-feature")
+	}
+	if got := fields["environment"]; got != env {
+		t.Errorf("environment = %q, want %q", got, env)
+	}
+	if got := fields["event"]; got != "manual" {
+		t.Errorf("event (reason) = %q, want %q", got, "manual")
 	}
 }
