@@ -75,11 +75,11 @@ var ValidFlagTypes = map[string]bool{
 	"JSON":    true,
 }
 
-// AuditEntryHash computes the deterministic Merkle hash for an audit log row.
+// auditEntryHash computes the deterministic Merkle hash for an audit log row.
 // Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
-// This is the same algorithm used by writeAudit — exported so tests can verify
+// This is the same algorithm used by writeAudit — used by tests to verify
 // chain integrity without a database.
-func AuditEntryHash(id, eventType, actor, prevState, newState, ts string) string {
+func auditEntryHash(id, eventType, actor, prevState, newState, ts string) string {
 	content := strings.Join([]string{id, eventType, actor, prevState, newState, ts}, "|")
 	hashBytes := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", hashBytes)

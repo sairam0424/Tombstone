@@ -352,10 +352,10 @@ func TestIpFromRequest(t *testing.T) {
 
 // ---- Merkle chain integrity tests ----
 
-// TestAuditEntryHash verifies the exported AuditEntryHash function produces the
+// TestauditEntryHash verifies the exported auditEntryHash function produces the
 // same SHA-256 as a direct sha256.Sum256 call on the canonical "field|...|field" content.
 // This ensures the Merkle chain formula is stable and matches what writeAudit stores.
-func TestAuditEntryHash_Deterministic(t *testing.T) {
+func TestAuditEntryHashDeterministic(t *testing.T) {
 	cases := []struct {
 		name      string
 		id        string
@@ -397,7 +397,7 @@ func TestAuditEntryHash_Deterministic(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			got := AuditEntryHash(tc.id, tc.eventType, tc.actor, tc.prevState, tc.newState, tc.ts)
+			got := auditEntryHash(tc.id, tc.eventType, tc.actor, tc.prevState, tc.newState, tc.ts)
 
 			// Recompute expected hash directly — same algorithm as writeAudit.
 			content := strings.Join([]string{tc.id, tc.eventType, tc.actor, tc.prevState, tc.newState, tc.ts}, "|")
@@ -405,7 +405,7 @@ func TestAuditEntryHash_Deterministic(t *testing.T) {
 			want := fmt.Sprintf("%x", raw)
 
 			if got != want {
-				t.Errorf("AuditEntryHash(...) = %q, want %q", got, want)
+				t.Errorf("auditEntryHash(...) = %q, want %q", got, want)
 			}
 			if len(got) != 64 {
 				t.Errorf("SHA-256 hex digest must be 64 chars, got %d", len(got))
@@ -414,10 +414,10 @@ func TestAuditEntryHash_Deterministic(t *testing.T) {
 	}
 }
 
-// TestAuditEntryHash_ChainLinking verifies that entries can be chained:
-// the prev_hash of entry N equals AuditEntryHash(entry N-1).
+// TestAuditEntryHashChainLinking verifies that entries can be chained:
+// the prev_hash of entry N equals auditEntryHash(entry N-1).
 // This mirrors the writeAudit logic: compute hash of prev row, store as next row's prev_hash.
-func TestAuditEntryHash_ChainLinking(t *testing.T) {
+func TestAuditEntryHashChainLinking(t *testing.T) {
 	type entry struct {
 		id        string
 		eventType string
@@ -456,11 +456,11 @@ func TestAuditEntryHash_ChainLinking(t *testing.T) {
 	}
 
 	// Compute hash of entry 0 — this should equal prev_hash stored in entry 1.
-	hash0 := AuditEntryHash(entries[0].id, entries[0].eventType, entries[0].actor,
+	hash0 := auditEntryHash(entries[0].id, entries[0].eventType, entries[0].actor,
 		entries[0].prevState, entries[0].newState, entries[0].ts)
 
 	// Compute hash of entry 1 — this should equal prev_hash stored in entry 2.
-	hash1 := AuditEntryHash(entries[1].id, entries[1].eventType, entries[1].actor,
+	hash1 := auditEntryHash(entries[1].id, entries[1].eventType, entries[1].actor,
 		entries[1].prevState, entries[1].newState, entries[1].ts)
 
 	// Verify the chain is non-empty and each link is unique.
@@ -482,19 +482,19 @@ func TestAuditEntryHash_ChainLinking(t *testing.T) {
 	}
 
 	// Verify that mutating a single field produces a different hash (tamper detection).
-	tampered := AuditEntryHash(entries[0].id, entries[0].eventType, "attacker",
+	tampered := auditEntryHash(entries[0].id, entries[0].eventType, "attacker",
 		entries[0].prevState, entries[0].newState, entries[0].ts)
 	if tampered == hash0 {
 		t.Error("mutating actor must produce a different hash (tamper detection)")
 	}
 }
 
-// TestAuditEntryHash_FieldSeparatorMatters verifies that the "|" separator
+// TestAuditEntryHashFieldSeparatorMatters verifies that the "|" separator
 // prevents hash collisions when field values contain substrings of adjacent fields.
-func TestAuditEntryHash_FieldSeparatorMatters(t *testing.T) {
+func TestAuditEntryHashFieldSeparatorMatters(t *testing.T) {
 	// Without the "|" separator, "ab" + "cd" would equal "a" + "bcd".
-	hash1 := AuditEntryHash("ab", "cd", "ef", "gh", "ij", "kl")
-	hash2 := AuditEntryHash("a", "bcd", "ef", "gh", "ij", "kl")
+	hash1 := auditEntryHash("ab", "cd", "ef", "gh", "ij", "kl")
+	hash2 := auditEntryHash("a", "bcd", "ef", "gh", "ij", "kl")
 	if hash1 == hash2 {
 		t.Error("different field splits must produce different hashes — separator is critical")
 	}
