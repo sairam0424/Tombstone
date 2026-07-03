@@ -131,9 +131,15 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 			}
 			var event FlagEvent
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
-				b.logger.Warn("stream: failed to unmarshal event",
+				// Do NOT ack — leave the message pending. A poison payload
+				// deserves retries (it may be a transient producer bug) and,
+				// failing that, a DLQ record — not a silent, permanent drop.
+				// ReclaimStalePending (dlq.go), running on its own ticker in
+				// cmd/main.go, decides this message's fate: XCLAIM + retry
+				// while under maxDeliveryAttempts, or XADD to "<stream>:dlq"
+				// + XACK once the attempt budget is exhausted.
+				b.logger.Warn("stream: failed to unmarshal event, leaving pending for reclaim sweep",
 					zap.Error(err), zap.String("id", msg.ID))
-				AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
 				continue
 			}
 			b.hub.Broadcast(environment, event)
