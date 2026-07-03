@@ -71,3 +71,33 @@ Update this file AFTER completing any task with new learnings.
 - ClickHouse is opt-in via CLICKHOUSE_HOST env var — uses graceful degradation if not available
 - AI experiment explanation uses Claude Haiku with max_tokens 200 — cost-effective for high-volume
 - Autonomous rollout UI hides when flag is at 100% — nothing left to advance
+
+## Phase 9 — intelligence asyncio hardening (2026-07-03)
+- `services/intelligence` has TWO separate warehouse-connector class hierarchies that look
+  like duplicates but aren't call-site-equivalent: standalone `app/warehouse/{bigquery,snowflake,databricks}.py`
+  (used by `fetch_metric`/`test_connection`, part of the `WarehouseConnector` Protocol in `base.py`)
+  vs. the `SnowflakeConnector`/`BigQueryConnector` classes INSIDE `app/warehouse/connector.py`
+  (used by `query_experiment_metrics`, wired up via `get_connector()` and consumed by
+  `app/experiments/routes.py`). Both sets independently wrapped blocking driver calls in
+  bare `asyncio.to_thread` — both needed migrating to the new `run_warehouse_query` helper.
+- `services/intelligence/app/warehouse/executor.py` (new): dedicated bounded `ThreadPoolExecutor`
+  (max_workers=4) + `asyncio.wait_for` timeout (default 30s, overridable per-call via `timeout=` kwarg)
+  isolates warehouse-driver blocking calls from Python's shared default executor, which is also used
+  by `app/search/embedding_model.py` / `embedding_model_bedrock.py` for embedding inference.
+  `asyncio.wait_for` does NOT kill the underlying thread on timeout — it only bounds how long the
+  calling coroutine waits; the thread keeps running until it finishes naturally.
+- `services/intelligence/pyproject.toml` has a base dependency on `pyod>=0.9.0` whose transitive dep
+  `numba==0.53.1` fails to build on Python >=3.10 (this repo requires Python 3.12+, so `uv sync` is
+  currently broken out of the box). Also: `pandas` (used directly by bigquery.py/snowflake.py/databricks.py)
+  is NOT a base dependency — it only arrives transitively via the optional `bigquery`/`snowflake`/
+  `databricks`/`all-warehouses` extras (e.g. `google-cloud-bigquery[pandas]`). To fully verify warehouse
+  connector changes, sync with `uv sync --all-packages --extra all-warehouses` (after working around the
+  pyod issue, e.g. by temporarily commenting it out — do not commit that removal as part of unrelated work).
+- `asyncio.Lock` guarding shared in-memory state across FastAPI background tasks + HTTP handlers: store it
+  on `app.state` (e.g. `app.state.background_job_lock = asyncio.Lock()`) in the lifespan startup, alongside
+  other shared singletons, then thread it through as an explicit parameter to background task coroutines
+  (avoid reaching into `app.state` from deep inside a task — pass the lock object directly).
+- For an HTTP-triggered endpoint that shares state with a background job, prefer fail-fast
+  (`if lock.locked(): return 409`) over blocking the request — there's a small unavoidable TOCTOU race
+  between the `.locked()` check and actually acquiring the lock, but it's benign (worst case: an
+  occasional missed 409, caller blocks briefly instead of fast-failing) — not worth over-engineering.

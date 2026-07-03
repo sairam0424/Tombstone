@@ -139,6 +139,10 @@ async def analyze_experiment(req: RunExperimentRequest):
             flag_event_table=req.flag_event_table,
         )
     except Exception as e:
+        # asyncio.TimeoutError (raised by run_warehouse_query after
+        # WAREHOUSE_QUERY_TIMEOUT_S) is a subclass of Exception, so it's
+        # already covered here — a 502 can now also mean "warehouse query
+        # exceeded 30s" rather than a driver-level failure.
         raise HTTPException(status_code=502, detail=f"Warehouse query failed: {e}") from e
 
     control = metrics.get("control")

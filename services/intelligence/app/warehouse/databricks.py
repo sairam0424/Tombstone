@@ -7,12 +7,13 @@ Install optional dependency:
 """
 from __future__ import annotations
 
-import asyncio
 import os
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
+
+from app.warehouse.executor import run_warehouse_query
 
 
 class DatabricksConnector:
@@ -64,7 +65,7 @@ class DatabricksConnector:
         return dbsql.connect(**connect_kwargs)
 
     def _run_fetch(self, metric_sql: str, start: datetime, end: datetime) -> pd.DataFrame:
-        """Synchronous fetch — run via asyncio.to_thread to avoid blocking the event loop."""
+        """Synchronous fetch — run via run_warehouse_query to avoid blocking the event loop."""
         sql = metric_sql.format(start=start.isoformat(), end=end.isoformat())
         conn = self._connect()
         try:
@@ -102,8 +103,8 @@ class DatabricksConnector:
 
         metric_sql must SELECT only aggregated columns — no raw PII.
         """
-        return await asyncio.to_thread(self._run_fetch, metric_sql, start, end)
+        return await run_warehouse_query(self._run_fetch, metric_sql, start, end)
 
     async def test_connection(self) -> bool:
         """Verify Databricks connectivity without running an expensive query."""
-        return await asyncio.to_thread(self._run_test)
+        return await run_warehouse_query(self._run_test)
