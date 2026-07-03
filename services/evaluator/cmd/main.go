@@ -81,7 +81,7 @@ func main() {
 		}
 	}
 
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
 
 	breaker := circuit.NewBreaker(rdb, logger)
