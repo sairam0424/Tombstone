@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 
 	v1alpha1 "github.com/tombstone-io/tombstone/services/tombstone-operator/api/v1alpha1"
+	"github.com/tombstone-io/tombstone/services/tombstone-operator/internal/httpclient"
 )
 
 const (
@@ -75,28 +76,48 @@ type FeatureFlagReconciler struct {
 	// Sourced from TOMBSTONE_API_TOKEN.
 	Token string
 
-	// httpClient is the HTTP client used for API calls. Defaults to
-	// http.DefaultClient; inject a custom one in tests.
-	httpClient *http.Client
+	// resilientHTTP wraps the HTTP client used for API calls in a
+	// retry+circuit-breaker pipeline. Defaults are set in
+	// NewFeatureFlagReconciler; inject a custom httpClient via
+	// newFeatureFlagReconcilerWithClient in tests.
+	resilientHTTP *httpclient.ResilientClient
 }
 
 // NewFeatureFlagReconciler constructs a reconciler with a sensible default
-// HTTP client (15 s timeout, no redirects on PATCH).
+// HTTP client (15 s per-attempt timeout, no redirects on PATCH) wrapped in
+// failsafe-go's retry+circuit-breaker pipeline via httpclient.DefaultConfig().
+// The operator's reconcile loop already has its own back-off (requeueOnError/
+// requeueOnSuccess), so this uses the platform default rather than a
+// tightened/loosened deviation.
 func NewFeatureFlagReconciler(
 	c client.Client,
 	scheme *runtime.Scheme,
 	logger *zap.Logger,
 	apiBase, token string,
 ) *FeatureFlagReconciler {
+	return newFeatureFlagReconcilerWithClient(c, scheme, logger, apiBase, token, nil)
+}
+
+// newFeatureFlagReconcilerWithClient allows tests to inject a custom
+// *http.Client (e.g. one pointed at an httptest.Server) while still going
+// through the resilient retry+circuit-breaker pipeline.
+func newFeatureFlagReconcilerWithClient(
+	c client.Client,
+	scheme *runtime.Scheme,
+	logger *zap.Logger,
+	apiBase, token string,
+	rawClient *http.Client,
+) *FeatureFlagReconciler {
+	if rawClient == nil {
+		rawClient = &http.Client{Timeout: 15 * time.Second}
+	}
 	return &FeatureFlagReconciler{
-		Client:  c,
-		Scheme:  scheme,
-		Logger:  logger,
-		APIBase: apiBase,
-		Token:   token,
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		Client:        c,
+		Scheme:        scheme,
+		Logger:        logger,
+		APIBase:       apiBase,
+		Token:         token,
+		resilientHTTP: httpclient.NewResilientClient(httpclient.DefaultConfig(), rawClient, logger),
 	}
 }
 
@@ -215,7 +236,7 @@ func (r *FeatureFlagReconciler) getFlag(ctx context.Context, key string) (*flagA
 	req.Header.Set("Authorization", "Bearer "+r.Token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -258,7 +279,7 @@ func (r *FeatureFlagReconciler) createFlag(ctx context.Context, flag *v1alpha1.F
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", url, err)
 	}
@@ -297,7 +318,7 @@ func (r *FeatureFlagReconciler) updateFlag(ctx context.Context, flag *v1alpha1.F
 	req.Header.Set("Authorization", "Bearer "+r.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("PATCH %s: %w", url, err)
 	}
@@ -333,7 +354,7 @@ func (r *FeatureFlagReconciler) syncFlagEnvironment(
 	req.Header.Set("Authorization", "Bearer "+r.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("PATCH %s: %w", url, err)
 	}
