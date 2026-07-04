@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.1.0
+## What Is in v1.2.0
 
-This is the v1.1.0 self-hosted release of Tombstone. Everything runs locally with `make dev`.
+This is the v1.2.0 self-hosted release of Tombstone — the production resilience upgrade. Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -178,8 +178,19 @@ This is the v1.1.0 self-hosted release of Tombstone. Everything runs locally wit
 | Slack slash commands + kill switch | Stable |
 | Redis Streams flag delivery | Stable |
 | Governance loop Slack alerts | Stable |
+| Resilient inter-service HTTP client (retry + jitter + circuit breaker) | Stable |
+| Dependency-aware `/readyz` health probes across all services | Stable |
+| Distributed Redis-backed rate limiting | Stable |
+| Adaptive load shedding | Stable |
+| Idempotency keys for mutation endpoints | Stable |
+| Snapshot reconciliation for dual-write gap recovery | Stable |
+| Redis Streams DLQ for poison message handling | Stable |
+| Reconnect jitter (thundering-herd prevention) | Stable |
+| Scheduler retry with `FOR UPDATE SKIP LOCKED` | Stable |
+| Webhook delivery deduplication | Stable |
+| Intelligence asyncio hardening + warehouse query timeouts | Stable |
 
-Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.1.0 details.
+Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.0 details.
 
 ---
 
