@@ -198,3 +198,24 @@ CREATE TABLE IF NOT EXISTS flag_prerequisites (
   UNIQUE(flag_id, prereq_flag_key)
 );
 CREATE INDEX IF NOT EXISTS idx_flag_prerequisites_flag_id ON flag_prerequisites(flag_id);
+
+-- Migration 010 + 012: idempotency key support for flag-api mutation endpoints.
+-- Keys are scoped to (actor, idempotency_key, endpoint) so that two different
+-- authenticated callers sharing the same key string do not share a cached
+-- response (SEC-001 — cross-caller cache poisoning fix).
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor           TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL,
+    endpoint        TEXT NOT NULL,
+    request_hash    TEXT NOT NULL,
+    response_status INT,
+    response_body   JSONB,
+    locked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at      TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_idempotency_actor_key_endpoint
+    ON idempotency_keys (actor, idempotency_key, endpoint);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires_at ON idempotency_keys (expires_at);

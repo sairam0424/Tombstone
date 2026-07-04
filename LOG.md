@@ -30,6 +30,10 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-07-05 · post-release housekeeping + schema.sql baseline fix · #infra #harness
+What: Synced develop to main HEAD after v1.2.0 release. Removed all resilience-initiative agent worktrees (13 freed). Added idempotency_keys table with actor-scoped unique index to schema.sql baseline so fresh installs don't need migration 010+012 separately.
+Refs: [schema.sql](services/flag-api/internal/db/schema.sql) (updated).
+
 ## 2026-07-05 · v1.2.0 — resilience-patterns initiative complete · #infra #analysis #product
 What: 10 resilience phases (#62–#71) + 4 audit-fix blockers (#72) shipped to develop and cut as v1.2.0. Covers retry/backoff/jitter, circuit breakers, distributed rate limiting, adaptive load shedding, idempotency keys, Redis Streams DLQ, scheduler FOR UPDATE SKIP LOCKED, webhook dedup, intelligence asyncio hardening, and snapshot reconciliation.
 Refs: PRs #62-#72 merged to develop; release/v1.2.0 → PR to main.
