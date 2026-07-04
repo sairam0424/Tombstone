@@ -10,14 +10,15 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/gateway/internal/httpclient"
 	"github.com/tombstone/gateway/internal/tlsutil"
 )
 
 type SnapshotProxy struct {
-	rdb        *redis.Client
-	flagAPIURL string
-	logger     *zap.Logger
-	httpClient *http.Client
+	rdb           *redis.Client
+	flagAPIURL    string
+	logger        *zap.Logger
+	resilientHTTP *httpclient.ResilientClient
 }
 
 func NewSnapshotProxy(rdb *redis.Client, flagAPIURL string, logger *zap.Logger) *SnapshotProxy {
@@ -35,7 +36,28 @@ func NewSnapshotProxy(rdb *redis.Client, flagAPIURL string, logger *zap.Logger) 
 			logger.Info("gateway -> flag-api snapshot proxy mTLS enabled")
 		}
 	}
-	return &SnapshotProxy{rdb: rdb, flagAPIURL: flagAPIURL, logger: logger, httpClient: httpClient}
+
+	// GetSnapshot sits behind gateway's own 60s Redis cache and serves an
+	// interactive HTTP request, so — unlike a background sync loop — it
+	// should not hold the caller waiting through the full default backoff
+	// schedule. Deviate toward fewer retries and a shorter per-attempt
+	// timeout than httpclient.DefaultConfig() so a flag-api outage surfaces
+	// as a fast 502 rather than a multi-second hang.
+	cfg := httpclient.ResilientClientConfig{
+		MaxRetries:       2,
+		InitialDelay:     100 * time.Millisecond,
+		MaxDelay:         1 * time.Second,
+		Timeout:          5 * time.Second,
+		FailureThreshold: 5,
+		OpenDuration:     30 * time.Second,
+	}
+
+	return &SnapshotProxy{
+		rdb:           rdb,
+		flagAPIURL:    flagAPIURL,
+		logger:        logger,
+		resilientHTTP: httpclient.NewResilientClient(cfg, httpClient, logger),
+	}
 }
 
 // GetSnapshot handles GET /api/v1/snapshot?environment={env}
@@ -72,7 +94,7 @@ func (s *SnapshotProxy) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 	// Forward auth header
 	req.Header.Set("Authorization", r.Header.Get("Authorization"))
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		s.logger.Error("fetch snapshot", zap.Error(err))
 		http.Error(w, `{"error":"upstream unavailable"}`, http.StatusBadGateway)
