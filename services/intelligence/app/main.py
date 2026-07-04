@@ -40,11 +40,19 @@ async def _try_redis_connect(url: str):
         return None
 
 
-async def _depgraph_rebuild_background(builder: DependencyGraphBuilder, redis_client) -> None:
-    """Background task: rebuild dep graph on startup, then daily at 02:00 UTC."""
+async def _depgraph_rebuild_background(
+    builder: DependencyGraphBuilder, redis_client, lock: asyncio.Lock
+) -> None:
+    """Background task: rebuild dep graph on startup, then daily at 02:00 UTC.
+
+    Guarded by `lock` (shared with `_daily_retrain` and the HTTP-triggered
+    `POST /api/v1/dependency-graph` handler) so overlapping rebuilds never
+    race on the shared `builder` state.
+    """
     pool = await builder._get_pool()
     try:
-        await builder.rebuild_all(pool, redis_client)
+        async with lock:
+            await builder.rebuild_all(pool, redis_client)
     except Exception as exc:
         logger.warning("dep graph initial rebuild failed: %s", exc)
 
@@ -61,7 +69,8 @@ async def _depgraph_rebuild_background(builder: DependencyGraphBuilder, redis_cl
         await asyncio.sleep(sleep_secs)
         try:
             pool = await builder._get_pool()
-            await builder.rebuild_all(pool, redis_client)
+            async with lock:
+                await builder.rebuild_all(pool, redis_client)
         except Exception as exc:
             logger.warning("dep graph scheduled rebuild failed: %s", exc)
 
@@ -69,6 +78,11 @@ async def _depgraph_rebuild_background(builder: DependencyGraphBuilder, redis_cl
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    # Guards mutual exclusion between the two daily background jobs
+    # (_daily_retrain, _depgraph_rebuild_background) and the HTTP-triggered
+    # POST /api/v1/dependency-graph handler — all three touch shared
+    # in-memory builder/ensemble state and must never run concurrently.
+    app.state.background_job_lock = asyncio.Lock()
     app.state.anomaly = AnomalyDetector()
     app.state.correlator = IncidentCorrelator(
         db_url=os.environ["DB_URL"],
@@ -176,7 +190,9 @@ async def lifespan(app: FastAPI):
     rebuild_task = None
     if app.state.redis is not None:
         rebuild_task = asyncio.create_task(
-            _depgraph_rebuild_background(app.state.graph_builder, app.state.redis)
+            _depgraph_rebuild_background(
+                app.state.graph_builder, app.state.redis, app.state.background_job_lock
+            )
         )
 
     await app.state.searcher.initialize()
@@ -212,6 +228,13 @@ async def _daily_retrain(app: FastAPI) -> None:
     """
     Background task: retrain Isolation Forest models for all tracked flags daily.
     Wakes at 02:00 UTC each day to avoid peak traffic windows.
+
+    Guarded by `app.state.background_job_lock` (shared with
+    `_depgraph_rebuild_background` and the HTTP-triggered
+    `POST /api/v1/dependency-graph` handler) — these paths don't share state
+    with each other today, but the lock gives us one mutual-exclusion point
+    for all "long-running background job" work so a future overlap can't
+    silently race.
     """
     while True:
         now = datetime.now(timezone.utc)
@@ -224,7 +247,8 @@ async def _daily_retrain(app: FastAPI) -> None:
             seconds_until = 86400
         await asyncio.sleep(seconds_until)
         try:
-            count = app.state.anomaly.get_ensemble().retrain_all()
+            async with app.state.background_job_lock:
+                count = app.state.anomaly.get_ensemble().retrain_all()
         except Exception:  # noqa: BLE001 — retrain errors must not crash the service
             count = 0
         # Log silently — no logger dependency injected here
@@ -293,7 +317,20 @@ async def build_dependency_graph(request: Request, environment: str = "productio
         to_unix = int(t.time())
     if from_unix == 0:
         from_unix = to_unix - 3600
-    graph = await request.app.state.graph_builder.build(environment, from_unix, to_unix)
+
+    # Fail fast rather than block this HTTP request behind a potentially
+    # long-running background job (daily retrain or dep-graph rebuild).
+    # Small TOCTOU race between this check and acquiring the lock below is
+    # acceptable: worst case is an occasional missed 409 where the caller
+    # blocks briefly instead of getting fast-failed — not a correctness bug.
+    if request.app.state.background_job_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "background rebuild in progress, retry shortly"},
+        )
+
+    async with request.app.state.background_job_lock:
+        graph = await request.app.state.graph_builder.build(environment, from_unix, to_unix)
     return {
         "nodes": [{"flag_key": n.flag_key, "enabled": n.enabled, "rollout_pct": n.rollout_pct, "state": n.state, "owner_id": n.owner_id} for n in graph.nodes],
         "edges": [{"source": e.source, "target": e.target, "weight": e.weight, "co_change_count": e.co_change_count} for e in graph.edges],

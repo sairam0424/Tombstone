@@ -83,6 +83,36 @@ Update this file AFTER completing any task with new learnings.
 - go-redis v9.5.1 confirmed identical across both flag-api and evaluator go.mod — no version skew to worry about for shared Lua-script code style
 - **Worktree gotcha**: this worktree's initial HEAD was on `main`, not `develop` — the two branches have diverged significantly (different Go module import paths: `github.com/tombstone/<svc>` on develop vs `github.com/sairam0424/Tombstone/services/<svc>` on main, plus ~276 vs ~163 commits of drift). Always verify `git merge-base --is-ancestor <worktree-HEAD> origin/develop` before branching for a develop-targeted PR — branching from the wrong base silently produces a PR with unrelated import-path churn.
 
+## Phase 9 — intelligence asyncio hardening (2026-07-03)
+- `services/intelligence` has TWO separate warehouse-connector class hierarchies that look
+  like duplicates but aren't call-site-equivalent: standalone `app/warehouse/{bigquery,snowflake,databricks}.py`
+  (used by `fetch_metric`/`test_connection`, part of the `WarehouseConnector` Protocol in `base.py`)
+  vs. the `SnowflakeConnector`/`BigQueryConnector` classes INSIDE `app/warehouse/connector.py`
+  (used by `query_experiment_metrics`, wired up via `get_connector()` and consumed by
+  `app/experiments/routes.py`). Both sets independently wrapped blocking driver calls in
+  bare `asyncio.to_thread` — both needed migrating to the new `run_warehouse_query` helper.
+- `services/intelligence/app/warehouse/executor.py` (new): dedicated bounded `ThreadPoolExecutor`
+  (max_workers=4) + `asyncio.wait_for` timeout (default 30s, overridable per-call via `timeout=` kwarg)
+  isolates warehouse-driver blocking calls from Python's shared default executor, which is also used
+  by `app/search/embedding_model.py` / `embedding_model_bedrock.py` for embedding inference.
+  `asyncio.wait_for` does NOT kill the underlying thread on timeout — it only bounds how long the
+  calling coroutine waits; the thread keeps running until it finishes naturally.
+- `services/intelligence/pyproject.toml` has a base dependency on `pyod>=0.9.0` whose transitive dep
+  `numba==0.53.1` fails to build on Python >=3.10 (this repo requires Python 3.12+, so `uv sync` is
+  currently broken out of the box). Also: `pandas` (used directly by bigquery.py/snowflake.py/databricks.py)
+  is NOT a base dependency — it only arrives transitively via the optional `bigquery`/`snowflake`/
+  `databricks`/`all-warehouses` extras (e.g. `google-cloud-bigquery[pandas]`). To fully verify warehouse
+  connector changes, sync with `uv sync --all-packages --extra all-warehouses` (after working around the
+  pyod issue, e.g. by temporarily commenting it out — do not commit that removal as part of unrelated work).
+- `asyncio.Lock` guarding shared in-memory state across FastAPI background tasks + HTTP handlers: store it
+  on `app.state` (e.g. `app.state.background_job_lock = asyncio.Lock()`) in the lifespan startup, alongside
+  other shared singletons, then thread it through as an explicit parameter to background task coroutines
+  (avoid reaching into `app.state` from deep inside a task — pass the lock object directly).
+- For an HTTP-triggered endpoint that shares state with a background job, prefer fail-fast
+  (`if lock.locked(): return 409`) over blocking the request — there's a small unavoidable TOCTOU race
+  between the `.locked()` check and actually acquiring the lock, but it's benign (worst case: an
+  occasional missed 409, caller blocks briefly instead of fast-failing) — not worth over-engineering.
+
 ## Phase 8 — Streams DLQ (2026-07-04)
 - `services/intelligence`'s `uv sync` still fails out of the box on the dead `pyod>=0.9.0` line (pulls `numba`/`llvmlite`, which reject Python 3.13). This is the SAME workaround already noted for the "intelligence-asyncio-hardening" branch: comment out the `pyod` line in `pyproject.toml`, `uv sync --all-packages`, run tests, then revert `pyproject.toml` (and do NOT commit the generated `uv.lock` — it wasn't tracked before and isn't part of this change). No new AGENTS_LEARNING entry was needed beyond this pointer since the prior phase already documents the root cause.
 - Redis 7 (this platform's pinned version, `redis:7-alpine`) has NO `XREADGROUP...CLAIM` shortcut (that's Redis 8.4+). DLQ/reclaim logic MUST compose `XPENDING` (extended/range form, for idle-time + delivery-count) + `XCLAIM` + `XADD`/`XACK` manually. There is no native "move to DLQ" primitive — the dead-letter decision (XADD to `<stream>:dlq` + XACK off the primary PEL) is 100% application code.
