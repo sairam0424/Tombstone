@@ -15,6 +15,7 @@
 | 008 | _(inline in `../schema.sql`)_ | pgvector embeddings for semantic search |
 | 009 | _(inline in `../schema.sql`)_ | Rekor transparency log integration |
 | 010 | `010_idempotency_keys.sql` | Idempotency-key support for flag-api mutation endpoints |
+| 011 | `011_scheduler_retry_columns.sql` | Scheduler retry/backoff columns (retry_count, max_retries, next_retry_at). Confirmed no collision with 010 above — both were developed concurrently from the same `develop` base and landed cleanly. |
 
 ## Why 001 Is Skipped
 
@@ -41,12 +42,14 @@ psql $DATABASE_URL < services/flag-api/internal/db/migrations/003_compliance.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/004_sso.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/005_scheduled_changes_v2.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/010_idempotency_keys.sql
+psql $DATABASE_URL < services/flag-api/internal/db/migrations/011_scheduler_retry_columns.sql
 ```
 
 Migrations 006-009 are not separate files — they are applied inline as part of
 `schema.sql` itself (see the `-- Migration 00N` comments inside that file for
 prerequisites, variations, pgvector embeddings, and Rekor integration
-respectively). Migration 010 is the next standalone file after 005.
+respectively). Migrations 010 and 011 are the next standalone files after 005,
+applied in that order.
 
 The `make dev` target (Docker Compose) runs `schema.sql` automatically via the
 `db` service init scripts. Manual migrations must be applied separately unless

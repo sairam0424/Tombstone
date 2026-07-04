@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/gateway/internal/api/v1"
+	"github.com/tombstone/gateway/internal/health"
 	"github.com/tombstone/gateway/internal/hub"
 	"github.com/tombstone/gateway/internal/telemetry"
 )
@@ -112,6 +113,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
 	})
+
+	// Gateway has no Postgres dependency; readiness is gated on Redis only.
+	healthChecker := &health.Checker{RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/stream", sseH.Stream)
