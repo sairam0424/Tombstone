@@ -7,8 +7,8 @@ import (
     "fmt"
     "net/http"
     "strings"
-    "time"
 
+    "github.com/tombstone/gitops-sync/internal/httpclient"
     "github.com/tombstone/gitops-sync/internal/parser"
     "go.uber.org/zap"
 )
@@ -21,18 +21,23 @@ type SyncResult struct {
 }
 
 type Syncer struct {
-    flagAPIURL  string
-    apiToken    string
-    httpClient  *http.Client
-    logger      *zap.Logger
+    flagAPIURL    string
+    apiToken      string
+    resilientHTTP *httpclient.ResilientClient
+    logger        *zap.Logger
 }
 
+// NewSyncer constructs a Syncer. gitops-sync runs on a periodic reconcile
+// loop (not a latency-sensitive request path), so it uses
+// httpclient.DefaultConfig() as-is rather than a tighter/looser deviation.
 func NewSyncer(flagAPIURL, apiToken string, logger *zap.Logger) *Syncer {
+    cfg := httpclient.DefaultConfig()
+    httpClient := &http.Client{Timeout: cfg.Timeout}
     return &Syncer{
-        flagAPIURL: flagAPIURL,
-        apiToken:   apiToken,
-        httpClient: &http.Client{Timeout: 10 * time.Second},
-        logger:     logger,
+        flagAPIURL:    flagAPIURL,
+        apiToken:      apiToken,
+        resilientHTTP: httpclient.NewResilientClient(cfg, httpClient, logger),
+        logger:        logger,
     }
 }
 
@@ -81,7 +86,7 @@ func (s *Syncer) flagExists(ctx context.Context, key string) (bool, error) {
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
         s.flagAPIURL+"/api/v1/flags/"+key, nil)
     req.Header.Set("Authorization", "Bearer "+s.apiToken)
-    resp, err := s.httpClient.Do(req)
+    resp, err := s.resilientHTTP.Do(ctx, req)
     if err != nil {
         return false, err
     }
@@ -103,7 +108,7 @@ func (s *Syncer) createFlag(ctx context.Context, def *parser.FlagDefinition, pro
         s.flagAPIURL+"/api/v1/flags", bytes.NewReader(body))
     req.Header.Set("Authorization", "Bearer "+s.apiToken)
     req.Header.Set("Content-Type", "application/json")
-    resp, err := s.httpClient.Do(req)
+    resp, err := s.resilientHTTP.Do(ctx, req)
     if err != nil {
         return err
     }
@@ -125,7 +130,7 @@ func (s *Syncer) updateEnvironment(ctx context.Context, key, env string, enabled
         bytes.NewReader(body))
     req.Header.Set("Authorization", "Bearer "+s.apiToken)
     req.Header.Set("Content-Type", "application/json")
-    resp, err := s.httpClient.Do(req)
+    resp, err := s.resilientHTTP.Do(ctx, req)
     if err != nil {
         return err
     }
