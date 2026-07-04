@@ -82,6 +82,7 @@ func main() {
 			os.Getenv("SLACK_SIGNING_SECRET"),
 			flagAPIURL,
 			os.Getenv("FLAG_API_TOKEN"),
+			logger,
 		)
 		handler.SetSlackApp(slackApp)
 		reg.MarkBidirectional("slack", []string{

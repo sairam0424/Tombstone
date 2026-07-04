@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/evaluator/internal/httpclient"
 	"github.com/tombstone/evaluator/internal/tlsutil"
 )
 
@@ -26,11 +27,11 @@ type RollbackRequest struct {
 
 // Executor calls the flag-api kill switch and publishes a Redis event.
 type Executor struct {
-	flagAPIURL   string
-	rdb          *redis.Client
-	httpClient   *http.Client
-	logger       *zap.Logger
-	flagAPIToken string
+	flagAPIURL    string
+	rdb           *redis.Client
+	resilientHTTP *httpclient.ResilientClient
+	logger        *zap.Logger
+	flagAPIToken  string
 }
 
 func NewExecutor(flagAPIURL, flagAPIToken string, rdb *redis.Client, logger *zap.Logger) *Executor {
@@ -48,12 +49,29 @@ func NewExecutor(flagAPIURL, flagAPIToken string, rdb *redis.Client, logger *zap
 			logger.Info("evaluator -> flag-api mTLS enabled")
 		}
 	}
+
+	// Kill-switch calls fire during an active incident (error rate already
+	// elevated) — deviate from httpclient.DefaultConfig() toward fewer
+	// retries and a shorter circuit-breaker cooldown than a periodic sync
+	// caller: we want to fail fast and let the caller's own retry/alerting
+	// take over rather than blocking the rollback path for multiple seconds,
+	// and a 15s open-duration (vs the 30s default) means we start probing
+	// flag-api again sooner once it recovers mid-incident.
+	cfg := httpclient.ResilientClientConfig{
+		MaxRetries:       2,
+		InitialDelay:     100 * time.Millisecond,
+		MaxDelay:         1 * time.Second,
+		Timeout:          5 * time.Second,
+		FailureThreshold: 3,
+		OpenDuration:     15 * time.Second,
+	}
+
 	return &Executor{
-		flagAPIURL:   flagAPIURL,
-		flagAPIToken: flagAPIToken,
-		rdb:          rdb,
-		httpClient:   httpClient,
-		logger:       logger,
+		flagAPIURL:    flagAPIURL,
+		flagAPIToken:  flagAPIToken,
+		rdb:           rdb,
+		resilientHTTP: httpclient.NewResilientClient(cfg, httpClient, logger),
+		logger:        logger,
 	}
 }
 
@@ -79,7 +97,7 @@ func (e *Executor) Execute(ctx context.Context, req RollbackRequest) error {
 	killReq.Header.Set("Authorization", "Bearer "+e.flagAPIToken)
 	killReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := e.httpClient.Do(killReq)
+	resp, err := e.resilientHTTP.Do(ctx, killReq)
 	if err != nil {
 		return fmt.Errorf("kill switch call failed: %w", err)
 	}
