@@ -165,14 +165,18 @@ func TestRunDue_PollQuery_SelectsPendingAndDueRetries(t *testing.T) {
 	db, mock := newMockDB(t)
 	logger := zap.NewNop()
 
+	// runDue now wraps the SELECT in a transaction so FOR UPDATE SKIP LOCKED
+	// atomically claims rows across replicas.
+	mock.ExpectBegin()
 	// Row 1: a fresh PENDING change with an invalid payload, so applyChange
 	// takes the fast "invalid JSON" failure path — lets us observe that
 	// runDue actually dispatched to applyChange for this row without needing
 	// to mock the full success path.
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC`).
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}).
 			AddRow("sc-pending", "my-flag", "production", []byte(`not-json`)).
 			AddRow("sc-retry-due", "my-flag-2", "staging", []byte(`not-json`)))
+	mock.ExpectCommit()
 
 	// Both rows hit applyChange's invalid-JSON branch -> markFailed for each.
 	// sc-pending: assume fresh row, retry_count=0, max_retries=3 -> will-retry path.
@@ -204,16 +208,59 @@ func TestRunDue_PollQuery_SelectsPendingAndDueRetries(t *testing.T) {
 // clause (e.g. reverting to a bare "WHERE status = 'PENDING'") fails this
 // test immediately — sqlmock's regexp query matcher only succeeds if the
 // issued SQL matches the expected pattern below.
+// TestRunDue_PollQuery_ExactTextMatch pins the exact poll query text runDue
+// issues, so a future edit that accidentally drops the retry-eligibility
+// clause or the FOR UPDATE SKIP LOCKED anti-duplicate guard fails immediately.
 func TestRunDue_PollQuery_ExactTextMatch(t *testing.T) {
 	db, mock := newMockDB(t)
 	logger := zap.NewNop()
 
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC`).
+	// runDue wraps the SELECT in a transaction so FOR UPDATE SKIP LOCKED can
+	// atomically claim rows across replicas — sqlmock requires Begin/Commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
+	mock.ExpectCommit()
 
 	runDue(context.Background(), db, nil, logger)
 
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("poll query did not match expected retry-aware WHERE clause: %v", err)
+		t.Errorf("poll query did not match expected retry-aware WHERE clause with FOR UPDATE SKIP LOCKED: %v", err)
+	}
+}
+
+// TestRunDue_ForUpdateSkipLocked_SkipsLockedRows verifies the SKIP LOCKED
+// semantics: when two goroutines call runDue concurrently, each processes a
+// disjoint set of rows. Simulated here by returning an empty result on the
+// "second" call (sqlmock is serial so we model it as sequential expectations).
+func TestRunDue_ForUpdateSkipLocked_SkipsLockedRows(t *testing.T) {
+	db, mock := newMockDB(t)
+	logger := zap.NewNop()
+
+	// First replica claims the rows.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload.*FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}).
+			AddRow("sc-1", "flag-a", "production", []byte(`not-json`)))
+	mock.ExpectCommit()
+	// sc-1 applyChange -> markFailed.
+	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
+		WithArgs("sc-1").
+		WillReturnRows(sqlmock.NewRows([]string{"retry_count", "max_retries"}).AddRow(0, 3))
+	mock.ExpectExec(`UPDATE scheduled_changes.*`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "sc-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Second replica gets an empty result (rows were locked by first).
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload.*FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
+	mock.ExpectCommit()
+
+	runDue(context.Background(), db, nil, logger)
+	runDue(context.Background(), db, nil, logger) // second replica call
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("concurrent runDue expectations not met: %v", err)
 	}
 }

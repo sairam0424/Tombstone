@@ -57,7 +57,7 @@ async def _depgraph_rebuild_background(
         logger.warning("dep graph initial rebuild failed: %s", exc)
 
     while True:
-        now_ts = asyncio.get_event_loop().time()
+        now_ts = asyncio.get_running_loop().time()
         import time as _t
         import datetime as _dt
         now = _dt.datetime.utcnow()

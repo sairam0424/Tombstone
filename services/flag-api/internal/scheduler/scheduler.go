@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,13 +77,25 @@ type flagEvent struct {
 // runDue fetches and executes all due changes in one tick: fresh PENDING rows
 // plus previously-FAILED rows that still have retry budget and whose
 // next_retry_at backoff window has elapsed.
+//
+// FOR UPDATE SKIP LOCKED ensures that when flag-api runs as multiple replicas
+// each instance claims a disjoint batch of rows — preventing duplicate audit
+// entries and duplicate Redis events from concurrent execution of the same row.
 func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
-	rows, err := db.QueryContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		logger.Error("scheduler: begin transaction failed", zap.Error(err))
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id, flag_key, environment, change_payload
 		FROM scheduled_changes
 		WHERE (status = 'PENDING' AND scheduled_for <= NOW())
 		   OR (status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW())
 		ORDER BY scheduled_for ASC
+		FOR UPDATE SKIP LOCKED
 	`)
 	if err != nil {
 		logger.Error("scheduler: query pending changes failed", zap.Error(err))
@@ -101,6 +114,12 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	}
 	if err := rows.Err(); err != nil {
 		logger.Error("scheduler: rows iteration error", zap.Error(err))
+		return
+	}
+	// Commit the lock-acquisition transaction before executing changes
+	// (each applyChange opens its own sub-operation).
+	if err := tx.Commit(); err != nil {
+		logger.Error("scheduler: commit lock-acquisition transaction failed", zap.Error(err))
 		return
 	}
 
@@ -370,25 +389,34 @@ func writeAudit(ctx context.Context, db *sql.DB, log *zap.Logger,
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	var lastID, lastTs string
+	// Fetch the most recent audit row for this flag to build the Merkle chain.
+	var lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs string
 	_ = db.QueryRowContext(ctx, `
-		SELECT id, EXTRACT(EPOCH FROM created_at)::text
+		SELECT id, event_type, actor,
+		       COALESCE(prev_state::text, ''),
+		       COALESCE(new_state::text, ''),
+		       EXTRACT(EPOCH FROM created_at)::text
 		FROM audit_log
 		WHERE flag_key = $1
 		ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastTs)
+	`, flagKey).Scan(&lastID, &lastEventType, &lastActor, &lastPrevState, &lastNewState, &lastTs)
 
+	// Canonical 6-field pipe-separated Merkle formula — matches flags.go:auditEntryHash
+	// exactly so mixed-provenance chains remain verifiable.
+	// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
 	prevHash := ""
 	if lastID != "" {
-		hashBytes := sha256.Sum256([]byte(lastID + lastTs))
+		content := strings.Join([]string{lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs}, "|")
+		hashBytes := sha256.Sum256([]byte(content))
 		prevHash = fmt.Sprintf("%x", hashBytes)
 	}
 
+	newID := uuid.New().String()
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO audit_log
 		    (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8)
-	`, uuid.New().String(), flagKey, env, actor, eventType, prevJSON, currJSON, prevHash); err != nil {
+	`, newID, flagKey, env, actor, eventType, prevJSON, currJSON, prevHash); err != nil {
 		log.Warn("scheduler: audit log write failed", zap.Error(err))
 	}
 }

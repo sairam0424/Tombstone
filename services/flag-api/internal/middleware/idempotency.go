@@ -68,8 +68,11 @@ func (rec *idempotencyResponseRecorder) Write(b []byte) (int, error) {
 }
 
 // Handle returns the middleware. resource identifies the endpoint for the
-// (idempotency_key, endpoint) uniqueness constraint — callers pass a stable
+// (actor, idempotency_key, endpoint) uniqueness constraint — callers pass a stable
 // string per route (e.g. "POST /flags", "PATCH /flags/{key}/environments/{env}").
+// The actor is extracted from the request context (set by AuthMiddleware) so that
+// two different callers sharing the same Idempotency-Key string never share a cached
+// response — preventing SEC-001 (cross-caller cache poisoning).
 func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +81,14 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 				// No opt-in header — fully unchanged behavior.
 				next.ServeHTTP(w, r)
 				return
+			}
+
+			// Actor is injected by AuthMiddleware before this middleware runs.
+			// Default to empty string so existing tests without auth context still work,
+			// but in production the auth middleware always runs first.
+			actor := ""
+			if v, ok := r.Context().Value(ContextKeyActor).(string); ok {
+				actor = v
 			}
 
 			bodyBytes, err := io.ReadAll(r.Body)
@@ -92,11 +103,11 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 
 			var id string
 			insertErr := m.db.QueryRowContext(r.Context(), `
-				INSERT INTO idempotency_keys (idempotency_key, endpoint, request_hash)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (idempotency_key, endpoint) DO NOTHING
+				INSERT INTO idempotency_keys (actor, idempotency_key, endpoint, request_hash)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (actor, idempotency_key, endpoint) DO NOTHING
 				RETURNING id
-			`, key, endpoint, requestHash).Scan(&id)
+			`, actor, key, endpoint, requestHash).Scan(&id)
 
 			if insertErr == nil {
 				// New key — this is the only path where the real handler runs,
@@ -137,8 +148,8 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 			lookupErr := m.db.QueryRowContext(r.Context(), `
 				SELECT request_hash, completed_at, response_status, response_body
 				FROM idempotency_keys
-				WHERE idempotency_key = $1 AND endpoint = $2
-			`, key, endpoint).Scan(&storedHash, &completedAt, &responseStatus, &responseBody)
+				WHERE actor = $1 AND idempotency_key = $2 AND endpoint = $3
+			`, actor, key, endpoint).Scan(&storedHash, &completedAt, &responseStatus, &responseBody)
 			if lookupErr != nil {
 				m.logger.Error("idempotency: lookup failed",
 					zap.String("idempotency_key", key),

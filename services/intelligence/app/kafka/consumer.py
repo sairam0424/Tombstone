@@ -317,8 +317,8 @@ class RedisStreamsEventConsumer(EventConsumer):
         # Window buffer: same pattern as TelemetryConsumer._window
         window: dict[str, dict] = {}   # "flag_key:env" -> {"errors": int, "total": int}
         flush_interval = 10.0
-        last_flush = asyncio.get_event_loop().time()
-        last_reclaim = asyncio.get_event_loop().time()
+        last_flush = asyncio.get_running_loop().time()
+        last_reclaim = asyncio.get_running_loop().time()
 
         while self._running:
             try:
@@ -349,7 +349,7 @@ class RedisStreamsEventConsumer(EventConsumer):
                             )
 
                 # Flush detector every 10s (same cadence as TelemetryConsumer._flush_loop)
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 if now - last_flush >= flush_interval:
                     await self._flush(window)
                     window.clear()
