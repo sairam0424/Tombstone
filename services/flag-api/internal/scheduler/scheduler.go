@@ -3,11 +3,16 @@
 //
 // Design:
 //   - Ticks every 30 seconds.
-//   - Selects all PENDING rows WHERE scheduled_for <= NOW().
+//   - Selects all due rows: PENDING rows WHERE scheduled_for <= NOW(), PLUS
+//     FAILED rows that still have retries remaining AND whose next_retry_at
+//     has passed (see the retry/backoff section below).
 //   - For each due change: updates flag_environments, marks the row EXECUTED,
 //     writes an audit log entry, and publishes a Redis event.
-//   - On per-change errors: marks the row FAILED with an error_message, logs
-//     the error, and continues processing the remaining changes (best-effort).
+//   - On per-change errors: increments retry_count and marks the row FAILED
+//     with an error_message; if retries remain, schedules a future retry via
+//     next_retry_at (exponential backoff — see markFailed/backoffDuration).
+//     Once retries are exhausted, the row is permanently terminal, matching
+//     the pre-retry behavior: a human must recreate it via the API.
 //   - Respects context cancellation for graceful shutdown.
 package scheduler
 
@@ -68,12 +73,15 @@ type flagEvent struct {
 	Environment string `json:"environment"`
 }
 
-// runDue fetches and executes all due pending changes in one tick.
+// runDue fetches and executes all due changes in one tick: fresh PENDING rows
+// plus previously-FAILED rows that still have retry budget and whose
+// next_retry_at backoff window has elapsed.
 func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, flag_key, environment, change_payload
 		FROM scheduled_changes
-		WHERE status = 'PENDING' AND scheduled_for <= NOW()
+		WHERE (status = 'PENDING' AND scheduled_for <= NOW())
+		   OR (status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW())
 		ORDER BY scheduled_for ASC
 	`)
 	if err != nil {
@@ -202,15 +210,116 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	)
 }
 
-// markFailed sets a scheduled change to FAILED with a descriptive error message.
+// baseRetryDelay and maxRetryDelay define the exponential backoff envelope
+// for retried scheduled changes. Chosen to be consistent in shape with
+// Phase 2's resilient HTTP client (internal/httpclient.DefaultConfig):
+// bounded exponential growth with a hard cap. The absolute values differ
+// because this retries a DB-driven background job on a ~30s poll tick, not
+// a synchronous inter-service HTTP call — 200ms/5s (Phase 2's HTTP values)
+// would be pointless here since the poll loop itself only ticks every 30s.
+// Instead we pick delays that are multiples of the poll interval:
+//
+//	attempt 1 (retry_count 0->1): 1 minute  (2 poll ticks)
+//	attempt 2 (retry_count 1->2): 2 minutes (4 poll ticks)
+//	attempt 3 (retry_count 2->3): 4 minutes (8 poll ticks) -- exhausts default max_retries=3
+//
+// Formula: delay = baseRetryDelay * 2^(retryCount-1), capped at maxRetryDelay.
+const (
+	baseRetryDelay = 1 * time.Minute
+	maxRetryDelay  = 4 * time.Minute
+)
+
+// backoffDuration returns the exponential backoff delay to apply after the
+// Nth failure (retryCount is the POST-increment retry count, i.e. 1 for the
+// first failure). Doubles each attempt starting from baseRetryDelay, capped
+// at maxRetryDelay so a misconfigured max_retries can't produce runaway
+// delays.
+func backoffDuration(retryCount int) time.Duration {
+	if retryCount < 1 {
+		retryCount = 1
+	}
+	delay := baseRetryDelay << uint(retryCount-1) // baseRetryDelay * 2^(retryCount-1)
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	return delay
+}
+
+// markFailed records a per-change failure and decides whether the row gets
+// another chance or becomes permanently terminal.
+//
+// Retryable vs. permanent errors: this codebase currently treats ALL failure
+// branches identically (invalid JSON payload, missing enabled/rollout_pct,
+// flag/environment not found, DB read error, DB update error, zero rows
+// affected) via the same bounded retry-count mechanism, rather than
+// fast-failing "will never succeed" errors like "flag/environment not
+// found" straight to terminal FAILED.
+//
+// This is a deliberate simplification, not an oversight: with the default
+// max_retries=3 and the backoff schedule above, a doomed-to-fail change
+// costs at most ~7 minutes (1+2+4) of extra poll cycles before reaching the
+// same terminal FAILED state it would have hit immediately under fast-fail.
+// That's cheap compared to the alternative — hand-classifying every current
+// and future error branch as "transient" vs "permanent" and keeping that
+// classification correct as new failure modes are added to applyChange. If
+// a genuinely expensive or side-effecting failure mode is added later (e.g.
+// one that pages someone on every attempt), revisit this and fast-fail it
+// explicitly instead of changing the default here.
 func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg string) {
 	log.Error("scheduler: change failed", zap.String("error", errMsg))
+
+	var retryCount, maxRetries int
+	if err := db.QueryRowContext(ctx, `
+		SELECT retry_count, max_retries FROM scheduled_changes WHERE id = $1
+	`, id).Scan(&retryCount, &maxRetries); err != nil {
+		log.Error("scheduler: failed to read retry state, marking terminal FAILED", zap.Error(err))
+		if _, execErr := db.ExecContext(ctx, `
+			UPDATE scheduled_changes
+			SET status = 'FAILED', error_message = $1
+			WHERE id = $2
+		`, errMsg, id); execErr != nil {
+			log.Error("scheduler: failed to mark FAILED", zap.Error(execErr))
+		}
+		return
+	}
+
+	retryCount++
+
+	if retryCount < maxRetries {
+		// Retries remain: FAILED is a temporary holding state — the row is
+		// excluded from THIS poll cycle but becomes eligible again once
+		// next_retry_at passes (see the WHERE clause in runDue).
+		nextRetryAt := time.Now().Add(backoffDuration(retryCount))
+		log.Warn("scheduler: change failed, will retry",
+			zap.Int("retry_count", retryCount),
+			zap.Int("max_retries", maxRetries),
+			zap.Time("next_retry_at", nextRetryAt))
+
+		if _, err := db.ExecContext(ctx, `
+			UPDATE scheduled_changes
+			SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = $3
+			WHERE id = $4
+		`, errMsg, retryCount, nextRetryAt, id); err != nil {
+			log.Error("scheduler: failed to mark FAILED (retry pending)", zap.Error(err))
+		}
+		return
+	}
+
+	// Retry budget exhausted: permanently terminal, matching pre-retry
+	// behavior. Leave next_retry_at NULL — the runDue WHERE clause only
+	// re-selects rows with retry_count < max_retries, so this row will never
+	// be picked up again regardless of next_retry_at, but leaving it unset
+	// makes the terminal state unambiguous to a human inspecting the row.
+	log.Error("scheduler: retry budget exhausted, permanently FAILED",
+		zap.Int("retry_count", retryCount),
+		zap.Int("max_retries", maxRetries))
+
 	if _, err := db.ExecContext(ctx, `
 		UPDATE scheduled_changes
-		SET status = 'FAILED', error_message = $1
-		WHERE id = $2
-	`, errMsg, id); err != nil {
-		log.Error("scheduler: failed to mark FAILED", zap.Error(err))
+		SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = NULL
+		WHERE id = $3
+	`, errMsg, retryCount, id); err != nil {
+		log.Error("scheduler: failed to mark FAILED (terminal)", zap.Error(err))
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/marketplace/internal/api/v1"
+	"github.com/tombstone/marketplace/internal/health"
 	"github.com/tombstone/marketplace/internal/integrations"
 	"github.com/tombstone/marketplace/internal/registry"
 	"github.com/tombstone/marketplace/internal/telemetry"
@@ -121,6 +122,12 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","service":"marketplace"}`))
 	})
+
+	// Readiness check — marketplace has no Postgres; rdb may itself be nil
+	// when REDIS_URL is unset/invalid (Redis is optional here), and Checker
+	// treats a nil dependency as healthy rather than as a failure.
+	healthChecker := &health.Checker{RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	// Marketplace routes
 	r.Route("/api/v1/marketplace", func(r chi.Router) {
