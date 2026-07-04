@@ -1,7 +1,4 @@
-# Tombstone Terraform Provider — Infrastructure-as-Code
-
-> **Note:** This is a **v1.1+ cloud deployment guide** for infrastructure provisioning.
-> For Tombstone v1.0 local self-hosted development, use `make dev` from the root directory instead.
+# Tombstone Terraform Provider
 
 Infrastructure-as-Code for Tombstone feature flags. The `tombstone-io/tombstone`
 provider manages flags, environment bindings, and multi-region topology directly

@@ -1,24 +1,8 @@
 <idea-plugin>
   <id>io.tombstone.flags</id>
   <name>Tombstone Feature Flags</name>
-  <vendor email="support@tombstone.dev" url="https://github.com/sairam0424/Tombstone">Tombstone</vendor>
-  <description><![CDATA[
-    <p>Tombstone integrates your IDE with the Tombstone feature flag platform.</p>
-    <ul>
-      <li>Inline CodeLens showing live flag state (enabled/disabled, rollout %) directly above flag evaluation calls</li>
-      <li>Kill Switch action — disable any flag immediately from your editor without opening the dashboard</li>
-      <li>Natural-language flag search powered by Tombstone's NLP engine</li>
-      <li>Stale flag detection with one-click cleanup PR generation via ast-rewriter</li>
-      <li>Tool window showing all active flags, their blast-radius tier, and SLO status</li>
-    </ul>
-    <p>Requires a running Tombstone instance (self-hosted via Docker Compose). See <a href="https://github.com/sairam0424/Tombstone">GitHub</a> for setup.</p>
-  ]]></description>
-  <change-notes><![CDATA[
-    <b>0.1.0</b>
-    <ul>
-      <li>Initial release: CodeLens, Kill Switch action, flag search, stale detection, tool window</li>
-    </ul>
-  ]]></change-notes>
+  <vendor>Tombstone</vendor>
+  <description>Inline flag state, kill switch, and stale detection in your IDE</description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
     <codeInsight.inlayProvider language="any"

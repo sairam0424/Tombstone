@@ -52,11 +52,9 @@ lives in the artifacts it links, not here.
 
 ## Tombstone Domains
 
-| Domain | Goal | Cadence | Collector | Activation |
-|--------|------|---------|-----------|------------|
-| `flag-cleanup` | Eliminate stale flags before they become incidents | daily | `flag-api /api/v1/stale` | `bash scripts/loop-flag-cleanup.sh` |
-| `incident-response` | Correlate production incidents to causal flags; auto-rollback within SLO | on-trigger | `evaluator /api/v1/flags/{key}/slo` | `bash scripts/loop-incident-response.sh <key> <env>` |
-| `rollout-advisor` | Maximize experiment velocity and minimize collision risk | daily | `intelligence /api/v1/anomaly/{key}` | `bash scripts/loop-rollout-advisor.sh` |
-| `governance` | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` | `bash scripts/loop-governance.sh` |
-
-**Local-first self-hosted v1.0.0 (2026-06-27):** All loops now run as local scripts. No cloud GitHub Actions required. Activate each loop by running its script above from the project root.
+| Domain | Goal | Cadence | Collector |
+|--------|------|---------|-----------|
+| `flag-cleanup` | Eliminate stale flags before they become incidents | daily | `flag-api /api/v1/stale` |
+| `incident-response` | Correlate production incidents to causal flags; auto-rollback within SLO | on-trigger | `evaluator /api/v1/flags/{key}/slo` |
+| `rollout-advisor` | Maximize experiment velocity and minimize collision risk | daily | `intelligence /api/v1/anomaly/{key}` |
+| `governance` (planned) | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` |

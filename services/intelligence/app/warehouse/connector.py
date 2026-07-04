@@ -6,9 +6,10 @@ Tombstone only receives aggregated statistics (mean, std, sample size).
 from __future__ import annotations
 
 import abc
-import asyncio
 from dataclasses import dataclass
 from typing import Any
+
+from app.warehouse.executor import run_warehouse_query
 
 
 @dataclass
@@ -116,8 +117,9 @@ class PostgresConnector(WarehouseConnector):
 class SnowflakeConnector(WarehouseConnector):
     """
     Connector for Snowflake.
-    Uses the synchronous snowflake-connector-python driver wrapped in asyncio.to_thread
-    to avoid blocking the event loop. Maintains the same zero-copy CTE pattern.
+    Uses the synchronous snowflake-connector-python driver wrapped in
+    run_warehouse_query (dedicated bounded thread pool + timeout) to avoid
+    blocking the event loop. Maintains the same zero-copy CTE pattern.
 
     Install: pip install 'tombstone-intelligence[snowflake]'
     """
@@ -239,7 +241,7 @@ class SnowflakeConnector(WarehouseConnector):
         event_table: str,
         flag_event_table: str,
     ) -> dict[str, AggregatedMetric]:
-        return await asyncio.to_thread(
+        return await run_warehouse_query(
             self._run_query,
             flag_key,
             control_value,
@@ -253,7 +255,8 @@ class SnowflakeConnector(WarehouseConnector):
 class BigQueryConnector(WarehouseConnector):
     """
     Connector for Google BigQuery.
-    Uses the synchronous google-cloud-bigquery client wrapped in asyncio.to_thread.
+    Uses the synchronous google-cloud-bigquery client wrapped in
+    run_warehouse_query (dedicated bounded thread pool + timeout).
     BigQuery uses @param named parameter syntax for queries.
 
     Install: pip install 'tombstone-intelligence[bigquery]'
@@ -362,7 +365,7 @@ class BigQueryConnector(WarehouseConnector):
         event_table: str,
         flag_event_table: str,
     ) -> dict[str, AggregatedMetric]:
-        return await asyncio.to_thread(
+        return await run_warehouse_query(
             self._run_query,
             flag_key,
             control_value,

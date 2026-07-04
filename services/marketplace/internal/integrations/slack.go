@@ -11,9 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/tombstone/marketplace/internal/httpclient"
 )
 
 // SlackApp handles interactive Slack app features:
@@ -24,16 +29,24 @@ type SlackApp struct {
 	botToken      string // SLACK_BOT_TOKEN (xoxb-...)
 	signingSecret string // SLACK_SIGNING_SECRET
 	apiURL        string // flag-api URL for fetching flag state
-	httpClient    *http.Client
+	flagAPIToken  string // FLAG_API_TOKEN — Bearer token for flag-api RBAC (flags:kill_switch)
+	resilientHTTP *httpclient.ResilientClient
 }
 
 // NewSlackApp constructs a SlackApp with the given credentials and flag-api URL.
-func NewSlackApp(botToken, signingSecret, apiURL string) *SlackApp {
+// flagAPIToken must carry the flags:kill_switch RBAC permission on flag-api.
+// logger may be nil (defaults to a no-op logger), matching this package's other
+// constructors (e.g. rollback.NewExecutor, syncer.NewSyncer).
+func NewSlackApp(botToken, signingSecret, apiURL, flagAPIToken string, logger *zap.Logger) *SlackApp {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &SlackApp{
 		botToken:      botToken,
 		signingSecret: signingSecret,
 		apiURL:        apiURL,
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		flagAPIToken:  flagAPIToken,
+		resilientHTTP: httpclient.NewResilientClient(httpclient.DefaultConfig(), &http.Client{Timeout: 5 * time.Second}, logger),
 	}
 }
 
@@ -85,7 +98,7 @@ type TextObj struct {
 
 // Button is a Slack Block Kit interactive button element.
 type Button struct {
-	Type     string   `json:"type"`   // always "button"
+	Type     string   `json:"type"` // always "button"
 	Text     TextObj  `json:"text"`
 	ActionID string   `json:"action_id"`
 	Value    string   `json:"value,omitempty"`
@@ -100,6 +113,13 @@ type Confirm struct {
 	Confirm TextObj `json:"confirm"`
 	Deny    TextObj `json:"deny"`
 	Style   string  `json:"style,omitempty"` // "danger"
+}
+
+// HasSigningSecret reports whether a signing secret was provided at construction time.
+// Use this as the guard condition for signature verification — it uses the same value
+// as VerifySignature, preventing the split-brain where os.Getenv and s.signingSecret diverge.
+func (s *SlackApp) HasSigningSecret() bool {
+	return s.signingSecret != ""
 }
 
 // VerifySignature verifies a Slack request signature using timing-safe HMAC-SHA256.
@@ -325,11 +345,11 @@ func (s *SlackApp) PostMessage(ctx context.Context, channelID string, msg SlackM
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.botToken)
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("slack: post message: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	var result struct {
 		OK    bool   `json:"ok"`
@@ -400,17 +420,21 @@ func (s *SlackApp) killConfirmMessage(flagKey string) SlackMessage {
 // listCommand returns a message listing flags for the given environment.
 func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 	apiURL := fmt.Sprintf("%s/api/v1/flags?environment=%s&limit=10", s.apiURL, url.QueryEscape(env))
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return errorMessage("Could not build flag-api request: " + err.Error()), nil
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	var result struct {
 		Flags []struct {
-			Key    string `json:"key"`
-			State  bool   `json:"state"`
-			Rollout int   `json:"rollout_pct"`
+			Key     string `json:"key"`
+			State   bool   `json:"state"`
+			Rollout int    `json:"rollout_pct"`
 		} `json:"flags"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -425,10 +449,10 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Flags in %s* (showing up to 10):\n", env)
+	sb.WriteString(fmt.Sprintf("*Flags in %s* (showing up to 10):\n", env))
 	for _, f := range result.Flags {
 		badge := stateBadge(f.State, float64(f.Rollout))
-		fmt.Fprintf(&sb, "%s `%s` — %d%% rollout\n", badge, f.Key, f.Rollout)
+		sb.WriteString(fmt.Sprintf("%s `%s` — %d%% rollout\n", badge, f.Key, f.Rollout))
 	}
 
 	return SlackMessage{
@@ -448,11 +472,15 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 // searchCommand searches flags matching the query string.
 func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	apiURL := fmt.Sprintf("%s/api/v1/flags/search?q=%s", s.apiURL, url.QueryEscape(query))
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return errorMessage("Could not build flag-api request: " + err.Error()), nil
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	var result struct {
 		Results []struct {
@@ -472,10 +500,10 @@ func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Search results for %q*:\n", query)
+	sb.WriteString(fmt.Sprintf("*Search results for \"%s\"*:\n", query))
 	for _, f := range result.Results {
 		badge := stateBadge(f.State, 0)
-		fmt.Fprintf(&sb, "%s `%s`\n", badge, f.Key)
+		sb.WriteString(fmt.Sprintf("%s `%s`\n", badge, f.Key))
 	}
 
 	return SlackMessage{
@@ -492,8 +520,33 @@ func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	}, nil
 }
 
+// isAuthorizedKillSwitchUser returns true when the Slack user ID is allowed to
+// execute kill switches. Authorization is controlled by the SLACK_KILL_SWITCH_ALLOWED_USERS
+// env var — a comma-separated list of Slack user IDs (e.g. "U0123ABCD,U9876ZXYW").
+// When the env var is not set, all users are denied (fail-closed).
+func (s *SlackApp) isAuthorizedKillSwitchUser(slackUserID string) bool {
+	allowed := os.Getenv("SLACK_KILL_SWITCH_ALLOWED_USERS")
+	if allowed == "" {
+		return false // fail-closed: no explicit allowlist → nobody allowed
+	}
+	for _, uid := range strings.Split(allowed, ",") {
+		if strings.TrimSpace(uid) == slackUserID {
+			return true
+		}
+	}
+	return false
+}
+
 // executeKillSwitch calls flag-api to disable a flag and posts confirmation.
+// Requires action.UserID to be in SLACK_KILL_SWITCH_ALLOWED_USERS — fail-closed.
 func (s *SlackApp) executeKillSwitch(action BlockAction) error {
+	if !s.isAuthorizedKillSwitchUser(action.UserID) {
+		return s.postResponse(action.ResponseURL, SlackMessage{
+			ResponseType: "ephemeral",
+			Text:         "⛔ You are not authorized to execute kill switches. Contact a Tombstone admin.",
+		})
+	}
+
 	parts := strings.SplitN(action.Value, "|", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("kill_switch_confirm: malformed value %q", action.Value)
@@ -511,17 +564,18 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 
 	apiURL := fmt.Sprintf("%s/api/v1/flags/%s/kill?environment=%s",
 		s.apiURL, url.PathEscape(flagKey), url.QueryEscape(env))
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, apiURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("kill switch: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.flagAPIToken)
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return fmt.Errorf("kill switch: request failed: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	var confirmMsg SlackMessage
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -551,11 +605,15 @@ func (s *SlackApp) fetchFlagData(flagKey, env string) (map[string]interface{}, e
 	apiURL := fmt.Sprintf("%s/api/v1/flags/%s?environment=%s",
 		s.apiURL, url.PathEscape(flagKey), url.QueryEscape(env))
 
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("build get flag request: %w", err)
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return nil, fmt.Errorf("get flag: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("flag %q not found", flagKey)
@@ -578,11 +636,17 @@ func (s *SlackApp) postResponse(responseURL string, msg SlackMessage) error {
 		return fmt.Errorf("post response: marshal: %w", err)
 	}
 
-	resp, err := s.httpClient.Post(responseURL, "application/json", bytes.NewReader(payload)) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, responseURL, bytes.NewReader(payload)) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("post response: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return fmt.Errorf("post response: HTTP post: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 	return nil
 }
 

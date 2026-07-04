@@ -18,17 +18,18 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	v1 "github.com/sairam0424/Tombstone/services/flag-api/internal/api/v1"
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/middleware"
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/scheduler"
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/telemetry"
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/tlsutil"
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/transparency"
+	v1 "github.com/tombstone/flag-api/internal/api/v1"
+	"github.com/tombstone/flag-api/internal/health"
+	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/scheduler"
+	"github.com/tombstone/flag-api/internal/telemetry"
+	"github.com/tombstone/flag-api/internal/tlsutil"
+	"github.com/tombstone/flag-api/internal/transparency"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer func() { _ = logger.Sync() }()
+	defer logger.Sync()
 
 	ctx := context.Background()
 
@@ -87,8 +88,10 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
@@ -96,7 +99,6 @@ func main() {
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
-	changeReqH := v1.NewChangeRequestHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -107,12 +109,20 @@ func main() {
 	// Scheduled-change executor: applies due flag changes every 30 s.
 	go scheduler.Start(bgCtx, db, rdb, logger)
 
+	// Idempotency-key cleanup: purges expired idempotency_keys rows every hour.
+	go idempotencyMw.StartCleanup(bgCtx)
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -121,21 +131,31 @@ func main() {
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
+		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	healthChecker := &health.Checker{DB: db, RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
 		r.Use(rbacMw.LoadRole)
 
 		r.Get("/flags", flagH.ListFlags)
-		r.Post("/flags", flagH.CreateFlag)
+		// Idempotency-key support (opt-in via "Idempotency-Key" header) guards
+		// against a Phase-2 resilient-client retry executing the same mutation
+		// twice. Applied ONLY to CreateFlag, UpdateEnvironment, and KillSwitch —
+		// not globally, and not to any other route.
+		r.With(idempotencyMw.Handle("POST /flags")).
+			Post("/flags", flagH.CreateFlag)
 		r.Get("/flags/{key}", flagH.GetFlag)
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
-		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
+		r.With(idempotencyMw.Handle("PATCH /flags/{key}/environments/{env}")).
+			Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 
 		// Kill-switch: restricted to OWNER and ADMIN only (flags:kill_switch permission).
 		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+			With(idempotencyMw.Handle("POST /flags/{key}/kill")).
 			Post("/flags/{key}/kill", flagH.KillSwitch)
 
 		// Flag prerequisites (GrowthBook ParentConditions pattern)
@@ -154,13 +174,6 @@ func main() {
 		r.Get("/compliance/evidence", complianceH.GetEvidence)
 		r.Get("/compliance/controls", complianceH.GetControls)
 		r.Get("/compliance/export", complianceH.ExportAuditLog)
-
-		// Change-request approval queue
-		r.Route("/change-requests", func(r chi.Router) {
-			r.Get("/", changeReqH.ListChangeRequests)
-			r.Post("/{id}/approve", changeReqH.ApproveChangeRequest)
-			r.Post("/{id}/reject", changeReqH.RejectChangeRequest)
-		})
 
 		// Break-glass endpoints: all require elevated roles.
 		// CreateToken and ListTokens require ADMIN (admin:admin permission).

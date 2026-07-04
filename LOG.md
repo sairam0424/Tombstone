@@ -30,9 +30,13 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
-## 2026-06-27 · v1.0.0-local shipped — self-hosted release · #release
-What: All 8 services running via make dev, React 19 dashboard all views functional, CONTRIBUTING/CODE_OF_CONDUCT/GitHub templates/GETTING_STARTED/GLOSSARY/Python+Ruby SDK READMEs added.
-Refs: README.md (updated, v1.0.0 section), SECURITY.md (updated, self-hosted checklist), packages/sdks/flagmind-python/README.md (new), packages/sdks/flagmind-ruby/README.md (new).
+## 2026-07-05 · v1.2.0 — resilience-patterns initiative complete · #infra #analysis #product
+What: 10 resilience phases (#62–#71) + 4 audit-fix blockers (#72) shipped to develop and cut as v1.2.0. Covers retry/backoff/jitter, circuit breakers, distributed rate limiting, adaptive load shedding, idempotency keys, Redis Streams DLQ, scheduler FOR UPDATE SKIP LOCKED, webhook dedup, intelligence asyncio hardening, and snapshot reconciliation.
+Refs: PRs #62-#72 merged to develop; release/v1.2.0 → PR to main.
+
+## 2026-07-03 · Documentation upgrade — 3 new architecture docs + KB repair · #infra #harness #analysis
+What: Added DATA_MODEL.md, DEPLOYMENT_ARCHITECTURE.md, SDK_CONTRACT.md. Repaired docs/README.md's stale index and missing kind:doc frontmatter on 9 files; fixed domains/README.md's flag-cleanup collector attribution bug.
+Refs: [DATA_MODEL.md](DATA_MODEL.md) (new), [DEPLOYMENT_ARCHITECTURE.md](DEPLOYMENT_ARCHITECTURE.md) (new), [SDK_CONTRACT.md](SDK_CONTRACT.md) (new), docs/README.md (updated), domains/README.md (updated).
 
 ## 2026-06-24 · v2.1.0 shipped — all 10 phases complete · #infra #loop #harness
 What: Redis Streams (Phase 4.1), Slack HTTP routes + governance loop, mTLS (Phase 6.1), Argos LLM rule generation (Phase 3.2) merged to main. All 32 items from the 10-phase beast/ultimate upgrade plan are fully implemented.

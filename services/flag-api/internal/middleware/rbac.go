@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/rego"
 	"go.uber.org/zap"
 )
 
@@ -189,7 +189,7 @@ func (mw *RBACMiddleware) watchPolicies(policyDir string) {
 		mw.logger.Warn("[rbac] fsnotify unavailable — hot-reload disabled", zap.Error(err))
 		return
 	}
-	defer func() { _ = watcher.Close() }()
+	defer watcher.Close()
 
 	if err := watcher.Add(policyDir); err != nil {
 		mw.logger.Warn("[rbac] cannot watch policy dir — hot-reload disabled",

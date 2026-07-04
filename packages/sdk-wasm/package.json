@@ -1,5 +1,5 @@
 {
-  "name": "@tomb-stone/eval",
+  "name": "@tombstone/eval",
   "version": "0.1.0",
   "description": "Zero-dependency evaluation engine for Tombstone — WASM-ready, runs in any JS runtime",
   "type": "module",
@@ -8,26 +8,10 @@
   "exports": {
     ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }
   },
-  "repository": { "type": "git", "url": "git+https://github.com/sairam0424/Tombstone.git" },
-  "homepage": "https://github.com/sairam0424/Tombstone",
-  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
-  "license": "MIT",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && node --experimental-vm-modules ../../node_modules/.bin/mocha 'dist/tests/*.test.js'"
   },
-  "keywords": [
-    "feature-flags",
-    "feature-toggles",
-    "wasm",
-    "cloudflare-workers",
-    "deno",
-    "edge",
-    "zero-dependency",
-    "openfeature",
-    "self-hosted",
-    "tombstone"
-  ],
   "devDependencies": {
     "typescript": "~5.8.2",
     "@types/node": "^22.0.0",

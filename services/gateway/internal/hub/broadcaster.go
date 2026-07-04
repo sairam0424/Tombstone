@@ -36,7 +36,7 @@ func (b *Broadcaster) Run(ctx context.Context) {
 			b.logger.Warn("broadcaster disconnected, reconnecting",
 				zap.Error(err), zap.Duration("backoff", backoff))
 			select {
-			case <-time.After(backoff):
+			case <-time.After(JitterBackoff(backoff)):
 			case <-ctx.Done():
 				return
 			}
@@ -52,7 +52,7 @@ func (b *Broadcaster) Run(ctx context.Context) {
 func (b *Broadcaster) subscribe(ctx context.Context) error {
 	// PSUBSCRIBE matches all stream channels across all environments
 	pubsub := b.rdb.PSubscribe(ctx, "stream:*:updates")
-	defer func() { _ = pubsub.Close() }()
+	defer pubsub.Close()
 
 	b.logger.Info("broadcaster subscribed to Redis pub/sub")
 
@@ -112,7 +112,7 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 				zap.Error(err),
 				zap.Duration("backoff", backoff))
 			select {
-			case <-time.After(backoff):
+			case <-time.After(JitterBackoff(backoff)):
 			case <-ctx.Done():
 				return
 			}
@@ -131,9 +131,15 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 			}
 			var event FlagEvent
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
-				b.logger.Warn("stream: failed to unmarshal event",
+				// Do NOT ack — leave the message pending. A poison payload
+				// deserves retries (it may be a transient producer bug) and,
+				// failing that, a DLQ record — not a silent, permanent drop.
+				// ReclaimStalePending (dlq.go), running on its own ticker in
+				// cmd/main.go, decides this message's fate: XCLAIM + retry
+				// while under maxDeliveryAttempts, or XADD to "<stream>:dlq"
+				// + XACK once the attempt budget is exhausted.
+				b.logger.Warn("stream: failed to unmarshal event, leaving pending for reclaim sweep",
 					zap.Error(err), zap.String("id", msg.ID))
-				AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
 				continue
 			}
 			b.hub.Broadcast(environment, event)

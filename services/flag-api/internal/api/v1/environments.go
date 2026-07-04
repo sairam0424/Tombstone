@@ -73,7 +73,7 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
 	// Build index: flag_id -> FlagEnvironmentStateWithPrereqs
 	// We use a slice to preserve ORDER BY f.key ordering.
@@ -107,7 +107,7 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("prerequisites query failed; returning snapshot without prerequisites",
 			zap.Error(err))
 	} else {
-		defer func() { _ = prereqRows.Close() }()
+		defer prereqRows.Close()
 		for prereqRows.Next() {
 			var flagID string
 			var p SnapshotPrerequisite

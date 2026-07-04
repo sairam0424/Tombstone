@@ -89,8 +89,9 @@ type EnvStats struct {
 // One EnvironmentBroadcaster exists per environment; it is created lazily
 // on first Subscribe and lives for the lifetime of the Hub.
 type Hub struct {
-	envs   sync.Map // environment (string) → *EnvironmentBroadcaster
-	logger *zap.Logger
+	envs      sync.Map // environment (string) → *EnvironmentBroadcaster
+	snapshots sync.Map // environment (string) → []byte (last-known full snapshot JSON, set by the reconciler)
+	logger    *zap.Logger
 }
 
 func NewHub(logger *zap.Logger) *Hub {
@@ -194,6 +195,23 @@ func (h *Hub) AllConnectionCounts() map[string]int {
 		return true
 	})
 	return result
+}
+
+// LastSnapshot returns the last-known full snapshot JSON for environment, as
+// recorded by the reconciler, and whether one has been recorded yet. Used to
+// diff the freshly-fetched flag-api snapshot against what the hub last saw.
+func (h *Hub) LastSnapshot(environment string) ([]byte, bool) {
+	v, ok := h.snapshots.Load(environment)
+	if !ok {
+		return nil, false
+	}
+	return v.([]byte), true
+}
+
+// SetLastSnapshot records the full snapshot JSON for environment. Called by
+// the reconciler after every poll so the next poll can diff against it.
+func (h *Hub) SetLastSnapshot(environment string, snapshot []byte) {
+	h.snapshots.Store(environment, snapshot)
 }
 
 // sseFrame builds a raw SSE wire-format frame for a FlagEvent.

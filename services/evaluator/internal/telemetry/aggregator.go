@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/circuit"
+	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )

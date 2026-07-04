@@ -47,7 +47,7 @@ The dashboard opens at **http://localhost:3000**.
 | **marketplace** | http://localhost:8086 | Integrations: Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear |
 | **PostgreSQL** | localhost:5433 | Primary store + pgvector |
 | **Redis** | localhost:6380 | Pub/sub, Streams |
-| **Kafka** | localhost:9092 | Event bus |
+| **Kafka** | localhost:9092 | Event bus (optional — only needed if `CONSUMER_BACKEND=kafka`) |
 
 ---
 
@@ -117,7 +117,7 @@ const enabled = await client.isEnabled('checkout-v2', {
 ### Python
 
 ```bash
-pip install tombstone
+pip install tombstone-sdk
 ```
 
 ```python
@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.0.0
+## What Is in v1.2.0
 
-This is the first stable self-hosted release of Tombstone. Everything runs locally with `make dev`.
+This is the v1.2.0 self-hosted release of Tombstone — the production resilience upgrade. Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -175,8 +175,22 @@ This is the first stable self-hosted release of Tombstone. Everything runs local
 | TypeScript/Python/React SDKs | Stable |
 | MCP server | Stable |
 | Cmd+K command palette | Stable |
+| Slack slash commands + kill switch | Stable |
+| Redis Streams flag delivery | Stable |
+| Governance loop Slack alerts | Stable |
+| Resilient inter-service HTTP client (retry + jitter + circuit breaker) | Stable |
+| Dependency-aware `/readyz` health probes across all services | Stable |
+| Distributed Redis-backed rate limiting | Stable |
+| Adaptive load shedding | Stable |
+| Idempotency keys for mutation endpoints | Stable |
+| Snapshot reconciliation for dual-write gap recovery | Stable |
+| Redis Streams DLQ for poison message handling | Stable |
+| Reconnect jitter (thundering-herd prevention) | Stable |
+| Scheduler retry with `FOR UPDATE SKIP LOCKED` | Stable |
+| Webhook delivery deduplication | Stable |
+| Intelligence asyncio hardening + warehouse query timeouts | Stable |
 
-Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra/ for those guides.
+Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.0 details.
 
 ---
 
@@ -186,6 +200,7 @@ Cloud deployment (Northflank, Vercel, Kubernetes) is planned for v1.1. See infra
 |-------|---------------|
 | [Why Tombstone](docs/WHY_TOMBSTONE.md) | USPs, competitive comparison, use cases, honest caveats — start here to evaluate |
 | [Discoverability Roadmap](docs/DISCOVERABILITY.md) | GitHub topics, OSS launch strategy, awesome-go, CNCF, OpenFeature — how to grow Tombstone |
+| [Discoverability Log](docs/DISCOVERABILITY_LOG.md) | Every distribution action taken — packages published, articles live, PRs open, newsletters sent |
 | [Submission Guide](docs/SUBMISSION_GUIDE.md) | Every platform where Tombstone can be listed — 77 platforms, prioritized by effort/impact with exact URLs and steps |
 | [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
 | [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |

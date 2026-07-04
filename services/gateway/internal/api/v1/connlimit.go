@@ -67,7 +67,7 @@ func checkSSEConnLimit(w http.ResponseWriter, environment string) bool {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = fmt.Fprintf(w, `{"error":"SSE connection limit reached for environment","environment":%q,"limit":%d}`,
+		fmt.Fprintf(w, `{"error":"SSE connection limit reached for environment","environment":%q,"limit":%d}`,
 			environment, connLimiter.maxPerEnv)
 		return false
 	}

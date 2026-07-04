@@ -1,7 +1,5 @@
 # Tombstone Dashboard
 
-Run locally via `make dev` from the repo root. Dashboard opens at http://localhost:3000 (local dev, self-hosted v1.0.0)
-
 React 19 + Vite + Tailwind v4 management UI for Tombstone. Connects to `flag-api` (`:8081`) for CRUD and governance operations and to `gateway` (`:8080`) for live SSE flag-state updates.
 
 ## Views
@@ -46,28 +44,6 @@ npm run preview
 | `VITE_GATEWAY_URL` | `http://localhost:8080` | gateway SSE base URL |
 
 Set these in a `.env.local` file (git-ignored) for local overrides.
-
-## Feature Availability
-
-Three environment variables control which sections of the dashboard are rendered:
-
-| Variable | Default in Docker Compose | Description |
-|----------|--------------------------|-------------|
-| `VITE_ENABLE_INTELLIGENCE` | `true` | Enables the Intelligence / anomaly-detection panel and NLP flag search |
-| `VITE_ENABLE_EVALUATOR` | `true` | Enables the Blast Radius, Circuit Breaker, and SLO health views |
-| `VITE_ENABLE_MARKETPLACE` | `true` | Enables the flag-template Marketplace view |
-
-These are set to `true` automatically when running via `make dev` (Docker Compose injects them).
-
-For local development **outside Docker** (e.g. `npm run dev` directly), create `workspace-dashboard/.env.local` and add:
-
-```
-VITE_ENABLE_INTELLIGENCE=true
-VITE_ENABLE_EVALUATOR=true
-VITE_ENABLE_MARKETPLACE=true
-```
-
-Set any variable to `false` to hide that section from the UI without affecting backend services.
 
 ## Stack
 

@@ -14,8 +14,6 @@ import {
   PolarAngleAxis,
 } from 'recharts';
 import { useFlagSLO, type SLOWindow, type SLOHistoryPoint } from '../../hooks/useFlagSLO.js';
-import { ENABLE_EVALUATOR } from '../../config.js';
-import { EmptyState } from '../../components/ui/index.js';
 
 // ── Circuit state badge ───────────────────────────────────────────────────────
 
@@ -147,19 +145,7 @@ const WINDOWS: { label: string; value: SLOWindow }[] = [
 export default function SLOView() {
   const { key } = useParams<{ key: string }>();
   const [selectedWindow, setSelectedWindow] = useState<SLOWindow>('7d');
-  const isEvalAvailable = ENABLE_EVALUATOR;
   const { data, loading, error } = useFlagSLO(key ?? '', selectedWindow);
-
-  if (!isEvalAvailable) {
-    return (
-      <div style={{ padding: '32px 40px' }}>
-        <EmptyState
-          heading="Evaluator service offline"
-          body="Enable the 'feature-evaluator-service' flag in Tombstone when the evaluator is deployed."
-        />
-      </div>
-    );
-  }
 
   if (!key) return <div className="p-8 text-red-400">Missing flag key in URL.</div>;
 

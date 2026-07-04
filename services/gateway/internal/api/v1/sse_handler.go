@@ -8,7 +8,7 @@ import (
 	"time"
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
+	"github.com/tombstone/gateway/internal/hub"
 	"go.uber.org/zap"
 )
 
@@ -68,7 +68,7 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		"environment": environment,
 		"ts":          time.Now().Unix(),
 	})
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData)
+	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData)
 	flusher.Flush()
 
 	// Use the chi request ID as the stable client identifier so log lines are
@@ -99,7 +99,7 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 
 		case <-heartbeat.C:
-			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: {\"ts\":%d}\n\n", time.Now().Unix())
+			fmt.Fprintf(w, "event: heartbeat\ndata: {\"ts\":%d}\n\n", time.Now().Unix())
 			flusher.Flush()
 
 		case <-r.Context().Done():

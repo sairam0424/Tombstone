@@ -13,7 +13,7 @@ This loop reads those candidates, generates cleanup PRs via ast-rewriter, and ke
 inventory under the 500-flag project limit.
 
 **Entry point:** `scripts/loop-flag-cleanup.sh`
-**Activation:** These loops run as local scripts. Activate by running: `bash scripts/loop-flag-cleanup.sh`
+**Trigger:** daily cron at 02:00 UTC (`.github/workflows/loop-flag-cleanup.yml`)
 **MCP tools used:** `tombstone_list_stale_flags`, `tombstone_generate_cleanup_pr`
 
 ## Current focus
@@ -38,5 +38,4 @@ Collector writes to `domains/flag-cleanup/metrics/stale.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | what you did and found -->
-2026-06-24 | Loop scaffolded and deployed to main. Local script ready (daily 02:00 UTC schedule recommended).
-2026-06-27 | Converted to local-first v1.0.0 self-hosted activation via bash scripts/loop-flag-cleanup.sh
+2026-06-24 | Loop scaffolded and deployed to main. Cron trigger wired (daily 02:00 UTC). Pending GitHub Actions var TOMBSTONE_INTELLIGENCE_URL to activate.

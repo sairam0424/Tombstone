@@ -12,15 +12,16 @@ import (
     "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
     "go.uber.org/zap"
 
-    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/parser"
-    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/syncer"
-    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/telemetry"
-    "github.com/sairam0424/Tombstone/services/gitops-sync/internal/validator"
+    "github.com/tombstone/gitops-sync/internal/health"
+    "github.com/tombstone/gitops-sync/internal/parser"
+    "github.com/tombstone/gitops-sync/internal/syncer"
+    "github.com/tombstone/gitops-sync/internal/telemetry"
+    "github.com/tombstone/gitops-sync/internal/validator"
 )
 
 func main() {
     logger, _ := zap.NewProduction()
-    defer func() { _ = logger.Sync() }()
+    defer logger.Sync()
 
     initCtx := context.Background()
 
@@ -55,8 +56,14 @@ func main() {
     r := chi.NewRouter()
 
     r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-        _, _ = fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
+        fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
     })
+
+    // gitops-sync has no Postgres or Redis dependency of its own — it is
+    // stateless aside from calling flag-api over HTTP. Checker with both
+    // fields nil always reports ready.
+    healthChecker := &health.Checker{}
+    r.Get("/readyz", healthChecker.Readyz)
 
     // POST /api/v1/sync — triggered by CI/CD webhook on merge
     r.Post("/api/v1/sync", func(w http.ResponseWriter, r *http.Request) {

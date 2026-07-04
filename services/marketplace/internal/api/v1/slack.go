@@ -5,11 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 
 	"go.uber.org/zap"
 
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
+	"github.com/tombstone/marketplace/internal/integrations"
 )
 
 // HandleSlackCommands handles POST /api/v1/marketplace/slack/commands
@@ -21,11 +20,12 @@ func (h *Handler) HandleSlackCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signature verification — only enforce when SLACK_SIGNING_SECRET is set.
+	// Signature verification — only enforce when SlackApp was constructed with a signing secret.
+	// Use HasSigningSecret() so the guard and the HMAC key always reference the same value,
+	// preventing split-brain if the env var changes after startup.
 	timestamp := r.Header.Get("X-Slack-Request-Timestamp")
 	signature := r.Header.Get("X-Slack-Signature")
-	slackSecret := os.Getenv("SLACK_SIGNING_SECRET")
-	if slackSecret != "" && !h.slackApp.VerifySignature(timestamp, string(rawBody), signature) {
+	if h.slackApp.HasSigningSecret() && !h.slackApp.VerifySignature(timestamp, string(rawBody), signature) {
 		h.logger.Warn("slack commands: signature verification failed",
 			zap.String("timestamp", timestamp))
 		h.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
@@ -69,11 +69,10 @@ func (h *Handler) HandleSlackActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signature verification — only enforce when SLACK_SIGNING_SECRET is set.
+	// Signature verification — only enforce when SlackApp was constructed with a signing secret.
 	timestamp := r.Header.Get("X-Slack-Request-Timestamp")
 	signature := r.Header.Get("X-Slack-Signature")
-	slackSecret := os.Getenv("SLACK_SIGNING_SECRET")
-	if slackSecret != "" && !h.slackApp.VerifySignature(timestamp, string(rawBody), signature) {
+	if h.slackApp.HasSigningSecret() && !h.slackApp.VerifySignature(timestamp, string(rawBody), signature) {
 		h.logger.Warn("slack actions: signature verification failed",
 			zap.String("timestamp", timestamp))
 		h.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})

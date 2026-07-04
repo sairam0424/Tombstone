@@ -4,7 +4,7 @@
 # -------------------------------------------------------------------
 # Stage 1: Build
 # -------------------------------------------------------------------
-FROM golang:1.25-alpine AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 
@@ -26,9 +26,6 @@ RUN GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # Stage 2: Runtime
 # -------------------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
-LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
-      org.opencontainers.image.description="Tombstone tombstone-operator service" \
-      org.opencontainers.image.licenses="MIT"
 
 # Copy the operator binary only — nothing else needed.
 COPY --from=builder /operator /operator

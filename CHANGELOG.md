@@ -11,6 +11,76 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.2.0] - 2026-07-05
+
+### Added
+- **Resilient HTTP client** (failsafe-go): all inter-service HTTP calls now retry with exponential back-off + jitter and open a per-client circuit breaker after N consecutive failures — evaluator→flag-api kill-switch, marketplace→flag-api/evaluator, gitops-sync→flag-api, tombstone-operator→flag-api, gateway→flag-api snapshot proxy (#66)
+- **Dependency-aware `/readyz` endpoint** across all 6 services: pings Postgres + Redis with a 3 s timeout and returns 503 if either fails; existing `/health` keeps its unconditional-200 contract (#63)
+- **Distributed rate limiting via Redis Lua**: flag-api and evaluator rate limiters moved from per-process `sync.Map` to a single atomic Lua script so multi-replica deployments share one limit (#65)
+- **Adaptive load shedding**: failsafe-go Adaptive Limiter on flag-api and evaluator sheds requests when the service itself is saturated (returns 503 + Retry-After), layered after rate limiting (#69)
+- **Idempotency keys for mutation endpoints**: `CreateFlag`, `UpdateEnvironment`, and `KillSwitch` accept an opt-in `Idempotency-Key` header; replayed requests return the stored response without re-invoking the handler or writing a second audit row. Keys are scoped to `(actor, idempotency_key, endpoint)` — preventing cross-caller cache poisoning. Migration 010 + 012 (#71, #72)
+- **Snapshot reconciliation**: gateway polls flag-api's snapshot endpoint every 5 minutes and broadcasts deltas to close the dual-write notification gap (#71)
+- **Redis Streams DLQ**: gateway and intelligence consumers no longer silently drop poison messages; failed deliveries are left in the PEL, reclaimed by a 15 s sweep (XPENDING + XCLAIM), and routed to `<stream>:dlq` after `maxDeliveryAttempts = 3`. Manual replay via `POST /internal/dlq/{env}/replay` (auth-guarded). Intelligence consumer mirrors the same constants for consistent per-environment DLQ key naming (#70, #72)
+- **Reconnect jitter**: gateway's Redis pub/sub, Redis Streams, and SSE relay reconnect loops now apply ±20 % jitter to prevent thundering-herd storms across replicas (#62)
+- **Scheduler retry/backoff**: scheduled changes are retried up to 3 times with exponential back-off (1 min → 2 → 4) before reaching terminal FAILED; `SELECT FOR UPDATE SKIP LOCKED` prevents duplicate execution across replicas. Migrations 011, 012 (#67, #72)
+- **Webhook deduplication**: marketplace outbound webhooks use the resilient client (retry + per-integration circuit breaker) and send a deterministic `Idempotency-Key` header on every attempt (#68)
+- **Intelligence asyncio hardening**: daily background tasks (anomaly retrain, dep-graph rebuild) guarded by a shared `asyncio.Lock`; warehouse queries run on a dedicated bounded `ThreadPoolExecutor(max_workers=4)` with a 30 s `asyncio.wait_for` timeout, isolated from the embedding-model's default executor (#64)
+
+### Fixed
+- Merkle chain formula mismatch: `scheduler.go writeAudit` now uses the canonical 6-field pipe-separated `sha256(id|event_type|actor|prev_state|new_state|ts)` formula matching `flags.go`, ensuring Merkle chain verification works for flags modified by both code paths (#72)
+- `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()` at 5 sites in the intelligence service (Python 3.12 DeprecationWarning eliminated) (#72)
+- DLQ replay endpoint is now guarded by `FLAG_API_TOKEN` bearer authentication (#72)
+- Migration 012 adds `actor` column to `idempotency_keys` and re-keys the unique index to `(actor, idempotency_key, endpoint)` (#72)
+
+---
+
+## [1.1.0] - 2026-06-28
+
+First increment of the public self-hosted release. All changes are backward-compatible — `make dev` and existing `.env` files continue to work without modification.
+
+### Added
+
+**Slack Integration (marketplace service)**
+- `POST /api/v1/marketplace/slack/commands` — slash command handler (`/tombstone status`, `kill`, `list`, `search`)
+- `POST /api/v1/marketplace/slack/actions` — block action handler (Kill Switch button, dismiss)
+- Signature verification using `SLACK_SIGNING_SECRET` via timing-safe HMAC-SHA256
+- Kill switch authorization gated by `SLACK_KILL_SWITCH_ALLOWED_USERS` (comma-separated Slack user IDs, fail-closed)
+
+**Governance Loop**
+- `scripts/loop-governance.sh` now sends Slack alerts when `health_score < 0.80` or `stale_count > 50`
+- Requires `SLACK_WEBHOOK_URL`; gracefully skips when unset
+- `domains/governance/README.md` — charter, cadence, metrics thresholds, activation vars
+
+**Redis Streams (flag delivery)**
+- flag-api publishes events to `tombstone:stream:{environment}` via `XADD` alongside legacy `PUBLISH`
+- gateway defaults to `CONSUMER_BACKEND: streams` — uses `XREADGROUP`/`XACK` consumer group (`gateway-workers`)
+- Kafka is now optional (only needed if `CONSUMER_BACKEND=kafka`); marked as such in `docker-compose.yml` and README
+
+**Test Coverage**
+- flag-api: CreateFlag validation (table-driven), Merkle chain integrity, audit hash
+- evaluator: blast radius tier classification (BLOCKED/HIGH/MEDIUM/LOW), rollback execution mock
+- gateway: SSE hub multi-client broadcast, backpressure lag event
+- flag-api/tlsutil: full PKI chain + mTLS round-trip integration test, TLS 1.3 enforcement, opt-in fallback
+
+### Changed
+- `.env.example`: added `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_WEBHOOK_URL`, `SLACK_KILL_SWITCH_ALLOWED_USERS`
+- `.env.example` `CONSUMER_BACKEND` documentation corrected: `=redis` → `=streams`
+- Kafka service in `docker-compose.yml` marked `# Optional — only needed if CONSUMER_BACKEND=kafka`
+
+### Fixed
+- Slack kill switch now correctly sets `Authorization: Bearer <FLAG_API_TOKEN>` on flag-api requests (was silently failing with 401)
+- Slack signature guard and HMAC key now use the same startup snapshot (`HasSigningSecret()`) — eliminates split-brain if env var changes post-startup
+
+---
+
+## [1.0.0] - 2026-06-27
+
+First public self-hosted release. See prior CHANGELOG entries for full development history.
+
+---
+
+<!-- Internal development versions below — not public releases -->
+
 ## [2.2.0] - 2026-06-24
 
 ### Added — Fly.io Free-Tier Deployment
@@ -235,15 +305,8 @@ Initial production release of Tombstone (formerly FlagMind). Covers Phases 1–4
 - `TombstoneProvider` — React context provider wrapping the core SDK.
 - `useFlag(key)`, `useFlagVariation(key, defaultValue)`, `useTombstoneClient()` hooks.
 
-**workspace-dashboard** (React 19, Vite 8 + Rolldown, Tailwind v4, OKLCH design system):
+**workspace-dashboard** (React 19, Vite, Tailwind v4):
 - Production intelligence UI: flag list, flag detail with audit timeline, kill-switch panel, blast radius visualization, "What Changed?" incident query, anomaly chart.
-- All views: FlagList, FlagDetail, ApprovalQueue, BreakGlass, IncidentTimeline, DependencyGraph, GovernanceDash, Experiments, Marketplace, SLOView.
-- Inline rollout % slider in FlagDetail — click the Rollout % card to edit inline.
-- CommandPalette (Cmd+K) with live NLP flag search.
-- TanStack Query v5 + React 19 concurrent patterns (useOptimistic, useDeferredValue, useTransition).
-- Service availability gates via `VITE_ENABLE_INTELLIGENCE`, `VITE_ENABLE_EVALUATOR`, `VITE_ENABLE_MARKETPLACE` env vars.
-- ApprovalQueue auto-refresh every 30s; GovernanceDash, SLOView, and Experiments all functional locally.
-- Zero-config local dev: `cp infra/.env.example infra/.env && make dev` starts the complete platform.
 
 **workspace-cli** (`@tombstone/cli`, Commander):
 - `tombstone flags list`, `tombstone flags get <key>`, `tombstone flags kill <key>`, `tombstone flags create`, `tombstone blast-radius <key>`.

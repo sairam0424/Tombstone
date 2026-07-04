@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sairam0424/Tombstone/services/ast-rewriter/internal/scanner"
+	"github.com/tombstone/ast-rewriter/internal/scanner"
 )
 
 // RewriteResult describes the outcome of a rewrite (or diff-preview) operation.

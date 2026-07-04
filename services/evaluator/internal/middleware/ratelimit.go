@@ -1,15 +1,16 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -21,48 +22,104 @@ const (
 	defaultRatePerMin = 200
 	// defaultBurst is the burst capacity for non-telemetry routes.
 	defaultBurst = 20
-	// staleTTL is how long after last-seen before an entry is evicted.
-	staleTTL = 10 * time.Minute
-	// cleanupInterval is the period between eviction passes.
-	cleanupInterval = 5 * time.Minute
 
 	// telemetryPath is the high-throughput ingest endpoint.
 	telemetryPath = "/api/v1/telemetry"
+
+	// keyPrefixTelemetry / keyPrefixDefault namespace the Redis bucket hash
+	// keys so the two route classes never collide for the same IP.
+	keyPrefixTelemetry = "ratelimit:telemetry:"
+	keyPrefixDefault   = "ratelimit:default:"
 )
 
-// entry holds a limiter together with the last time it was used.
-type entry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
+// bucketScriptSrc is a single atomic Lua script implementing a leaky-bucket
+// rate limiter directly in Redis. This is the storage layer for distributed
+// rate limiting: bucket state (units remaining, last refill time) lives in
+// Redis instead of in-process memory, so every replica of this service
+// enforces the SAME limit instead of each replica tracking its own
+// independent bucket (which would multiply the effective limit by the
+// replica count).
+//
+// Per Redis's own documented guidance, the check-and-update step is a single
+// EVAL/EVALSHA call rather than WATCH/MULTI/EXEC — optimistic WATCH-based
+// transactions abort and retry precisely under the high-concurrency
+// conditions rate limiting exists to handle, whereas a Lua script runs to
+// completion atomically with no retries and no lost updates.
+//
+// KEYS[1] = bucket identifier
+// ARGV[1] = capacity (burst size)
+// ARGV[2] = refill rate, units per second
+// ARGV[3] = requested units (always 1 for this middleware)
+// ARGV[4] = current unix time, seconds (float), supplied by the caller
+//
+// Returns {allowed ("1"/"0"), remaining, retry_after_seconds} — all as
+// strings. Values returned directly to Redis's RESP protocol are truncated to
+// integers, so fractional values are stringified in the script to avoid
+// losing precision.
+const bucketScriptSrc = `
+local bucket_id = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local requested = tonumber(ARGV[3])
+local now = tonumber(ARGV[4])
 
-// RateLimitMiddleware enforces per-IP rate limits on the evaluator service.
-// The telemetry ingest endpoint has a higher limit than all other routes.
+local bucket = redis.call("HMGET", bucket_id, "remaining", "last_refill")
+local remaining = tonumber(bucket[1])
+local last_refill = tonumber(bucket[2])
+
+if remaining == nil then
+  remaining = capacity
+  last_refill = now
+end
+
+local elapsed = now - last_refill
+if elapsed < 0 then
+  elapsed = 0
+end
+remaining = math.min(capacity, remaining + elapsed * refill_rate)
+
+local allowed = 0
+local retry_after = 0
+if remaining >= requested then
+  remaining = remaining - requested
+  allowed = 1
+else
+  retry_after = (requested - remaining) / refill_rate
+end
+
+redis.call("HMSET", bucket_id, "remaining", tostring(remaining), "last_refill", tostring(now))
+local ttl = math.ceil(capacity / refill_rate) + 1
+redis.call("EXPIRE", bucket_id, ttl)
+
+return {tostring(allowed), tostring(remaining), tostring(retry_after)}
+`
+
+var bucketScript = redis.NewScript(bucketScriptSrc)
+
+// RateLimitMiddleware enforces per-IP rate limits on the evaluator service
+// using Redis-backed leaky buckets. The telemetry ingest endpoint has a
+// higher limit than all other routes. State is shared across every replica
+// of this service via Redis, rather than held in per-process memory.
 type RateLimitMiddleware struct {
-	// Two separate stores because telemetry and non-telemetry paths have
-	// different bucket sizes; keys are client IPs.
-	telemetryLimiters sync.Map
-	defaultLimiters   sync.Map
-	done              chan struct{}
+	rdb *redis.Client
 }
 
-// NewRateLimitMiddleware constructs the middleware and starts the background
-// stale-entry cleaner.  Call Stop() during shutdown.
-func NewRateLimitMiddleware() *RateLimitMiddleware {
-	m := &RateLimitMiddleware{done: make(chan struct{})}
-	go m.cleanLoop()
-	return m
+// NewRateLimitMiddleware constructs the middleware backed by rdb.
+func NewRateLimitMiddleware(rdb *redis.Client) *RateLimitMiddleware {
+	return &RateLimitMiddleware{rdb: rdb}
 }
 
-// Stop signals the background cleaner to exit.
-func (m *RateLimitMiddleware) Stop() {
-	close(m.done)
-}
+// Stop is a no-op kept for interface compatibility with callers that defer
+// Stop() during shutdown (e.g. cmd/main.go). There is no background cleaner
+// goroutine to stop now that bucket state lives in Redis and expires via TTL
+// instead of an in-process stale-entry sweep.
+func (m *RateLimitMiddleware) Stop() {}
 
 // RateLimit returns an http.Handler middleware that applies route-specific limits.
 // Exempt path: /health (exact match).
 // On limit: HTTP 429 + Retry-After header.
-// Fail-open: panics are logged and the request is passed through.
+// Fail-open: any panic, or any Redis error (e.g. Redis unavailable), is
+// logged and the request is passed through rather than blocked.
 func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -80,15 +137,31 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 
 		ip := extractIP(r)
 
-		var lim *rate.Limiter
+		var (
+			bucketID   string
+			ratePerMin float64
+			burst      float64
+		)
 		if r.URL.Path == telemetryPath {
-			lim = m.getLimiter(&m.telemetryLimiters, ip, telemetryRatePerMin, telemetryBurst)
+			bucketID = keyPrefixTelemetry + ip
+			ratePerMin = telemetryRatePerMin
+			burst = telemetryBurst
 		} else {
-			lim = m.getLimiter(&m.defaultLimiters, ip, defaultRatePerMin, defaultBurst)
+			bucketID = keyPrefixDefault + ip
+			ratePerMin = defaultRatePerMin
+			burst = defaultBurst
 		}
 
-		if !lim.Allow() {
-			retryAfter := retryAfterSeconds(lim)
+		allowed, retryAfter, err := m.checkLimit(r.Context(), bucketID, burst, ratePerMin)
+		if err != nil {
+			// Fail-open: if Redis is unreachable, let the request through
+			// rather than blocking legitimate traffic on an infra outage.
+			log.Printf("evaluator ratelimit: redis error, failing open: %v", err)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !allowed {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -100,49 +173,35 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 	})
 }
 
-// getLimiter retrieves or creates a per-key limiter from store.
-func (m *RateLimitMiddleware) getLimiter(store *sync.Map, key string, ratePerMin float64, burst int) *rate.Limiter {
-	now := time.Now()
-	r := rate.Limit(ratePerMin / 60.0)
+// checkLimit runs the atomic leaky-bucket Lua script against Redis and
+// reports whether the request is allowed plus the Retry-After value (whole
+// seconds, minimum 1) to report when it is not.
+func (m *RateLimitMiddleware) checkLimit(ctx context.Context, bucketID string, capacity, ratePerMin float64) (bool, int, error) {
+	refillRate := ratePerMin / 60.0 // requests/min -> units/sec
+	now := float64(time.Now().UnixNano()) / 1e9
 
-	if v, ok := store.Load(key); ok {
-		e := v.(*entry)
-		e.lastSeen = now
-		return e.limiter
+	res, err := bucketScript.Run(ctx, m.rdb, []string{bucketID}, capacity, refillRate, 1, now).Result()
+	if err != nil {
+		return false, 0, err
 	}
 
-	e := &entry{
-		limiter:  rate.NewLimiter(r, burst),
-		lastSeen: now,
+	fields, ok := res.([]interface{})
+	if !ok || len(fields) != 3 {
+		return false, 0, fmt.Errorf("evaluator ratelimit: unexpected script result shape: %#v", res)
 	}
-	actual, _ := store.LoadOrStore(key, e)
-	return actual.(*entry).limiter
-}
 
-// cleanLoop evicts stale entries every cleanupInterval.
-func (m *RateLimitMiddleware) cleanLoop() {
-	ticker := time.NewTicker(cleanupInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			m.evict()
-		case <-m.done:
-			return
-		}
-	}
-}
+	allowedStr, _ := fields[0].(string)
+	retryAfterStr, _ := fields[2].(string)
 
-func (m *RateLimitMiddleware) evict() {
-	cutoff := time.Now().Add(-staleTTL)
-	for _, store := range []*sync.Map{&m.telemetryLimiters, &m.defaultLimiters} {
-		store.Range(func(k, v any) bool {
-			if v.(*entry).lastSeen.Before(cutoff) {
-				store.Delete(k)
-			}
-			return true
-		})
+	allowed := allowedStr == "1"
+
+	retryAfterSecs, _ := strconv.ParseFloat(retryAfterStr, 64)
+	retryAfter := int(math.Ceil(retryAfterSecs))
+	if retryAfter < 1 {
+		retryAfter = 1
 	}
+
+	return allowed, retryAfter, nil
 }
 
 // extractIP returns the most-specific client IP from the request.
@@ -161,17 +220,4 @@ func extractIP(r *http.Request) string {
 		return addr[:idx]
 	}
 	return addr
-}
-
-// retryAfterSeconds calculates how many seconds until the next token is
-// available without consuming one.
-func retryAfterSeconds(lim *rate.Limiter) int {
-	res := lim.Reserve()
-	d := res.Delay()
-	res.Cancel()
-	secs := int(math.Ceil(d.Seconds()))
-	if secs < 1 {
-		return 1
-	}
-	return secs
 }

@@ -18,17 +18,18 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/blast"
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/circuit"
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/middleware"
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/rollback"
-	"github.com/sairam0424/Tombstone/services/evaluator/internal/telemetry"
-	apiv1 "github.com/sairam0424/Tombstone/services/evaluator/internal/api/v1"
+	"github.com/tombstone/evaluator/internal/blast"
+	"github.com/tombstone/evaluator/internal/circuit"
+	"github.com/tombstone/evaluator/internal/health"
+	"github.com/tombstone/evaluator/internal/middleware"
+	"github.com/tombstone/evaluator/internal/rollback"
+	"github.com/tombstone/evaluator/internal/telemetry"
+	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer func() { _ = logger.Sync() }()
+	defer logger.Sync()
 
 	initCtx := context.Background()
 
@@ -81,8 +82,9 @@ func main() {
 		}
 	}
 
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
@@ -110,10 +112,20 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
+		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	// DB is optional for evaluator (see above) — Checker treats a nil *sql.DB
+	// as healthy, so readiness never fails on an absent-and-optional dependency.
+	healthChecker := &health.Checker{DB: db, RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	// SDK telemetry ingest endpoint
 	r.Post("/api/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +153,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintln(w, `{"rolled_back":true}`)
+		fmt.Fprintln(w, `{"rolled_back":true}`)
 	})
 
 	// Blast radius endpoint (only mounted when DB is available)
@@ -154,7 +166,7 @@ func main() {
 		flagKey := chi.URLParam(r, "flagKey")
 		state := breaker.GetState(r.Context(), flagKey)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
+		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
 	})
 
 	// Per-flag SLO dashboard endpoint

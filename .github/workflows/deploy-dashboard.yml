@@ -5,37 +5,13 @@ on:
     branches: [main]
     paths:
       - 'workspace-dashboard/**'
-      - 'package-lock.json'
       - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dashboard deps
-        run: npm ci --ignore-scripts
-
-      - name: Build dashboard
-        working-directory: workspace-dashboard
-        env:
-          VITE_API_URL: ${{ vars.TOMBSTONE_API_URL }}
-          VITE_GATEWAY_URL: ${{ vars.TOMBSTONE_GATEWAY_URL }}
-          VITE_INTEL_URL: ${{ vars.TOMBSTONE_INTELLIGENCE_URL }}
-          VITE_EVAL_URL: ${{ vars.TOMBSTONE_EVALUATOR_URL }}
-          VITE_SDK_TOKEN: ${{ secrets.TOMBSTONE_SDK_TOKEN }}
-        run: npm run build
-
   deploy:
     runs-on: ubuntu-latest
-    needs: build
-    if: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' }}
+    name: Deploy to Cloudflare Pages
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +20,8 @@ jobs:
           node-version: '22'
 
       - name: Install dashboard deps
-        run: npm ci --ignore-scripts
+        working-directory: workspace-dashboard
+        run: npm ci
 
       - name: Build dashboard
         working-directory: workspace-dashboard

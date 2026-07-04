@@ -13,7 +13,7 @@ rollout_pct advances. This loop reads those recommendations, checks blast radius
 creates actionable signals — giving engineers the final approval gate before GitOps PRs advance.
 
 **Entry point:** `scripts/loop-rollout-advisor.sh`
-**Activation:** These loops run as local scripts. Activate by running: `bash scripts/loop-rollout-advisor.sh`
+**Trigger:** daily cron at 08:00 UTC (business hours)
 **APIs used:** intelligence `/api/v1/rollout/recommendations`, evaluator `/api/v1/blast-radius`
 
 ## Current focus
@@ -38,5 +38,4 @@ Collector writes to `domains/rollout-advisor/metrics/recommendations.jsonl`:
 
 ## Timeline
 <!-- append one line per run: YYYY-MM-DD | N recommendations reviewed, M signals created -->
-2026-06-24 | Loop scaffolded and deployed to main. Local script ready (weekday 08:00 UTC schedule recommended). Signals-only design confirmed.
-2026-06-27 | Converted to local-first v1.0.0 self-hosted activation via bash scripts/loop-rollout-advisor.sh
+2026-06-24 | Loop scaffolded and deployed to main. Weekday cron wired (08:00 UTC). Pending GitHub Actions var TOMBSTONE_INTELLIGENCE_URL to activate. Signals-only design confirmed.

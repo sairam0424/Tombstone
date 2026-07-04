@@ -10,17 +10,17 @@ npm install -g @tombstone/cli
 
 ## Authentication
 
-For local development, start the stack with `make dev` first (from the repo root), then set:
-
-```bash
-export TOMBSTONE_API_URL=http://localhost:8081
-export TOMBSTONE_TOKEN=your-token-here
-```
+Set two environment variables before running any command:
 
 | Variable | Description |
 |---|---|
 | `TOMBSTONE_API_URL` | Base URL of the flag-api service (default: `http://localhost:8081`) |
 | `TOMBSTONE_TOKEN` | Bearer token for authentication |
+
+```bash
+export TOMBSTONE_API_URL=https://flags.example.com
+export TOMBSTONE_TOKEN=your-token-here
+```
 
 ## Commands
 

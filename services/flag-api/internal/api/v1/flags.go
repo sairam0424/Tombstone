@@ -17,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/sairam0424/Tombstone/services/flag-api/internal/transparency"
+	"github.com/tombstone/flag-api/internal/transparency"
 )
 
 type FlagHandler struct {
@@ -63,6 +63,26 @@ type CreateFlagRequest struct {
 	OwnerID     string `json:"owner_id"`
 	ProjectID   string `json:"project_id"`
 	SafeDefault string `json:"safe_default"`
+}
+
+// ValidFlagTypes is the exhaustive set of flag types accepted at the service layer.
+// This mirrors the DB CHECK constraint so we catch invalid types before hitting Postgres.
+var ValidFlagTypes = map[string]bool{
+	"BOOLEAN": true,
+	"STRING":  true,
+	"INTEGER": true,
+	"FLOAT":   true,
+	"JSON":    true,
+}
+
+// auditEntryHash computes the deterministic Merkle hash for an audit log row.
+// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
+// This is the same algorithm used by writeAudit — used by tests to verify
+// chain integrity without a database.
+func auditEntryHash(id, eventType, actor, prevState, newState, ts string) string {
+	content := strings.Join([]string{id, eventType, actor, prevState, newState, ts}, "|")
+	hashBytes := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", hashBytes)
 }
 
 type UpdateEnvironmentRequest struct {
@@ -111,7 +131,7 @@ func (h *FlagHandler) ListFlags(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
 	flags := []Flag{}
 	for rows.Next() {
@@ -135,6 +155,10 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Key == "" || req.Name == "" || req.FlagType == "" {
 		writeError(w, http.StatusBadRequest, "key, name, flag_type are required")
+		return
+	}
+	if !ValidFlagTypes[req.FlagType] {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid flag_type %q: must be one of BOOLEAN, STRING, INTEGER, FLOAT, JSON", req.FlagType))
 		return
 	}
 	if req.ProjectID == "" {
@@ -335,7 +359,7 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer tx.Rollback()
 
 	_, err = tx.ExecContext(r.Context(), `UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1`, key)
 	if err != nil {

@@ -20,7 +20,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "prepare": "husky"
+    "prepare": "node -e \"if (process.env.CI || process.env.VERCEL) process.exit(0)\" && husky || true"
   },
   "devDependencies": {
     "husky": "^9.0.0",

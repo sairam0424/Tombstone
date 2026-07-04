@@ -5,7 +5,7 @@ type: decision
 status: adopted
 ---
 
-> **Version:** v2.2.0 (self-hosted) — all 4 domain loops active. Run locally with `make dev`.
+> **Version:** v2.1.0 — all 4 domain loops active. Activate via GitHub Actions repo variables.
 
 # Knowledge-base architecture
 

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
+	"github.com/tombstone/gateway/internal/hub"
 	"go.uber.org/zap"
 )
 
@@ -173,7 +173,7 @@ func (rp *RelayProxy) runUpstreamStream(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(hub.JitterBackoff(backoff)):
 		}
 
 		if backoff < sseMaxBackoff {
@@ -209,7 +209,7 @@ func (rp *RelayProxy) connectUpstreamSSE(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial upstream SSE: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upstream SSE returned HTTP %d", resp.StatusCode)
@@ -366,7 +366,7 @@ func (rp *RelayProxy) ServeLocalStream(w http.ResponseWriter, r *http.Request) {
 		"relay":       true,
 		"ts":          time.Now().Unix(),
 	})
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData)
+	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData)
 	flusher.Flush()
 
 	// Use a time-based client ID for correlation in logs.
@@ -393,7 +393,7 @@ func (rp *RelayProxy) ServeLocalStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 
 		case <-heartbeat.C:
-			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: {\"ts\":%d}\n\n", time.Now().Unix())
+			fmt.Fprintf(w, "event: heartbeat\ndata: {\"ts\":%d}\n\n", time.Now().Unix())
 			flusher.Flush()
 
 		case <-r.Context().Done():
@@ -486,7 +486,7 @@ func (rp *RelayProxy) fetchUpstreamSnapshot(ctx context.Context, environment str
 	if err != nil {
 		return nil, fmt.Errorf("fetch upstream snapshot: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream snapshot returned HTTP %d", resp.StatusCode)

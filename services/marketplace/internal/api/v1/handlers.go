@@ -8,25 +8,28 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/integrations"
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/registry"
-	"github.com/sairam0424/Tombstone/services/marketplace/internal/webhook"
+	"github.com/tombstone/marketplace/internal/httpclient"
+	"github.com/tombstone/marketplace/internal/integrations"
+	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/tombstone/marketplace/internal/webhook"
 )
 
 // Handler bundles the registry and dispatcher used by all route handlers.
 type Handler struct {
-	reg        *registry.Registry
-	dispatcher *webhook.Dispatcher
-	logger     *zap.Logger
-	slackApp   *integrations.SlackApp
+	reg           *registry.Registry
+	dispatcher    *webhook.Dispatcher
+	logger        *zap.Logger
+	slackApp      *integrations.SlackApp
+	resilientHTTP *httpclient.ResilientClient
 }
 
 // NewHandler constructs a Handler.
 func NewHandler(reg *registry.Registry, dispatcher *webhook.Dispatcher, logger *zap.Logger) *Handler {
 	return &Handler{
-		reg:        reg,
-		dispatcher: dispatcher,
-		logger:     logger,
+		reg:           reg,
+		dispatcher:    dispatcher,
+		logger:        logger,
+		resilientHTTP: httpclient.NewResilientClient(httpclient.DefaultConfig(), nil, logger),
 	}
 }
 
@@ -138,12 +141,12 @@ func (h *Handler) RegisterIntegration(w http.ResponseWriter, r *http.Request) {
 // Body mirrors webhook.FlagEvent.
 func (h *Handler) TriggerEvent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		EventType   registry.EventType     `json:"event_type"`
-		FlagKey     string                 `json:"flag_key"`
-		Environment string                 `json:"environment"`
-		Actor       string                 `json:"actor"`
-		Ts          int64                  `json:"ts"`
-		Metadata    map[string]any         `json:"metadata,omitempty"`
+		EventType   registry.EventType `json:"event_type"`
+		FlagKey     string             `json:"flag_key"`
+		Environment string             `json:"environment"`
+		Actor       string             `json:"actor"`
+		Ts          int64              `json:"ts"`
+		Metadata    map[string]any     `json:"metadata,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})

@@ -231,11 +231,30 @@ class RedisStreamsEventConsumer(EventConsumer):
     Replaces aiokafka for Fly.io free-tier deployment.
     Consumer group: intelligence-worker  (distinct from gateway's gateway-workers).
     At-least-once delivery via XACK + Pending Entries List.
+
+    Poison-message handling mirrors the gateway's Go implementation
+    (services/gateway/internal/hub/dlq.go): a message that fails to dispatch
+    is left un-acked in the PEL rather than swallowed-and-acked. A periodic
+    reclaim sweep (_reclaim_stale_pending) inspects idle PEL entries via
+    XPENDING and either XCLAIMs them for another attempt (delivery count <
+    _MAX_DELIVERY_ATTEMPTS) or moves them to the shared dead-letter stream
+    "<stream>:dlq" (delivery count exhausted) — the SAME dlq stream key the
+    gateway writes to for the same environment, so a poison message shows up
+    in one place regardless of which service's consumer group choked on it.
     """
 
     _GROUP = "intelligence-worker"
     _BLOCK_MS = 1000   # 1s block timeout — yields control to event loop
     _COUNT = 10        # messages per XREADGROUP call
+
+    # Kept numerically identical to the Go gateway's maxDeliveryAttempts /
+    # reclaimIdleThreshold (services/gateway/internal/hub/dlq.go) — a message
+    # that fails 3 times should go to DLQ regardless of which language's
+    # consumer group is processing it.
+    _MAX_DELIVERY_ATTEMPTS = 3
+    _RECLAIM_IDLE_THRESHOLD_MS = 30_000  # 30s
+    _RECLAIM_SWEEP_INTERVAL_S = 15.0     # matches the gateway's ticker cadence
+    _RECLAIM_SCAN_COUNT = 100
 
     def __init__(
         self,
@@ -286,8 +305,9 @@ class RedisStreamsEventConsumer(EventConsumer):
 
     async def run(self) -> None:
         """
-        Infinite loop: XREADGROUP -> dispatch to detector/graph_builder -> XACK.
-        Mirrors TelemetryConsumer.run() semantics so main.py can treat both identically.
+        Infinite loop: XREADGROUP -> dispatch to detector/graph_builder -> XACK
+        (only on dispatch success). Mirrors TelemetryConsumer.run() semantics
+        so main.py can treat both identically.
         """
         import os
         consumer_name = f"intelligence-{os.environ.get('FLY_MACHINE_ID', 'local')}"
@@ -297,7 +317,8 @@ class RedisStreamsEventConsumer(EventConsumer):
         # Window buffer: same pattern as TelemetryConsumer._window
         window: dict[str, dict] = {}   # "flag_key:env" -> {"errors": int, "total": int}
         flush_interval = 10.0
-        last_flush = asyncio.get_event_loop().time()
+        last_flush = asyncio.get_running_loop().time()
+        last_reclaim = asyncio.get_running_loop().time()
 
         while self._running:
             try:
@@ -313,15 +334,35 @@ class RedisStreamsEventConsumer(EventConsumer):
 
                 for stream_key, messages in (results or []):
                     for msg_id, data in messages:
-                        await self._dispatch(data, window)
-                        await self._redis.xack(stream_key, self._GROUP, msg_id)
+                        ok = await self._dispatch(data, window)
+                        if ok:
+                            await self._redis.xack(stream_key, self._GROUP, msg_id)
+                        else:
+                            # Leave it pending — mirrors the gateway's fix
+                            # (services/gateway/internal/hub/broadcaster.go):
+                            # a poison message deserves retries and,
+                            # eventually, a DLQ record, not a silent ack.
+                            # _reclaim_stale_pending decides its fate.
+                            logger.warning(
+                                "RedisStreamsEventConsumer: dispatch failed for %s, leaving pending for reclaim sweep",
+                                msg_id,
+                            )
 
                 # Flush detector every 10s (same cadence as TelemetryConsumer._flush_loop)
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 if now - last_flush >= flush_interval:
                     await self._flush(window)
                     window.clear()
                     last_flush = now
+
+                # Reclaim sweep: piggyback on this same loop iteration cadence
+                # rather than a separate asyncio task — XREADGROUP already
+                # blocks for up to _BLOCK_MS per iteration, so this runs at
+                # roughly the same frequency as the flush above.
+                if now - last_reclaim >= self._RECLAIM_SWEEP_INTERVAL_S:
+                    for stream_key in self._streams:
+                        await self._reclaim_stale_pending(stream_key, consumer_name, window)
+                    last_reclaim = now
 
             except asyncio.CancelledError:
                 break
@@ -331,9 +372,16 @@ class RedisStreamsEventConsumer(EventConsumer):
 
         await self.stop()
 
-    async def _dispatch(self, data: dict, window: dict) -> None:
-        """Route a stream message to the right handler based on event type."""
+    async def _dispatch(self, data: dict, window: dict) -> bool:
+        """Route a stream message to the right handler based on event type.
+
+        Returns True if the message was successfully handled (safe to XACK),
+        False if any downstream step failed (caller must leave it pending).
+        Internal logging behaviour (the existing logger.warning calls) is
+        unchanged — this only adds a success/failure signal for the caller.
+        """
         event_type = data.get("event", "")
+        success = True
 
         # flag.evaluated -> accumulate in window for anomaly detection
         if event_type in ("flag_evaluated", "FALLTHROUGH", "RULE_MATCH", "OFF", "TARGET_MATCH"):
@@ -365,6 +413,7 @@ class RedisStreamsEventConsumer(EventConsumer):
                     )
                 except Exception as exc:
                     logger.warning("RedisStreamsEventConsumer: embedding sync failed for %s: %s", flag_key, exc)
+                    success = False
 
             # Also update dep graph
             if flag_key and self._graph_builder is not None and self._redis is not None:
@@ -379,6 +428,111 @@ class RedisStreamsEventConsumer(EventConsumer):
                     )
                 except Exception as exc:
                     logger.warning("RedisStreamsEventConsumer: graph update failed: %s", exc)
+                    success = False
+
+        return success
+
+    @staticmethod
+    def dlq_stream_key(stream_key: str) -> str:
+        """Derive the dead-letter stream key for a primary stream key.
+
+        MUST stay byte-identical to the Go gateway's DLQStreamKey
+        (services/gateway/internal/hub/dlq.go: streamKey + ":dlq") — both
+        services' consumer groups feed poison messages from the same
+        environment into the SAME dlq stream, so a human inspecting Redis
+        sees one queue regardless of which service failed to process the
+        message.
+        """
+        return f"{stream_key}:dlq"
+
+    async def _reclaim_stale_pending(self, stream_key: str, consumer_name: str, window: dict) -> None:
+        """
+        Scan stream_key's consumer-group PEL via XPENDING (range form) for
+        entries idle beyond _RECLAIM_IDLE_THRESHOLD_MS. For each:
+
+          - delivery count < _MAX_DELIVERY_ATTEMPTS: XCLAIM it back to this
+            consumer and re-run _dispatch inline (XCLAIM alone does not
+            requeue a message for XREADGROUP's ">" cursor — see the Go
+            gateway's ReclaimStalePending docstring in dlq.go for the same
+            reasoning, which applies identically here).
+          - delivery count >= _MAX_DELIVERY_ATTEMPTS: XADD the message
+            verbatim onto "<stream_key>:dlq" (capped, matching the gateway's
+            XAdd convention), then XACK the original ID off the primary
+            stream's PEL.
+        """
+        try:
+            pending = await self._redis.xpending_range(
+                stream_key,
+                self._GROUP,
+                min="-",
+                max="+",
+                count=self._RECLAIM_SCAN_COUNT,
+                idle=self._RECLAIM_IDLE_THRESHOLD_MS,
+            )
+        except Exception as exc:
+            logger.warning("RedisStreamsEventConsumer: xpending_range failed for %s: %s", stream_key, exc)
+            return
+
+        for entry in pending or []:
+            msg_id = entry["message_id"]
+            delivery_count = entry["times_delivered"]
+
+            if delivery_count >= self._MAX_DELIVERY_ATTEMPTS:
+                await self._dead_letter(stream_key, msg_id)
+                continue
+
+            try:
+                claimed = await self._redis.xclaim(
+                    stream_key,
+                    self._GROUP,
+                    consumer_name,
+                    min_idle_time=self._RECLAIM_IDLE_THRESHOLD_MS,
+                    message_ids=[msg_id],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "RedisStreamsEventConsumer: xclaim failed for %s (%s): %s", stream_key, msg_id, exc
+                )
+                continue
+
+            for claimed_id, data in claimed or []:
+                ok = await self._dispatch(data, window)
+                if ok:
+                    await self._redis.xack(stream_key, self._GROUP, claimed_id)
+                else:
+                    logger.warning(
+                        "RedisStreamsEventConsumer: reclaimed message %s still fails to dispatch, leaving pending",
+                        claimed_id,
+                    )
+
+    async def _dead_letter(self, stream_key: str, msg_id: str) -> None:
+        """Move a poison message from stream_key's PEL to its DLQ stream."""
+        dlq_key = self.dlq_stream_key(stream_key)
+        try:
+            entries = await self._redis.xrange(stream_key, min=msg_id, max=msg_id)
+        except Exception as exc:
+            logger.warning("RedisStreamsEventConsumer: xrange failed for %s (%s): %s", stream_key, msg_id, exc)
+            return
+
+        if not entries:
+            # Already trimmed off the primary stream (MaxLen approx eviction
+            # raced us) — nothing left to preserve. Ack to drop the now
+            # orphaned PEL entry.
+            await self._redis.xack(stream_key, self._GROUP, msg_id)
+            return
+
+        _, fields = entries[0]
+        try:
+            await self._redis.xadd(dlq_key, fields, maxlen=10_000, approximate=True)
+        except Exception as exc:
+            logger.warning("RedisStreamsEventConsumer: xadd to dlq failed for %s: %s", dlq_key, exc)
+            return
+
+        await self._redis.xack(stream_key, self._GROUP, msg_id)
+        logger.warning(
+            "RedisStreamsEventConsumer: message %s moved from %s to dead-letter stream %s",
+            msg_id, stream_key, dlq_key,
+        )
 
     async def _flush(self, window: dict) -> None:
         """Flush accumulated window counts to the anomaly detector."""

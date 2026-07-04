@@ -107,7 +107,7 @@ func (h *VariationHandler) ListVariations(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
 	variations := []FlagVariation{}
 	for rows.Next() {

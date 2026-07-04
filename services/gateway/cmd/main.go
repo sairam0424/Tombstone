@@ -16,14 +16,15 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
-	v1 "github.com/sairam0424/Tombstone/services/gateway/internal/api/v1"
-	"github.com/sairam0424/Tombstone/services/gateway/internal/hub"
-	"github.com/sairam0424/Tombstone/services/gateway/internal/telemetry"
+	v1 "github.com/tombstone/gateway/internal/api/v1"
+	"github.com/tombstone/gateway/internal/health"
+	"github.com/tombstone/gateway/internal/hub"
+	"github.com/tombstone/gateway/internal/telemetry"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer func() { _ = logger.Sync() }()
+	defer logger.Sync()
 
 	initCtx := context.Background()
 
@@ -46,6 +47,11 @@ func main() {
 	if flagAPIURL == "" {
 		logger.Fatal("FLAG_API_URL environment variable is required")
 	}
+	// FLAG_API_TOKEN authenticates the snapshot reconciler's calls to flag-api.
+	// Optional: the reconciler is belt-and-suspenders insurance against the
+	// dual-write gap, not a primary delivery path, so its absence only
+	// disables the reconciler rather than failing gateway startup.
+	flagAPIToken := os.Getenv("FLAG_API_TOKEN")
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -77,9 +83,27 @@ func main() {
 	}
 	logger.Info("Redis Streams consumers started", zap.Strings("environments", knownEnvs))
 
+	// Snapshot reconciler: low-frequency (5 min) belt-and-suspenders poll of
+	// flag-api's snapshot per environment, to recover from the dual-write gap
+	// (Postgres commit succeeds, Redis publish/XADD is lost). Runs ALONGSIDE
+	// broadcaster.Run/RunStreamConsumer above — never instead of them.
+	if flagAPIToken != "" {
+		reconciler := hub.NewReconciler(h, flagAPIURL, flagAPIToken, logger)
+		go reconciler.Run(ctx, knownEnvs)
+	} else {
+		logger.Warn("FLAG_API_TOKEN not set — snapshot reconciler disabled")
+	}
+
+	// Reclaim sweep: every 15s (roughly matching reclaimIdleThreshold's
+	// scale), scan each environment's PEL for entries a poison-message
+	// unmarshal failure left pending and either XCLAIM-retry them or
+	// dead-letter them once they exceed maxDeliveryAttempts. See dlq.go.
+	go runReclaimLoop(ctx, broadcaster, knownEnvs, logger)
+
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
 	metricsH := v1.NewGatewayMetricsHandler(h, logger)
+	dlqH := v1.NewDLQHandler(rdb, logger)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -94,8 +118,12 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		counts := h.AllConnectionCounts()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
+		fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
 	})
+
+	// Gateway has no Postgres dependency; readiness is gated on Redis only.
+	healthChecker := &health.Checker{RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/stream", sseH.Stream)
@@ -103,6 +131,29 @@ func main() {
 		r.Route("/gateway", func(r chi.Router) {
 			r.Get("/metrics", metricsH.GetMetrics)
 		})
+	})
+
+	// Internal DLQ inspection/replay routes — guarded by FLAG_API_TOKEN bearer
+	// check (SEC-002). When FLAG_API_TOKEN is unset (local dev) auth is skipped
+	// so local testing doesn't require a token, matching the reconciler's
+	// fail-open-when-token-absent behaviour. In production FLAG_API_TOKEN is
+	// always set, so the routes require the same token the reconciler uses.
+	r.Route("/internal/dlq/{environment}", func(r chi.Router) {
+		if flagAPIToken != "" {
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if req.Header.Get("Authorization") != "Bearer "+flagAPIToken {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+						return
+					}
+					next.ServeHTTP(w, req)
+				})
+			})
+		}
+		r.Get("/", dlqH.ListDLQ)
+		r.Post("/replay", dlqH.ReplayDLQ)
 	})
 
 	srv := &http.Server{
@@ -130,4 +181,33 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// reclaimTickInterval controls how often ReclaimStalePending sweeps each
+// environment's PEL. 15s gives ~2 sweeps per reclaimIdleThreshold window
+// (30s) — frequent enough that a poison message doesn't sit unclaimed for
+// long, without turning the sweep into a hot loop.
+const reclaimTickInterval = 15 * time.Second
+
+// runReclaimLoop periodically calls ReclaimStalePending for every known
+// environment's primary stream until ctx is cancelled. Runs alongside
+// RunStreamConsumer's per-environment goroutines, not instead of them.
+func runReclaimLoop(ctx context.Context, b *hub.Broadcaster, environments []string, logger *zap.Logger) {
+	ticker := time.NewTicker(reclaimTickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, env := range environments {
+				streamKey := hub.StreamKey(env)
+				if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+					logger.Warn("reclaim sweep failed",
+						zap.String("stream", streamKey), zap.Error(err))
+				}
+			}
+		}
+	}
 }

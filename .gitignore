@@ -47,7 +47,8 @@ infra/.env.secrets
 scratch-pad/
 
 # Superpowers session plan files — may contain credentials/tokens
-docs/superpowers/
+# Note: plans/ subdir is intentionally tracked (no secrets, implementation plans only)
+docs/superpowers/plans/.gitignore
 
 # TypeScript build cache
 **/*.tsbuildinfo
