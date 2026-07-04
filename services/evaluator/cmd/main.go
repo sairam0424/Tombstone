@@ -20,6 +20,7 @@ import (
 
 	"github.com/tombstone/evaluator/internal/blast"
 	"github.com/tombstone/evaluator/internal/circuit"
+	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
@@ -81,8 +82,9 @@ func main() {
 		}
 	}
 
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
@@ -110,10 +112,20 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	// DB is optional for evaluator (see above) — Checker treats a nil *sql.DB
+	// as healthy, so readiness never fails on an absent-and-optional dependency.
+	healthChecker := &health.Checker{DB: db, RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	// SDK telemetry ingest endpoint
 	r.Post("/api/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {

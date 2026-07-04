@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
+	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
 	"github.com/tombstone/flag-api/internal/telemetry"
@@ -87,8 +88,9 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
@@ -112,6 +114,11 @@ func main() {
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -122,6 +129,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	healthChecker := &health.Checker{DB: db, RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
