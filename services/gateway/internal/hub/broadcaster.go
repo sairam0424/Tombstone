@@ -36,7 +36,7 @@ func (b *Broadcaster) Run(ctx context.Context) {
 			b.logger.Warn("broadcaster disconnected, reconnecting",
 				zap.Error(err), zap.Duration("backoff", backoff))
 			select {
-			case <-time.After(backoff):
+			case <-time.After(JitterBackoff(backoff)):
 			case <-ctx.Done():
 				return
 			}
@@ -112,7 +112,7 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 				zap.Error(err),
 				zap.Duration("backoff", backoff))
 			select {
-			case <-time.After(backoff):
+			case <-time.After(JitterBackoff(backoff)):
 			case <-ctx.Done():
 				return
 			}
