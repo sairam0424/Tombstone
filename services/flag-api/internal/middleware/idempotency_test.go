@@ -16,7 +16,7 @@ import (
 
 const testEndpoint = "POST /flags"
 
-func newTestMiddleware(t *testing.T) (*IdempotencyMiddleware, sqlmock.Sqlmock, func()) {
+func newIdempotencyTestMiddleware(t *testing.T) (*IdempotencyMiddleware, sqlmock.Sqlmock, func()) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -38,7 +38,7 @@ func countingHandler(callCount *int, status int, body string) http.Handler {
 // Idempotency-Key header is absent, the middleware performs no DB access at
 // all and simply invokes the next handler.
 func TestIdempotency_NoHeader_PassesThroughUnchanged(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	var calls int
@@ -63,7 +63,7 @@ func TestIdempotency_NoHeader_PassesThroughUnchanged(t *testing.T) {
 // path: INSERT ... RETURNING id succeeds, the real handler runs exactly
 // once, and the response is persisted via UPDATE.
 func TestIdempotency_FirstCall_RunsHandlerOnceAndPersists(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	body := `{"key":"f1","name":"Flag One","flag_type":"BOOLEAN"}`
@@ -103,7 +103,7 @@ func TestIdempotency_FirstCall_RunsHandlerOnceAndPersists(t *testing.T) {
 // completed path: the real handler must NOT be called a second time, and
 // the byte-for-byte stored response is written back to the client.
 func TestIdempotency_Replay_DoesNotInvokeHandlerAgain(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	body := `{"key":"f1","name":"Flag One","flag_type":"BOOLEAN"}`
@@ -144,7 +144,7 @@ func TestIdempotency_Replay_DoesNotInvokeHandlerAgain(t *testing.T) {
 // TestIdempotency_SecondCallSameKeyDifferentBody_Returns409 verifies that
 // reusing an idempotency key with a different request body is rejected.
 func TestIdempotency_SecondCallSameKeyDifferentBody_Returns409(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	firstBody := `{"key":"f1"}`
@@ -183,7 +183,7 @@ func TestIdempotency_SecondCallSameKeyDifferentBody_Returns409(t *testing.T) {
 // TestIdempotency_StillProcessing_Returns409WithoutBlocking verifies that a
 // row with completed_at IS NULL fails fast with 409 rather than polling.
 func TestIdempotency_StillProcessing_Returns409WithoutBlocking(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	body := `{"key":"f1"}`
@@ -228,7 +228,7 @@ func TestIdempotency_StillProcessing_Returns409WithoutBlocking(t *testing.T) {
 // resubmission with the same key is treated as brand new and the handler
 // runs again.
 func TestIdempotency_ExpiredKey_ExecutesFreshAfterCleanup(t *testing.T) {
-	mw, mock, cleanup := newTestMiddleware(t)
+	mw, mock, cleanup := newIdempotencyTestMiddleware(t)
 	defer cleanup()
 
 	body := `{"key":"f1"}`
