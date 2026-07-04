@@ -89,6 +89,7 @@ func main() {
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware()
 	defer rateMw.Stop()
+	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
@@ -105,6 +106,9 @@ func main() {
 
 	// Scheduled-change executor: applies due flag changes every 30 s.
 	go scheduler.Start(bgCtx, db, rdb, logger)
+
+	// Idempotency-key cleanup: purges expired idempotency_keys rows every hour.
+	go idempotencyMw.StartCleanup(bgCtx)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -128,13 +132,20 @@ func main() {
 		r.Use(rbacMw.LoadRole)
 
 		r.Get("/flags", flagH.ListFlags)
-		r.Post("/flags", flagH.CreateFlag)
+		// Idempotency-key support (opt-in via "Idempotency-Key" header) guards
+		// against a Phase-2 resilient-client retry executing the same mutation
+		// twice. Applied ONLY to CreateFlag, UpdateEnvironment, and KillSwitch —
+		// not globally, and not to any other route.
+		r.With(idempotencyMw.Handle("POST /flags")).
+			Post("/flags", flagH.CreateFlag)
 		r.Get("/flags/{key}", flagH.GetFlag)
 		r.Delete("/flags/{key}", flagH.ArchiveFlag)
-		r.Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
+		r.With(idempotencyMw.Handle("PATCH /flags/{key}/environments/{env}")).
+			Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 
 		// Kill-switch: restricted to OWNER and ADMIN only (flags:kill_switch permission).
 		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+			With(idempotencyMw.Handle("POST /flags/{key}/kill")).
 			Post("/flags/{key}/kill", flagH.KillSwitch)
 
 		// Flag prerequisites (GrowthBook ParentConditions pattern)

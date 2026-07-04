@@ -10,6 +10,11 @@
 | 003 | `003_compliance.sql` | Compliance and audit extensions |
 | 004 | `004_sso.sql` | SSO provider support |
 | 005 | `005_scheduled_changes_v2.sql` | Scheduled flag change improvements |
+| 006 | _(inline in `../schema.sql`)_ | Flag prerequisites (GrowthBook ParentConditions pattern) |
+| 007 | _(inline in `../schema.sql`)_ | Multivariate flag variations |
+| 008 | _(inline in `../schema.sql`)_ | pgvector embeddings for semantic search |
+| 009 | _(inline in `../schema.sql`)_ | Rekor transparency log integration |
+| 010 | `010_idempotency_keys.sql` | Idempotency-key support for flag-api mutation endpoints |
 
 ## Why 001 Is Skipped
 
@@ -35,7 +40,13 @@ psql $DATABASE_URL < services/flag-api/internal/db/migrations/002_enterprise.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/003_compliance.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/004_sso.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/005_scheduled_changes_v2.sql
+psql $DATABASE_URL < services/flag-api/internal/db/migrations/010_idempotency_keys.sql
 ```
+
+Migrations 006-009 are not separate files — they are applied inline as part of
+`schema.sql` itself (see the `-- Migration 00N` comments inside that file for
+prerequisites, variations, pgvector embeddings, and Rekor integration
+respectively). Migration 010 is the next standalone file after 005.
 
 The `make dev` target (Docker Compose) runs `schema.sql` automatically via the
 `db` service init scripts. Manual migrations must be applied separately unless
