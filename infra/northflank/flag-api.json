@@ -1,0 +1,60 @@
+{
+  "apiVersion": "v1",
+  "spec": {
+    "kind": "Service",
+    "spec": {
+      "name": "tombstone-flag-api",
+      "billing": {
+        "deploymentPlan": "nf-compute-10"
+      },
+      "deployment": {
+        "docker": {
+          "configType": "default"
+        },
+        "buildpack": {
+          "builder": "DOCKERFILE",
+          "dockerFilePath": "/services/flag-api/Dockerfile",
+          "dockerWorkDir": "/services/flag-api",
+          "useCache": false
+        },
+        "instances": 1
+      },
+      "ports": [
+        {
+          "name": "http",
+          "internalPort": 8081,
+          "public": true,
+          "protocol": "HTTP",
+          "security": {
+            "sslOnly": true
+          },
+          "disableNfDomain": false
+        }
+      ],
+      "runtimeEnvironment": {
+        "DB_URL": "${SECRET_DB_URL}",
+        "REDIS_URL": "${SECRET_REDIS_URL}",
+        "JWT_SECRET": "${SECRET_JWT_SECRET}",
+        "PORT": "8081",
+        "EMBEDDING_BACKEND": "bedrock",
+        "BEDROCK_ACCESS_KEY_ID": "${SECRET_BEDROCK_ACCESS_KEY_ID}",
+        "BEDROCK_SECRET_ACCESS_KEY": "${SECRET_BEDROCK_SECRET_ACCESS_KEY}",
+        "BEDROCK_REGION": "us-east-1",
+        "UPSTASH_REDIS_REST_URL": "${SECRET_UPSTASH_REDIS_REST_URL}",
+        "UPSTASH_REDIS_REST_TOKEN": "${SECRET_UPSTASH_REDIS_REST_TOKEN}",
+        "REKOR_ENABLED": "false"
+      },
+      "healthChecks": [
+        {
+          "protocol": "HTTP",
+          "path": "/health",
+          "port": 8081,
+          "initialDelaySeconds": 15,
+          "periodSeconds": 30,
+          "timeoutSeconds": 5,
+          "failureThreshold": 3
+        }
+      ]
+    }
+  }
+}

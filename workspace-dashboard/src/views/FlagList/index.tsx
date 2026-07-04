@@ -1,248 +1,363 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
-
-interface FlagItem {
-  id: string;
-  key: string;
-  name: string;
-  description: string;
-  state: string;
-  owner_id: string;
-  flag_type: string;
-}
-
-interface EnvState {
-  flag_key: string;
-  enabled: boolean;
-  rollout_pct: number;
-}
+import { useRef, useDeferredValue, useEffect, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useQueryState } from 'nuqs';
+import { SkeletonRow } from '../../components/SkeletonRow.js';
+import { useFlags, useEnvSnapshot, type FlagItem, type EnvState } from '../../hooks/useFlags.js';
+import { FlagCreateModal } from '../../components/FlagCreateModal.js';
+import { useDensity } from '../../hooks/useDensity.js';
+import { DensityToggle } from '../../components/DensityToggle.js';
 
 type Env = 'development' | 'staging' | 'production';
 
-const ENV_COLOR: Record<Env, { border: string; text: string; bg: string }> = {
-  development: { border: '#388bfd', text: '#58a6ff', bg: 'rgba(56,139,253,0.1)' },
-  staging:     { border: '#e3b341', text: '#e3b341', bg: 'rgba(227,179,65,0.1)' },
-  production:  { border: '#3fb950', text: '#3fb950', bg: 'rgba(63,185,80,0.1)' },
+const ENV_PILL: Record<Env, { active: { bg: string; color: string; border: string }; idle: { bg: string; color: string; border: string } }> = {
+  development: {
+    active: { bg: '#1d4ed8', color: '#fff', border: '#1d4ed8' },
+    idle:   { bg: 'transparent', color: '#6b7280', border: '#1a1a1a' },
+  },
+  staging: {
+    active: { bg: '#b45309', color: '#fff', border: '#b45309' },
+    idle:   { bg: 'transparent', color: '#6b7280', border: '#1a1a1a' },
+  },
+  production: {
+    active: { bg: '#15803d', color: '#fff', border: '#15803d' },
+    idle:   { bg: 'transparent', color: '#6b7280', border: '#1a1a1a' },
+  },
 };
 
 const STATE_BADGE: Record<string, { text: string; bg: string; border: string }> = {
-  ACTIVE:   { text: '#3fb950', bg: 'rgba(63,185,80,0.12)',   border: 'rgba(63,185,80,0.3)' },
-  DRAFT:    { text: '#8b949e', bg: 'rgba(139,148,158,0.08)', border: 'rgba(139,148,158,0.2)' },
-  COMPLETE: { text: '#58a6ff', bg: 'rgba(88,166,255,0.1)',   border: 'rgba(88,166,255,0.25)' },
-  ARCHIVED: { text: '#484f58', bg: 'rgba(72,79,88,0.08)',    border: 'rgba(72,79,88,0.2)' },
+  ACTIVE:   { text: '#4ade80', bg: 'rgba(74,222,128,0.10)',  border: 'rgba(74,222,128,0.25)' },
+  DRAFT:    { text: '#9ca3af', bg: 'rgba(156,163,175,0.08)', border: 'rgba(156,163,175,0.18)' },
+  COMPLETE: { text: '#60a5fa', bg: 'rgba(96,165,250,0.10)',  border: 'rgba(96,165,250,0.25)' },
+  ARCHIVED: { text: '#4b5563', bg: 'rgba(75,85,99,0.08)',    border: 'rgba(75,85,99,0.18)' },
 };
 
+// ── RolloutBar — uses @property --rollout-pct for smooth width + color transition
+// Both animated properties (--rollout-pct for width, --fill-color for background)
+// are delivered as CSS custom properties so the .rollout-bar-fill class rule
+// transitions both symmetrically. See index.css ANIMATION 6.
 function RolloutBar({ pct, enabled }: { pct: number; enabled: boolean }) {
-  const c = !enabled ? '#21262d' : pct === 100 ? '#3fb950' : pct >= 50 ? '#e3b341' : '#58a6ff';
+  const fillColor = !enabled
+    ? 'var(--color-border)'
+    : pct === 100
+    ? 'var(--color-risk-low)'
+    : pct >= 50
+    ? 'var(--color-risk-medium)'
+    : 'var(--color-accent)';
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 110 }}>
-      <div style={{ flex: 1, height: 5, background: '#161b22', borderRadius: 3, overflow: 'hidden', border: '1px solid #21262d' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: c, borderRadius: 3, transition: 'width 0.5s ease' }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
+      <div style={{
+        flex: 1, height: 4,
+        background: 'var(--color-bg-overlay)',
+        borderRadius: 2,
+        overflow: 'hidden',
+      }}>
+        <div
+          className="rollout-bar-fill"
+          style={{
+            '--rollout-pct': `${pct}%`,
+            '--fill-color': fillColor,
+            height: '100%',
+          } as React.CSSProperties}
+        />
       </div>
-      <span style={{ fontSize: 11, color: '#8b949e', width: 30, textAlign: 'right' as const }}>{pct}%</span>
+      <span style={{ fontSize: 11, color: 'var(--color-fg-subtle)', width: 32, textAlign: 'right' as const }}>
+        {pct}%
+      </span>
     </div>
   );
 }
 
+// Pulsing green dot keyframes injected once
+const PULSE_STYLE = `
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0.6), 0 0 6px rgba(74,222,128,0.4); }
+  50%       { box-shadow: 0 0 0 4px rgba(74,222,128,0), 0 0 10px rgba(74,222,128,0.5); }
+}
+`;
+
+function injectPulseStyle() {
+  if (typeof document !== 'undefined' && !document.getElementById('tombstone-pulse-style')) {
+    const tag = document.createElement('style');
+    tag.id = 'tombstone-pulse-style';
+    tag.textContent = PULSE_STYLE;
+    document.head.appendChild(tag);
+  }
+}
+
+
 export default function FlagList() {
-  const [flags, setFlags] = useState<FlagItem[]>([]);
-  const [envStates, setEnvStates] = useState<Record<string, EnvState>>({});
-  const [env, setEnv] = useState<Env>('production');
-  const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [hovered, setHovered] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [env, setEnv] = useQueryState<Env>('env', {
+    defaultValue: 'production',
+    parse: (v) => ((['development', 'staging', 'production'] as const).includes(v as Env) ? (v as Env) : 'production'),
+    serialize: (v) => v,
+  });
+  const [search, setSearch] = useQueryState('q', { defaultValue: '', shallow: true });
 
-  const apiUrl = 'http://localhost:8081';
-  const tok = 'sdk-dev-token-change-in-prod';
-  const hdrs = { Authorization: `Bearer ${tok}` };
+  // useDeferredValue: adaptive interruptible search — no fixed debounce delay (React 19)
+  const deferredSearch = useDeferredValue(search);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [fr, sr] = await Promise.all([
-        fetch(`${apiUrl}/api/v1/flags`, { headers: hdrs }).then(r => r.json()) as Promise<{ flags: FlagItem[] }>,
-        fetch(`${apiUrl}/api/v1/environments/snapshot?environment=${env}`, { headers: hdrs }).then(r => r.json()) as Promise<{ flags: EnvState[] }>,
-      ]);
-      setFlags(fr.flags ?? []);
-      const m: Record<string, EnvState> = {};
-      for (const s of sr.flags ?? []) m[s.flag_key] = s;
-      setEnvStates(m);
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  }, [env]);
+  const { density, setDensity, rowHeight } = useDensity();
 
-  useEffect(() => { void load(); }, [load]);
+  const { data: flags = [], isLoading: flagsLoading } = useFlags();
+  const { data: envStates = {}, isLoading: snapshotLoading } = useEnvSnapshot(env);
+  const loading = flagsLoading || snapshotLoading;
 
-  const filtered = flags.filter(f =>
-    !search || f.key.toLowerCase().includes(search.toLowerCase()) || f.name.toLowerCase().includes(search.toLowerCase())
+  useEffect(() => { injectPulseStyle(); }, []);
+
+  // Filter uses deferred value — won't block typing even with 5000+ flags
+  const filtered = flags.filter((f: FlagItem) =>
+    !deferredSearch ||
+    f.key.toLowerCase().includes(deferredSearch.toLowerCase()) ||
+    f.name.toLowerCase().includes(deferredSearch.toLowerCase())
   );
 
-  const onCount = Object.values(envStates).filter(s => s.enabled).length;
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  // useCallback ensures the estimateSize ref is replaced when rowHeight changes.
+  // TanStack Virtual v3 honours a new callback identity and re-estimates all rows,
+  // so switching density correctly resizes the virtual slot heights.
+  const estimateSize = useCallback(() => rowHeight, [rowHeight]);
+
+  const virtualizer = useVirtualizer({
+    count: loading ? 8 : filtered.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize,
+    overscan: 5,
+  });
+
+  const onCount = Object.values(envStates).filter((s: EnvState) => s.enabled).length;
+  const offCount = flags.length - onCount;
+
+  const STAT_CARDS = [
+    { label: 'Total',    val: flags.length, color: '#60a5fa' },
+    { label: 'Enabled',  val: onCount,       color: '#4ade80' },
+    { label: 'Disabled', val: offCount,      color: '#6b7280' },
+  ];
 
   return (
-    <div style={{ padding: '28px 36px', maxWidth: 1280, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px', maxWidth: 1320, margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif' }}>
 
       {/* ── Header ── */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 28 }}>
+        {/* Title + subtitle */}
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e6edf3', margin: '0 0 4px' }}>Feature Flags</h1>
-          <p style={{ fontSize: 13, color: '#8b949e', margin: 0 }}>
-            {flags.length} total · {onCount} enabled in <span style={{ color: ENV_COLOR[env].text }}>{env}</span>
+          <h1 style={{ fontSize: 28, fontWeight: 700, color: '#f9fafb', margin: '0 0 6px', letterSpacing: '-0.02em' }}>
+            Feature Flags
+          </h1>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: 0, lineHeight: 1.5 }}>
+            Manage, monitor, and roll out flags across environments.&nbsp;
+            <span style={{ color: '#9ca3af' }}>
+              {flags.length} total &middot;&nbsp;
+              <span style={{ color: ENV_PILL[env].active.bg === 'transparent' ? '#6b7280' : ENV_PILL[env].active.bg }}>
+                {onCount} enabled in {env}
+              </span>
+            </span>
           </p>
         </div>
-        {/* Stat cards */}
-        <div style={{ display: 'flex', gap: 10 }}>
-          {[
-            { label: 'Total',    val: flags.length,              color: '#58a6ff' },
-            { label: 'Enabled',  val: onCount,                   color: '#3fb950' },
-            { label: 'Disabled', val: flags.length - onCount,    color: '#484f58' },
-          ].map(s => (
+
+        {/* Stat cards + Create button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {STAT_CARDS.map(s => (
             <div key={s.label} style={{
-              background: '#0d1117', border: '1px solid #21262d', borderRadius: 8,
-              padding: '10px 18px', textAlign: 'center' as const, minWidth: 76,
-              transition: 'border-color 0.15s, transform 0.15s',
+              background: '#111',
+              border: '1px solid #1a1a1a',
+              borderRadius: 12,
+              padding: '12px 20px',
+              textAlign: 'center' as const,
+              minWidth: 80,
             }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.val}</div>
-              <div style={{ fontSize: 11, color: '#484f58', marginTop: 3 }}>{s.label}</div>
+              <div style={{ fontSize: 26, fontWeight: 700, color: s.color, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+                {s.val}
+              </div>
+              <div style={{ fontSize: 11, color: '#4b5563', marginTop: 4, textTransform: 'uppercase' as const, letterSpacing: '0.06em' }}>
+                {s.label}
+              </div>
             </div>
           ))}
+
+          {/* Create Flag button */}
+          <button
+            onClick={() => setCreateOpen(true)}
+            style={{
+              marginLeft: 8,
+              padding: '10px 18px',
+              background: '#2563eb',
+              border: 'none',
+              borderRadius: 8,
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+              letterSpacing: '-0.01em',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              transition: 'background 0.15s',
+              whiteSpace: 'nowrap' as const,
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = '#1d4ed8'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = '#2563eb'; }}
+          >
+            <span style={{ fontSize: 16, lineHeight: 1, marginTop: -1 }}>+</span>
+            Create Flag
+          </button>
         </div>
       </div>
 
       {/* ── Controls ── */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' as const }}>
-        <input type="text" placeholder="Search by key or name…" value={search}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+        {/* Search */}
+        <input
+          type="text"
+          placeholder="Search flags by key or name…"
+          value={search}
           onChange={e => setSearch(e.target.value)}
           style={{
-            flex: '1 1 240px', minWidth: 200,
-            background: '#161b22', border: '1px solid #21262d', borderRadius: 8,
-            padding: '8px 14px', fontSize: 13, color: '#e6edf3', outline: 'none',
+            flex: '1 1 280px',
+            minWidth: 220,
+            background: '#111',
+            border: '1px solid #1a1a1a',
+            borderRadius: 8,
+            padding: '9px 14px',
+            fontSize: 14,
+            color: '#f9fafb',
+            outline: 'none',
+            transition: 'border-color 0.15s',
           }}
-          onFocus={e => { (e.target as HTMLInputElement).style.borderColor = '#388bfd'; }}
-          onBlur={e => { (e.target as HTMLInputElement).style.borderColor = '#21262d'; }}
+          onFocus={e => { (e.target as HTMLInputElement).style.borderColor = '#3b82f6'; }}
+          onBlur={e => { (e.target as HTMLInputElement).style.borderColor = '#1a1a1a'; }}
         />
+
+        {/* Environment pills */}
         <div style={{ display: 'flex', gap: 6 }}>
           {(['development', 'staging', 'production'] as Env[]).map(e => {
-            const ec = ENV_COLOR[e];
             const active = env === e;
+            const styles = active ? ENV_PILL[e].active : ENV_PILL[e].idle;
             return (
               <button key={e} onClick={() => setEnv(e)} style={{
-                padding: '7px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500,
-                cursor: 'pointer', border: `1px solid ${active ? ec.border : '#21262d'}`,
-                background: active ? ec.bg : 'transparent',
-                color: active ? ec.text : '#8b949e',
+                padding: '8px 16px',
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                border: `1px solid ${styles.border}`,
+                background: styles.bg,
+                color: styles.color,
                 transition: 'all 0.15s',
+                letterSpacing: '-0.01em',
+                textTransform: 'capitalize' as const,
               }}>
                 {e}
               </button>
             );
           })}
         </div>
+
+        <DensityToggle density={density} onChange={setDensity} />
       </div>
 
       {/* ── Table ── */}
-      <div style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, overflow: 'hidden' }}>
-        {loading ? (
-          <div style={{ padding: 60, textAlign: 'center' as const, color: '#484f58', fontSize: 14 }}>Loading flags…</div>
-        ) : filtered.length === 0 ? (
-          <div style={{ padding: 60, textAlign: 'center' as const, color: '#484f58', fontSize: 14 }}>
-            {search ? `No flags match "${search}"` : 'No flags yet.'}
-          </div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #21262d' }}>
-                {['Flag Key', 'Status', 'Rollout', 'Type', 'State', 'Owner', ''].map(h => (
-                  <th key={h} style={{
-                    textAlign: 'left' as const, padding: '10px 16px',
-                    fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const,
-                    letterSpacing: '0.07em', color: '#484f58',
-                  }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(flag => {
-                const es = envStates[flag.key];
-                const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
-                const hov = hovered === flag.id;
-                return (
-                  <tr key={flag.id}
-                    style={{ borderBottom: '1px solid #161b22', background: hov ? '#161b22' : 'transparent', transition: 'background 0.1s' }}
-                    onMouseEnter={() => setHovered(flag.id)}
-                    onMouseLeave={() => setHovered(null)}
-                  >
-                    {/* Key */}
-                    <td style={{ padding: '12px 16px', maxWidth: 220 }}>
-                      <Link to={`/flags/${flag.key}`} style={{
-                        fontFamily: "'JetBrains Mono','Fira Code',monospace",
-                        fontSize: 12, color: '#58a6ff', textDecoration: 'none', fontWeight: 500,
-                      }}
-                        onMouseEnter={e => { (e.target as HTMLElement).style.textDecoration = 'underline'; }}
-                        onMouseLeave={e => { (e.target as HTMLElement).style.textDecoration = 'none'; }}
-                      >
-                        {flag.key}
-                      </Link>
-                      {flag.name && flag.name !== flag.key && (
-                        <div style={{ fontSize: 11, color: '#8b949e', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, maxWidth: 200 }}>
-                          {flag.name}
-                        </div>
-                      )}
-                    </td>
-                    {/* Status */}
-                    <td style={{ padding: '12px 16px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={{
-                          width: 7, height: 7, borderRadius: '50%',
-                          background: es?.enabled ? '#3fb950' : '#21262d',
-                          boxShadow: es?.enabled ? '0 0 6px rgba(63,185,80,0.5)' : 'none',
-                        }} />
-                        <span style={{ fontSize: 12, fontWeight: 500, color: es?.enabled ? '#3fb950' : '#484f58' }}>
-                          {es?.enabled ? 'ON' : 'OFF'}
-                        </span>
-                      </div>
-                    </td>
-                    {/* Rollout */}
-                    <td style={{ padding: '12px 16px', minWidth: 140 }}>
-                      <RolloutBar pct={es?.rollout_pct ?? 0} enabled={es?.enabled ?? false} />
-                    </td>
-                    {/* Type */}
-                    <td style={{ padding: '12px 16px' }}>
-                      <code style={{
-                        fontSize: 11, color: '#8b949e',
-                        background: '#161b22', border: '1px solid #21262d',
-                        borderRadius: 4, padding: '2px 7px',
-                      }}>{flag.flag_type}</code>
-                    </td>
-                    {/* State */}
-                    <td style={{ padding: '12px 16px' }}>
-                      <span style={{
-                        fontSize: 11, fontWeight: 500, padding: '3px 9px', borderRadius: 20,
-                        background: sb.bg, border: `1px solid ${sb.border}`, color: sb.text,
-                      }}>{flag.state}</span>
-                    </td>
-                    {/* Owner */}
-                    <td style={{ padding: '12px 16px', maxWidth: 160 }}>
-                      <span style={{ fontSize: 12, color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, display: 'block' }}>
-                        {flag.owner_id}
-                      </span>
-                    </td>
-                    {/* Action */}
-                    <td style={{ padding: '12px 16px', textAlign: 'right' as const }}>
-                      <Link to={`/flags/${flag.key}`} style={{
-                        fontSize: 12, color: hov ? '#58a6ff' : '#484f58',
-                        textDecoration: 'none', fontWeight: 500, transition: 'color 0.15s',
-                      }}>
-                        Details →
-                      </Link>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+      <div
+        ref={parentRef}
+        style={{
+          background: 'var(--color-bg-surface)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 12,
+          overflow: 'auto',
+          maxHeight: 'calc(100vh - 280px)',
+        }}
+      >
+        {/* Table header */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
+          padding: '10px 16px',
+          borderBottom: '1px solid var(--color-border)',
+          position: 'sticky', top: 0, zIndex: 1,
+          background: 'var(--color-bg-surface)',
+        }}>
+          {['Flag Key', 'Status', 'Rollout', 'Type', 'State', 'Owner', ''].map(h => (
+            <div key={h} style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: 'var(--color-fg-subtle)' }}>{h}</div>
+          ))}
+        </div>
+
+        {/* Virtual rows */}
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          {virtualizer.getVirtualItems().map(vRow => {
+            if (loading) {
+              return (
+                <div key={vRow.key} style={{ position: 'absolute', top: vRow.start, left: 0, right: 0, height: vRow.size }}>
+                  <SkeletonRow />
+                </div>
+              );
+            }
+            const flag = filtered[vRow.index];
+            if (!flag) return null;
+            const es = envStates[flag.key];
+            const sb = STATE_BADGE[flag.state] ?? STATE_BADGE['DRAFT'];
+            const pct = es?.rollout_pct ?? 0;
+            const enabled = es?.enabled ?? false;
+
+            // Derive vertical padding from rowHeight so density visually adapts.
+            // vRow.size equals the estimated rowHeight (set by estimateSize above).
+            // Using padding-top/bottom to fill the slot prevents content overflow
+            // clipping in Condensed (32px) and gaps in Spacious (72px).
+            const vPad = Math.max(0, Math.floor((vRow.size - 20) / 2));
+
+            return (
+              <div
+                key={vRow.key}
+                style={{
+                  position: 'absolute', top: vRow.start, left: 0, right: 0, height: vRow.size,
+                  display: 'grid',
+                  gridTemplateColumns: '2fr 80px 140px 90px 90px 120px 60px',
+                  alignItems: 'center',
+                  padding: `${vPad}px 16px`,
+                  borderBottom: '1px solid var(--color-border)',
+                  cursor: 'pointer',
+                  transition: 'background 0.1s',
+                  boxSizing: 'border-box' as const,
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--color-bg-elevated)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                onClick={() => navigate(`/flags/${flag.key}`)}
+              >
+                {/* Flag Key */}
+                <div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-accent)', fontWeight: 500 }}>{flag.key}</div>
+                  {flag.name && flag.name !== flag.key && (
+                    <div style={{ fontSize: 11, color: 'var(--color-fg-subtle)', marginTop: 2 }}>{flag.name}</div>
+                  )}
+                </div>
+                {/* Status */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className={`status-dot status-dot-${enabled ? 'on' : 'off'}`} />
+                  <span style={{ fontSize: 12, fontWeight: 500, color: enabled ? 'var(--color-risk-low)' : 'var(--color-fg-subtle)' }}>
+                    {enabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                {/* Rollout */}
+                <RolloutBar pct={pct} enabled={enabled} />
+                {/* Type */}
+                <div><code style={{ fontSize: 11, color: 'var(--color-fg-muted)', background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border)', borderRadius: 4, padding: '2px 6px' }}>{flag.flag_type}</code></div>
+                {/* State */}
+                <div><span className="badge" style={{ fontSize: 11, fontWeight: 500, padding: '2px 8px', borderRadius: 999, background: sb.bg, border: `1px solid ${sb.border}`, color: sb.text }}>{flag.state}</span></div>
+                {/* Owner */}
+                <div style={{ fontSize: 12, color: 'var(--color-fg-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{flag.owner_id}</div>
+                {/* Action */}
+                <div style={{ textAlign: 'right' as const, fontSize: 12, color: 'var(--color-fg-subtle)' }}>{'→'}</div>
+              </div>
+            );
+          })}
+        </div>
+
       </div>
+
+      <FlagCreateModal open={createOpen} onClose={() => setCreateOpen(false)} />
     </div>
   );
 }

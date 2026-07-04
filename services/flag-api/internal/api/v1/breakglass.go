@@ -142,7 +142,7 @@ func (h *BreakGlassHandler) ListTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type tokenRow struct {
 		ID          string `json:"id"`

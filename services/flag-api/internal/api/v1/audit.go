@@ -80,7 +80,7 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	entries := []AuditEntry{}
 	for rows.Next() {

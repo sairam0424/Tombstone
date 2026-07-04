@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a Question
+    url: https://github.com/sairam0424/Tombstone/discussions
+    about: Use GitHub Discussions for questions and general help
+  - name: Security Vulnerability
+    url: https://github.com/sairam0424/Tombstone/security/advisories/new
+    about: Report security vulnerabilities privately

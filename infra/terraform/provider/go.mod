@@ -1,4 +1,4 @@
-module github.com/tombstone/terraform-provider-tombstone
+module github.com/sairam0424/Tombstone/infra/terraform/provider
 
 go 1.22
 

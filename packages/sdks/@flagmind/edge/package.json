@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/edge",
+  "name": "@tomb-stone/edge",
   "version": "0.1.0",
   "type": "module",
   "description": "Tombstone Edge SDK — sub-1ms flag evaluation on Cloudflare Workers via KV",
@@ -8,10 +8,25 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
   },
+  "repository": { "type": "git", "url": "git+https://github.com/sairam0424/Tombstone.git" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "scripts": { "build": "tsc -p tsconfig.build.json" },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
     "typescript": "~5.8.2"
   },
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "openfeature",
+    "cloudflare-workers",
+    "edge",
+    "self-hosted",
+    "devops",
+    "typescript",
+    "tombstone"
+  ],
   "engines": { "node": ">=18" }
 }

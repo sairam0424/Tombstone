@@ -1,5 +1,5 @@
 {
-  "name": "@tombstone/react",
+  "name": "@tomb-stone/react",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,13 +10,29 @@
       "default": "./dist/index.js"
     }
   },
+  "description": "Tombstone React SDK — hooks and provider for feature flag evaluation in React 18+",
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "openfeature",
+    "react",
+    "react-hooks",
+    "self-hosted",
+    "devops",
+    "typescript",
+    "tombstone"
+  ],
+  "repository": { "type": "git", "url": "git+https://github.com/sairam0424/Tombstone.git" },
+  "homepage": "https://github.com/sairam0424/Tombstone",
+  "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "test": "npx vitest run"
   },
   "peerDependencies": {
     "react": ">=18",
-    "@tombstone/core": "0.1.0"
+    "@tomb-stone/core": "0.1.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.0.0",

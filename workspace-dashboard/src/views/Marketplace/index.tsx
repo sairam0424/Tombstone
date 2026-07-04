@@ -1,4 +1,8 @@
 import { useState, useEffect } from 'react';
+import { Puzzle } from 'lucide-react';
+import { MARKETPLACE_URL, ENABLE_MARKETPLACE } from '../../config.js';
+import { EmptyState, Reveal } from '../../components/ui/index.js';
+
 
 interface Integration {
   id: string;
@@ -9,27 +13,86 @@ interface Integration {
   webhook_url?: string;
 }
 
-const CATEGORIES = ['all', 'notifications', 'observability', 'incident-management', 'project-management'];
+// Map API categories to display labels and filter pills
+const FILTER_PILLS = [
+  { key: 'all',                label: 'All' },
+  { key: 'observability',      label: 'Monitoring' },
+  { key: 'incident-management',label: 'Incident' },
+  { key: 'notifications',      label: 'Analytics' },
+  { key: 'project-management', label: 'CI/CD' },
+];
 
-const CATEGORY_COLORS: Record<string, { bg: string; color: string }> = {
-  notifications:         { bg: '#1f2d3d', color: '#58a6ff' },
-  observability:         { bg: '#1d2d22', color: '#3fb950' },
-  'incident-management': { bg: '#2d1d1d', color: '#f85149' },
-  'project-management':  { bg: '#2d261d', color: '#e3b341' },
+// Icon background palette — cycles by first letter
+const ICON_PALETTE: Array<{ bg: string; fg: string }> = [
+  { bg: 'rgba(88,166,255,0.18)',  fg: '#58a6ff' },
+  { bg: 'rgba(63,185,80,0.18)',   fg: '#3fb950' },
+  { bg: 'rgba(210,153,255,0.18)', fg: '#d29bff' },
+  { bg: 'rgba(255,166,88,0.18)',  fg: '#ffa658' },
+  { bg: 'rgba(248,81,73,0.18)',   fg: '#f85149' },
+  { bg: 'rgba(86,211,200,0.18)',  fg: '#56d3c8' },
+];
+
+function iconColor(name: string): { bg: string; fg: string } {
+  const idx = (name.charCodeAt(0) || 0) % ICON_PALETTE.length;
+  return ICON_PALETTE[idx];
+}
+
+type StatusKey = 'CONNECTED' | 'AVAILABLE' | 'ERROR';
+
+function resolveStatus(integration: Integration): StatusKey {
+  if (integration.installed) return 'CONNECTED';
+  return 'AVAILABLE';
+}
+
+const STATUS_STYLES: Record<StatusKey, { dot: string; label: string; bg: string; border: string; color: string }> = {
+  CONNECTED: {
+    dot: '#3fb950',
+    label: 'Connected',
+    bg: 'rgba(63,185,80,0.12)',
+    border: 'rgba(63,185,80,0.28)',
+    color: '#3fb950',
+  },
+  AVAILABLE: {
+    dot: '#58a6ff',
+    label: 'Available',
+    bg: 'rgba(88,166,255,0.10)',
+    border: 'rgba(88,166,255,0.28)',
+    color: '#58a6ff',
+  },
+  ERROR: {
+    dot: '#f85149',
+    label: 'Error',
+    bg: 'rgba(248,81,73,0.10)',
+    border: 'rgba(248,81,73,0.28)',
+    color: '#f85149',
+  },
 };
 
 export default function Marketplace() {
+  const isMarketplaceAvailable = ENABLE_MARKETPLACE;
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState('all');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
+  if (!isMarketplaceAvailable) {
+    return (
+      <div style={{ padding: '32px 40px' }}>
+        <EmptyState
+          icon={<Puzzle size={40} />}
+          heading="Marketplace service offline"
+          body="Enable the 'feature-marketplace-service' flag in Tombstone when the marketplace service is deployed."
+        />
+      </div>
+    );
+  }
+
   async function fetchIntegrations() {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('http://localhost:8086/api/v1/marketplace');
+      const res = await fetch(`${MARKETPLACE_URL}/api/v1/marketplace`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setIntegrations(Array.isArray(data) ? data : (data.integrations ?? []));
@@ -53,7 +116,7 @@ export default function Marketplace() {
 
     setActionLoading(integration.id);
     try {
-      const res = await fetch(`http://localhost:8086/api/v1/marketplace/${integration.id}/install`, {
+      const res = await fetch(`${MARKETPLACE_URL}/api/v1/marketplace/${integration.id}/install`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ webhook_url: webhookUrl }),
@@ -72,7 +135,7 @@ export default function Marketplace() {
 
     setActionLoading(integration.id);
     try {
-      const res = await fetch(`http://localhost:8086/api/v1/marketplace/${integration.id}`, {
+      const res = await fetch(`${MARKETPLACE_URL}/api/v1/marketplace/${integration.id}`, {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -84,91 +147,179 @@ export default function Marketplace() {
     }
   }
 
-  const filtered = activeCategory === 'all'
-    ? integrations
-    : integrations.filter(i => i.category === activeCategory);
+  const filtered =
+    activeCategory === 'all'
+      ? integrations
+      : integrations.filter(i => i.category === activeCategory);
 
-  const installedCount = integrations.filter(i => i.installed).length;
+  const connectedCount = integrations.filter(i => i.installed).length;
 
   return (
-    <div style={{ padding: '24px', minHeight: '100%', background: '#080c14', color: '#e6edf3' }}>
-      {/* Header */}
-      <div style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#e6edf3', margin: 0 }}>
-              Marketplace
-            </h1>
-            <p style={{ fontSize: '13px', color: '#8b949e', margin: '4px 0 0' }}>
-              Connect Tombstone to your observability, alerting, and project-management stack
-            </p>
-          </div>
-          <div style={{
-            padding: '4px 12px',
+    <div
+      style={{
+        padding: '28px 32px',
+        minHeight: '100%',
+        background: '#070b12',
+        color: '#e6edf3',
+        fontFamily: 'inherit',
+      }}
+    >
+      {/* ── Page header ── */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          marginBottom: '28px',
+          gap: '16px',
+        }}
+      >
+        <div>
+          <h1
+            style={{
+              fontSize: '22px',
+              fontWeight: 700,
+              color: '#f0f6fc',
+              margin: '0 0 6px',
+              letterSpacing: '-0.3px',
+            }}
+          >
+            Marketplace
+          </h1>
+          <p style={{ fontSize: '13px', color: '#7d8590', margin: 0, lineHeight: 1.5 }}>
+            Integrations and plugins
+          </p>
+        </div>
+
+        {/* Connected counter badge */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '5px 14px',
             borderRadius: '20px',
-            background: '#161b22',
-            border: '1px solid #21262d',
+            background: 'rgba(63,185,80,0.10)',
+            border: '1px solid rgba(63,185,80,0.25)',
             fontSize: '12px',
+            fontWeight: 500,
             color: '#3fb950',
-          }}>
-            {installedCount} installed
-          </div>
+            flexShrink: 0,
+          }}
+        >
+          <span
+            style={{
+              width: '6px',
+              height: '6px',
+              borderRadius: '50%',
+              background: '#3fb950',
+              display: 'inline-block',
+            }}
+          />
+          {connectedCount} connected
         </div>
       </div>
 
-      {/* Category filter */}
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', flexWrap: 'wrap' }}>
-        {CATEGORIES.map(cat => (
-          <button
-            key={cat}
-            onClick={() => setActiveCategory(cat)}
-            style={{
-              padding: '5px 14px',
-              borderRadius: '20px',
-              border: `1px solid ${activeCategory === cat ? '#58a6ff' : '#21262d'}`,
-              background: activeCategory === cat ? 'rgba(88,166,255,0.12)' : '#0d1117',
-              color: activeCategory === cat ? '#58a6ff' : '#8b949e',
-              fontSize: '12px',
-              cursor: 'pointer',
-              textTransform: 'capitalize',
-              transition: 'all 0.15s',
-            }}
-          >
-            {cat.replace(/-/g, ' ')}
-          </button>
-        ))}
+      {/* ── Divider ── */}
+      <div
+        style={{
+          height: '1px',
+          background: 'linear-gradient(90deg, #1c2333 0%, #21262d 60%, transparent 100%)',
+          marginBottom: '24px',
+        }}
+      />
+
+      {/* ── Category filter pills ── */}
+      <div
+        style={{
+          display: 'flex',
+          gap: '8px',
+          marginBottom: '28px',
+          flexWrap: 'wrap',
+        }}
+      >
+        {FILTER_PILLS.map(pill => {
+          const isActive = activeCategory === pill.key;
+          return (
+            <button
+              key={pill.key}
+              onClick={() => setActiveCategory(pill.key)}
+              style={{
+                padding: '5px 16px',
+                borderRadius: '20px',
+                border: `1px solid ${isActive ? 'rgba(88,166,255,0.55)' : '#1c2333'}`,
+                background: isActive ? 'rgba(88,166,255,0.12)' : '#0d1117',
+                color: isActive ? '#58a6ff' : '#7d8590',
+                fontSize: '12px',
+                fontWeight: isActive ? 600 : 400,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+                letterSpacing: '0.01em',
+              }}
+            >
+              {pill.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Loading state */}
+      {/* ── Loading state ── */}
       {loading && (
-        <div style={{ textAlign: 'center', padding: '60px', color: '#8b949e', fontSize: '14px' }}>
+        <div
+          style={{
+            textAlign: 'center',
+            padding: '72px 0',
+            color: '#484f58',
+            fontSize: '14px',
+          }}
+        >
+          <div
+            style={{
+              width: '24px',
+              height: '24px',
+              border: '2px solid #21262d',
+              borderTopColor: '#58a6ff',
+              borderRadius: '50%',
+              margin: '0 auto 14px',
+              animation: 'spin 0.8s linear infinite',
+            }}
+          />
           Loading integrations…
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
 
-      {/* Error state */}
+      {/* ── Error state ── */}
       {error && !loading && (
-        <div style={{
-          padding: '16px',
-          borderRadius: '8px',
-          background: 'rgba(248,81,73,0.1)',
-          border: '1px solid rgba(248,81,73,0.3)',
-          color: '#f85149',
-          fontSize: '13px',
-          marginBottom: '16px',
-        }}>
-          <strong>Error:</strong> {error}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            padding: '14px 18px',
+            borderRadius: '10px',
+            background: 'rgba(248,81,73,0.08)',
+            border: '1px solid rgba(248,81,73,0.25)',
+            color: '#f85149',
+            fontSize: '13px',
+            marginBottom: '20px',
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            <strong style={{ fontWeight: 600 }}>Error:</strong> {error}
+          </span>
           <button
             onClick={fetchIntegrations}
             style={{
-              marginLeft: '12px',
-              padding: '3px 10px',
+              padding: '4px 12px',
               borderRadius: '6px',
-              border: '1px solid rgba(248,81,73,0.4)',
-              background: 'transparent',
+              border: '1px solid rgba(248,81,73,0.35)',
+              background: 'rgba(248,81,73,0.08)',
               color: '#f85149',
               cursor: 'pointer',
               fontSize: '12px',
+              fontWeight: 500,
+              flexShrink: 0,
             }}
           >
             Retry
@@ -176,123 +327,217 @@ export default function Marketplace() {
         </div>
       )}
 
-      {/* Empty state */}
+      {/* ── Empty state ── */}
       {!loading && !error && filtered.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '60px', color: '#484f58', fontSize: '14px' }}>
-          No integrations found in this category.
-        </div>
+        <EmptyState
+          icon={
+            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5l6.74-6.76z"/>
+              <line x1="16" y1="8" x2="2" y2="22"/>
+              <line x1="17.5" y1="15" x2="9" y2="15"/>
+            </svg>
+          }
+          heading="No integrations found"
+          body="No integrations available in this category. Try a different filter."
+        />
       )}
 
-      {/* Integration grid */}
+      {/* ── Integration grid ── */}
       {!loading && filtered.length > 0 && (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
-          gap: '16px',
-        }}>
-          {filtered.map(integration => {
-            const catStyle = CATEGORY_COLORS[integration.category] ?? { bg: '#161b22', color: '#8b949e' };
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+            gap: '16px',
+          }}
+        >
+          {filtered.map((integration, i) => {
+            const status = resolveStatus(integration);
+            const statusStyle = STATUS_STYLES[status];
+            const icon = iconColor(integration.name);
             const isActioning = actionLoading === integration.id;
+            const isConnected = integration.installed;
 
             return (
+              <Reveal key={integration.id} delay={i * 0.04}>
               <div
-                key={integration.id}
                 style={{
                   background: '#0d1117',
-                  border: `1px solid ${integration.installed ? '#1f3a2a' : '#21262d'}`,
-                  borderRadius: '10px',
-                  padding: '18px',
+                  border: `1px solid ${isConnected ? 'rgba(63,185,80,0.18)' : '#1c2333'}`,
+                  borderRadius: '12px',
+                  padding: '20px',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: '12px',
-                  transition: 'border-color 0.15s',
+                  gap: '14px',
+                  transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
+                  boxShadow: isConnected
+                    ? '0 0 0 1px rgba(63,185,80,0.08) inset'
+                    : 'none',
                 }}
               >
-                {/* Top row: name + status badge */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-                  <div style={{ fontWeight: 600, fontSize: '14px', color: '#e6edf3', lineHeight: 1.3 }}>
-                    {integration.name}
+                {/* ── Card header: icon + name + status ── */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                  }}
+                >
+                  {/* Icon placeholder */}
+                  <div
+                    style={{
+                      width: '40px',
+                      height: '40px',
+                      borderRadius: '10px',
+                      background: icon.bg,
+                      border: `1px solid ${icon.fg}33`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '16px',
+                      fontWeight: 700,
+                      color: icon.fg,
+                      flexShrink: 0,
+                      letterSpacing: '-0.5px',
+                    }}
+                  >
+                    {integration.name.charAt(0).toUpperCase()}
                   </div>
-                  <div style={{
-                    padding: '2px 8px',
-                    borderRadius: '12px',
-                    fontSize: '11px',
-                    fontWeight: 500,
-                    flexShrink: 0,
-                    background: integration.installed ? 'rgba(63,185,80,0.15)' : 'rgba(139,148,158,0.12)',
-                    color: integration.installed ? '#3fb950' : '#8b949e',
-                    border: `1px solid ${integration.installed ? 'rgba(63,185,80,0.3)' : '#21262d'}`,
-                  }}>
-                    {integration.installed ? '● Installed' : '○ Available'}
+
+                  {/* Name + category */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: '14px',
+                        color: '#f0f6fc',
+                        lineHeight: 1.3,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {integration.name}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        color: '#484f58',
+                        marginTop: '3px',
+                        textTransform: 'capitalize',
+                      }}
+                    >
+                      {integration.category.replace(/-/g, ' ')}
+                    </div>
+                  </div>
+
+                  {/* Status badge */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '3px 9px',
+                      borderRadius: '20px',
+                      background: statusStyle.bg,
+                      border: `1px solid ${statusStyle.border}`,
+                      fontSize: '11px',
+                      fontWeight: 500,
+                      color: statusStyle.color,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        background: statusStyle.dot,
+                        display: 'inline-block',
+                        flexShrink: 0,
+                      }}
+                    />
+                    {statusStyle.label}
                   </div>
                 </div>
 
-                {/* Category badge */}
-                <div style={{
-                  display: 'inline-flex',
-                  alignSelf: 'flex-start',
-                  padding: '2px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  background: catStyle.bg,
-                  color: catStyle.color,
-                  textTransform: 'capitalize',
-                }}>
-                  {integration.category.replace(/-/g, ' ')}
-                </div>
+                {/* ── Separator ── */}
+                <div
+                  style={{
+                    height: '1px',
+                    background: '#1c2333',
+                  }}
+                />
 
-                {/* Description */}
-                <p style={{
-                  fontSize: '13px',
-                  color: '#8b949e',
-                  margin: 0,
-                  lineHeight: 1.5,
-                  flex: 1,
-                }}>
+                {/* ── Description ── */}
+                <p
+                  style={{
+                    fontSize: '13px',
+                    color: '#7d8590',
+                    margin: 0,
+                    lineHeight: 1.6,
+                    flex: 1,
+                  }}
+                >
                   {integration.description}
                 </p>
 
-                {/* Webhook URL (if installed) */}
-                {integration.installed && integration.webhook_url && (
-                  <div style={{
-                    padding: '6px 10px',
-                    borderRadius: '6px',
-                    background: '#161b22',
-                    border: '1px solid #21262d',
-                    fontSize: '11px',
-                    color: '#484f58',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}>
+                {/* ── Webhook URL (when connected) ── */}
+                {isConnected && integration.webhook_url && (
+                  <div
+                    style={{
+                      padding: '7px 10px',
+                      borderRadius: '7px',
+                      background: '#0a0e16',
+                      border: '1px solid #1c2333',
+                      fontSize: '11px',
+                      color: '#484f58',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'ui-monospace, monospace',
+                    }}
+                    title={integration.webhook_url}
+                  >
                     {integration.webhook_url}
                   </div>
                 )}
 
-                {/* Action button */}
+                {/* ── Action button ── */}
                 <button
                   disabled={isActioning}
-                  onClick={() => integration.installed ? handleUninstall(integration) : handleInstall(integration)}
+                  onClick={() =>
+                    isConnected ? handleUninstall(integration) : handleInstall(integration)
+                  }
                   style={{
-                    padding: '7px 14px',
-                    borderRadius: '6px',
-                    border: `1px solid ${integration.installed ? 'rgba(248,81,73,0.4)' : '#30363d'}`,
-                    background: integration.installed
-                      ? 'rgba(248,81,73,0.08)'
-                      : 'rgba(88,166,255,0.08)',
-                    color: integration.installed ? '#f85149' : '#58a6ff',
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    border: `1px solid ${
+                      isConnected ? '#1c2333' : 'rgba(88,166,255,0.30)'
+                    }`,
+                    background: isConnected
+                      ? '#161b22'
+                      : 'rgba(88,166,255,0.10)',
+                    color: isConnected ? '#e6edf3' : '#58a6ff',
                     fontSize: '13px',
-                    cursor: isActioning ? 'not-allowed' : 'pointer',
-                    opacity: isActioning ? 0.6 : 1,
-                    transition: 'all 0.15s',
                     fontWeight: 500,
+                    cursor: isActioning ? 'not-allowed' : 'pointer',
+                    opacity: isActioning ? 0.55 : 1,
+                    transition: 'all 0.15s ease',
+                    textAlign: 'center',
+                    letterSpacing: '0.01em',
                   }}
                 >
                   {isActioning
-                    ? (integration.installed ? 'Uninstalling…' : 'Installing…')
-                    : (integration.installed ? 'Uninstall' : 'Install')}
+                    ? isConnected
+                      ? 'Disconnecting…'
+                      : 'Connecting…'
+                    : isConnected
+                    ? 'Configure'
+                    : 'Connect'}
                 </button>
               </div>
+              </Reveal>
             );
           })}
         </div>
