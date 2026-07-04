@@ -12,6 +12,7 @@ import (
     "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
     "go.uber.org/zap"
 
+    "github.com/tombstone/gitops-sync/internal/health"
     "github.com/tombstone/gitops-sync/internal/parser"
     "github.com/tombstone/gitops-sync/internal/syncer"
     "github.com/tombstone/gitops-sync/internal/telemetry"
@@ -57,6 +58,12 @@ func main() {
     r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
     })
+
+    // gitops-sync has no Postgres or Redis dependency of its own — it is
+    // stateless aside from calling flag-api over HTTP. Checker with both
+    // fields nil always reports ready.
+    healthChecker := &health.Checker{}
+    r.Get("/readyz", healthChecker.Readyz)
 
     // POST /api/v1/sync — triggered by CI/CD webhook on merge
     r.Post("/api/v1/sync", func(w http.ResponseWriter, r *http.Request) {
