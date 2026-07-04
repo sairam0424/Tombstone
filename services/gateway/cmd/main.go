@@ -46,6 +46,11 @@ func main() {
 	if flagAPIURL == "" {
 		logger.Fatal("FLAG_API_URL environment variable is required")
 	}
+	// FLAG_API_TOKEN authenticates the snapshot reconciler's calls to flag-api.
+	// Optional: the reconciler is belt-and-suspenders insurance against the
+	// dual-write gap, not a primary delivery path, so its absence only
+	// disables the reconciler rather than failing gateway startup.
+	flagAPIToken := os.Getenv("FLAG_API_TOKEN")
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -76,6 +81,17 @@ func main() {
 		go broadcaster.RunStreamConsumer(ctx, env)
 	}
 	logger.Info("Redis Streams consumers started", zap.Strings("environments", knownEnvs))
+
+	// Snapshot reconciler: low-frequency (5 min) belt-and-suspenders poll of
+	// flag-api's snapshot per environment, to recover from the dual-write gap
+	// (Postgres commit succeeds, Redis publish/XADD is lost). Runs ALONGSIDE
+	// broadcaster.Run/RunStreamConsumer above — never instead of them.
+	if flagAPIToken != "" {
+		reconciler := hub.NewReconciler(h, flagAPIURL, flagAPIToken, logger)
+		go reconciler.Run(ctx, knownEnvs)
+	} else {
+		logger.Warn("FLAG_API_TOKEN not set — snapshot reconciler disabled")
+	}
 
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
