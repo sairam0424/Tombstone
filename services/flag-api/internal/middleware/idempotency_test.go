@@ -69,8 +69,9 @@ func TestIdempotency_FirstCall_RunsHandlerOnceAndPersists(t *testing.T) {
 	body := `{"key":"f1","name":"Flag One","flag_type":"BOOLEAN"}`
 	hash := requestHashForTest(body)
 
+	// actor is "" in tests because no auth context is injected.
 	mock.ExpectQuery(`INSERT INTO idempotency_keys`).
-		WithArgs("key-abc", testEndpoint, hash).
+		WithArgs("", "key-abc", testEndpoint, hash).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("row-1"))
 
 	mock.ExpectExec(`UPDATE idempotency_keys`).
@@ -111,11 +112,11 @@ func TestIdempotency_Replay_DoesNotInvokeHandlerAgain(t *testing.T) {
 
 	// Conflict: INSERT returns no rows.
 	mock.ExpectQuery(`INSERT INTO idempotency_keys`).
-		WithArgs("key-abc", testEndpoint, hash).
+		WithArgs("", "key-abc", testEndpoint, hash).
 		WillReturnError(nowRowsErr())
 
 	mock.ExpectQuery(`SELECT request_hash, completed_at, response_status, response_body`).
-		WithArgs("key-abc", testEndpoint).
+		WithArgs("", "key-abc", testEndpoint).
 		WillReturnRows(sqlmock.NewRows([]string{"request_hash", "completed_at", "response_status", "response_body"}).
 			AddRow(hash, time.Now(), int64(http.StatusCreated), []byte(`{"created":true}`)))
 
@@ -153,11 +154,11 @@ func TestIdempotency_SecondCallSameKeyDifferentBody_Returns409(t *testing.T) {
 	secondHash := requestHashForTest(secondBody)
 
 	mock.ExpectQuery(`INSERT INTO idempotency_keys`).
-		WithArgs("key-abc", testEndpoint, secondHash).
+		WithArgs("", "key-abc", testEndpoint, secondHash).
 		WillReturnError(nowRowsErr())
 
 	mock.ExpectQuery(`SELECT request_hash, completed_at, response_status, response_body`).
-		WithArgs("key-abc", testEndpoint).
+		WithArgs("", "key-abc", testEndpoint).
 		WillReturnRows(sqlmock.NewRows([]string{"request_hash", "completed_at", "response_status", "response_body"}).
 			AddRow(firstHash, time.Now(), int64(http.StatusCreated), []byte(`{"created":true}`)))
 
@@ -190,11 +191,11 @@ func TestIdempotency_StillProcessing_Returns409WithoutBlocking(t *testing.T) {
 	hash := requestHashForTest(body)
 
 	mock.ExpectQuery(`INSERT INTO idempotency_keys`).
-		WithArgs("key-abc", testEndpoint, hash).
+		WithArgs("", "key-abc", testEndpoint, hash).
 		WillReturnError(nowRowsErr())
 
 	mock.ExpectQuery(`SELECT request_hash, completed_at, response_status, response_body`).
-		WithArgs("key-abc", testEndpoint).
+		WithArgs("", "key-abc", testEndpoint).
 		WillReturnRows(sqlmock.NewRows([]string{"request_hash", "completed_at", "response_status", "response_body"}).
 			AddRow(hash, nil, nil, nil))
 
@@ -237,7 +238,7 @@ func TestIdempotency_ExpiredKey_ExecutesFreshAfterCleanup(t *testing.T) {
 	// After the cleanup ticker has deleted the expired row, the unique index
 	// no longer has a conflicting entry, so INSERT succeeds again.
 	mock.ExpectQuery(`INSERT INTO idempotency_keys`).
-		WithArgs("key-abc", testEndpoint, hash).
+		WithArgs("", "key-abc", testEndpoint, hash).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("row-2"))
 
 	mock.ExpectExec(`UPDATE idempotency_keys`).

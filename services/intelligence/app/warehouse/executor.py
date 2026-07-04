@@ -23,6 +23,6 @@ async def run_warehouse_query(fn, *args, timeout: float = WAREHOUSE_QUERY_TIMEOU
     enhancement could track/cancel/recycle stuck threads if this becomes a real
     problem in practice.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future = loop.run_in_executor(_executor, lambda: fn(*args, **kwargs))
     return await asyncio.wait_for(future, timeout=timeout)

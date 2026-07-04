@@ -133,11 +133,25 @@ func main() {
 		})
 	})
 
-	// Internal DLQ inspection/replay routes — not part of the public SDK
-	// surface. Deliberately unauthenticated at this layer today (same trust
-	// boundary as /health); add auth middleware here before exposing this
-	// beyond an internal network.
+	// Internal DLQ inspection/replay routes — guarded by FLAG_API_TOKEN bearer
+	// check (SEC-002). When FLAG_API_TOKEN is unset (local dev) auth is skipped
+	// so local testing doesn't require a token, matching the reconciler's
+	// fail-open-when-token-absent behaviour. In production FLAG_API_TOKEN is
+	// always set, so the routes require the same token the reconciler uses.
 	r.Route("/internal/dlq/{environment}", func(r chi.Router) {
+		if flagAPIToken != "" {
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if req.Header.Get("Authorization") != "Bearer "+flagAPIToken {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+						return
+					}
+					next.ServeHTTP(w, req)
+				})
+			})
+		}
 		r.Get("/", dlqH.ListDLQ)
 		r.Post("/replay", dlqH.ReplayDLQ)
 	})
