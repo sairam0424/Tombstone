@@ -7,10 +7,17 @@ export class SSEStreamClient {
   private reconnectMs: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  // True once the very first "connected" event has been observed. Used to
+  // distinguish the initial connection (snapshot already fetched by
+  // TombstoneClient.connect()) from every SUBSEQUENT reconnect, which must
+  // trigger onReconnect regardless of whether the gap went through a STALE
+  // provider state.
+  private hasConnectedOnce = false;
 
   constructor(
     private readonly config: TombstoneClientConfig,
     private readonly onEvent: (event: FlagEvent) => void,
+    private readonly onReconnect?: () => void,
   ) {
     this.reconnectMs = config.reconnectIntervalMs ?? 1000;
   }
@@ -53,6 +60,15 @@ export class SSEStreamClient {
 
     this.es.addEventListener('connected', () => {
       this.reconnectMs = this.config.reconnectIntervalMs ?? 1000; // reset backoff
+
+      // The gateway sends "connected" on the initial connection AND on every
+      // reconnect. Fire onReconnect for every occurrence AFTER the first —
+      // the initial connect() already fetched a snapshot before opening the
+      // stream, so re-fetching here would be redundant (but harmless).
+      if (this.hasConnectedOnce) {
+        this.onReconnect?.();
+      }
+      this.hasConnectedOnce = true;
     });
 
     this.es.onerror = () => {

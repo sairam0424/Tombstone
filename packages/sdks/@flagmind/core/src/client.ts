@@ -19,51 +19,81 @@ export class TombstoneClient {
   constructor(private readonly config: TombstoneClientConfig) {
     this.cache = new FlagCache();
     this.engine = new EvaluationEngine();
-    this.stream = new SSEStreamClient(config, (event: FlagEvent) => {
-      this.cache.applyEvent(event);
-    });
+    this.stream = new SSEStreamClient(
+      config,
+      (event: FlagEvent) => {
+        this.cache.applyEvent(event);
+      },
+      () => {
+        // Every SSE reconnect (not only ones that went through a STALE
+        // period) may have missed flag-api's Redis publish for events that
+        // occurred while disconnected — see the dual-write gap documented in
+        // services/flag-api/internal/api/v1/flags.go. A fresh full-snapshot
+        // refetch re-syncs the cache regardless of how briefly we were down.
+        // Fire-and-forget: fetchSnapshot() already swallows its own errors.
+        void this.fetchSnapshot();
+      },
+    );
   }
 
   /**
    * Fetches full snapshot, loads cache, opens SSE stream.
    * Must be called before evaluate().
+   */
+  async connect(): Promise<void> {
+    await this.fetchSnapshot();
+    this.stream.connect();
+    this.connected = true;
+  }
+
+  /**
+   * Fetches the full flag snapshot for this client's environment and loads it
+   * into the cache. Called on initial connect() AND on every subsequent SSE
+   * reconnect (via the onReconnect callback passed to SSEStreamClient), so
+   * the in-memory cache re-syncs after any connectivity gap — not just the
+   * first load.
    *
    * If the snapshot response includes targeting rules per flag they are stored
    * in the cache automatically.  For any flags that have no rules in the
    * snapshot, a best-effort fetch of GET /api/v1/flags/{key}/rules is made;
    * failures are silently ignored — empty rules means evaluate by rollout hash,
    * which is the unchanged v1 behaviour.
+   *
+   * Never throws — a failed fetch (e.g. flag-api still unreachable) leaves
+   * the existing cache untouched so evaluation keeps serving last-known-good
+   * values.
    */
-  async connect(): Promise<void> {
+  private async fetchSnapshot(): Promise<void> {
     const apiUrl = this.config.apiUrl ?? 'http://localhost:8081';
     const url = `${apiUrl}/api/v1/environments/snapshot?environment=${encodeURIComponent(this.config.environment)}`;
 
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${this.config.sdkKey}` },
-    });
+    try {
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.config.sdkKey}` },
+      });
 
-    if (resp.ok) {
-      const snap = await resp.json() as FlagSnapshot;
-      this.cache.loadSnapshot(snap);
+      if (resp.ok) {
+        const snap = await resp.json() as FlagSnapshot;
+        this.cache.loadSnapshot(snap);
 
-      // Best-effort: for flags whose snapshot entry has no targeting rules,
-      // try to fetch them from the flag-api individually.
-      const rulesPromises = this.cache.keys()
-        .filter(flagKey => {
-          const entry = this.cache.get(flagKey);
-          return !entry?.targetingRules || entry.targetingRules.length === 0;
-        })
-        .map(flagKey => this.fetchAndStoreRules(apiUrl, flagKey));
+        // Best-effort: for flags whose snapshot entry has no targeting rules,
+        // try to fetch them from the flag-api individually.
+        const rulesPromises = this.cache.keys()
+          .filter(flagKey => {
+            const entry = this.cache.get(flagKey);
+            return !entry?.targetingRules || entry.targetingRules.length === 0;
+          })
+          .map(flagKey => this.fetchAndStoreRules(apiUrl, flagKey));
 
-      // Fire-and-forget — we do NOT await; failures are swallowed inside
-      // fetchAndStoreRules.  If they resolve before the first evaluate() call
-      // the rules will be used; otherwise evaluation falls through to rollout.
-      void Promise.allSettled(rulesPromises);
+        // Fire-and-forget — we do NOT await; failures are swallowed inside
+        // fetchAndStoreRules.  If they resolve before the first evaluate() call
+        // the rules will be used; otherwise evaluation falls through to rollout.
+        void Promise.allSettled(rulesPromises);
+      }
+      // Even if snapshot fails, we proceed — fallback to defaults/last-known-good on evaluation
+    } catch {
+      // Network error — keep serving from whatever the cache already has.
     }
-    // Even if snapshot fails, we proceed — fallback to defaults on evaluation
-
-    this.stream.connect();
-    this.connected = true;
   }
 
   /**
