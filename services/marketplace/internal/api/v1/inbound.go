@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/marketplace/internal/httpclient"
 )
 
 // datadogPayload is the inbound Datadog monitor-alert webhook payload.
@@ -144,7 +146,7 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// 5. Query flag-api for flags associated with the service.
-	flags, err := fetchFlagsByService(ctx, flagAPIBase, service)
+	flags, err := fetchFlagsByService(ctx, h.resilientHTTP, flagAPIBase, service)
 	if err != nil {
 		h.logger.Error("datadog inbound: failed to fetch flags",
 			zap.String("service", service),
@@ -160,10 +162,9 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Evaluate blast radius for each flag.
-	client := &http.Client{Timeout: 15 * time.Second}
 	var triggered []blastRadiusResult
 	for _, f := range flags {
-		result, err := fetchBlastRadius(ctx, client, evaluatorBase, f.Key)
+		result, err := fetchBlastRadius(ctx, h.resilientHTTP, evaluatorBase, f.Key)
 		if err != nil {
 			h.logger.Warn("datadog inbound: blast radius check failed",
 				zap.String("flag", f.Key),
@@ -181,7 +182,7 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	if isCriticalSeverity(payload.Severity) {
 		for _, t := range triggered {
 			if t.Status == "BLOCKED" {
-				if err := postKillSwitch(ctx, client, flagAPIBase, t.FlagKey, payload.AlertID); err != nil {
+				if err := postKillSwitch(ctx, h.resilientHTTP, flagAPIBase, t.FlagKey, payload.AlertID); err != nil {
 					h.logger.Error("datadog inbound: kill switch failed",
 						zap.String("flag", t.FlagKey),
 						zap.Error(err),
@@ -212,7 +213,7 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 
 // fetchFlagsByService queries flag-api for flags tagged with the given service name.
 // Endpoint: GET /api/v1/flags?tag=service:<name>
-func fetchFlagsByService(ctx context.Context, flagAPIBase, service string) ([]flagItem, error) {
+func fetchFlagsByService(ctx context.Context, resilientHTTP *httpclient.ResilientClient, flagAPIBase, service string) ([]flagItem, error) {
 	url := fmt.Sprintf("%s/api/v1/flags", flagAPIBase)
 	if service != "" {
 		url = fmt.Sprintf("%s?tag=service:%s", url, service)
@@ -224,8 +225,7 @@ func fetchFlagsByService(ctx context.Context, flagAPIBase, service string) ([]fl
 	}
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("flag-api request: %w", err)
 	}
@@ -244,7 +244,7 @@ func fetchFlagsByService(ctx context.Context, flagAPIBase, service string) ([]fl
 
 // fetchBlastRadius calls the evaluator blast-radius endpoint for a single flag.
 // Endpoint: GET /api/v1/blast-radius/{flag_key}
-func fetchBlastRadius(ctx context.Context, client *http.Client, evaluatorBase, flagKey string) (blastRadiusResult, error) {
+func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientClient, evaluatorBase, flagKey string) (blastRadiusResult, error) {
 	url := fmt.Sprintf("%s/api/v1/blast-radius/%s", evaluatorBase, flagKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -252,7 +252,7 @@ func fetchBlastRadius(ctx context.Context, client *http.Client, evaluatorBase, f
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return blastRadiusResult{}, fmt.Errorf("evaluator request: %w", err)
 	}
@@ -272,7 +272,7 @@ func fetchBlastRadius(ctx context.Context, client *http.Client, evaluatorBase, f
 
 // postKillSwitch sends a kill-switch command to flag-api for the given flag.
 // Endpoint: POST /api/v1/flags/{flag_key}/kill-switch
-func postKillSwitch(ctx context.Context, client *http.Client, flagAPIBase, flagKey, alertID string) error {
+func postKillSwitch(ctx context.Context, resilientHTTP *httpclient.ResilientClient, flagAPIBase, flagKey, alertID string) error {
 	body := map[string]string{
 		"reason": fmt.Sprintf("auto-kill: Datadog alert %s triggered blast-radius BLOCKED", alertID),
 		"actor":  "tombstone-marketplace-inbound",
@@ -289,7 +289,7 @@ func postKillSwitch(ctx context.Context, client *http.Client, flagAPIBase, flagK
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("kill-switch request: %w", err)
 	}
