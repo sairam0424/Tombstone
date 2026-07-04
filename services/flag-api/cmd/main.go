@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
+	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
 	"github.com/tombstone/flag-api/internal/telemetry"
@@ -87,7 +88,7 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
@@ -128,6 +129,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	healthChecker := &health.Checker{DB: db, RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)

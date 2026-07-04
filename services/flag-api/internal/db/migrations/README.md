@@ -10,6 +10,7 @@
 | 003 | `003_compliance.sql` | Compliance and audit extensions |
 | 004 | `004_sso.sql` | SSO provider support |
 | 005 | `005_scheduled_changes_v2.sql` | Scheduled flag change improvements |
+| 011 | `011_scheduler_retry_columns.sql` | Scheduler retry/backoff columns (retry_count, max_retries, next_retry_at). Numbered 011 rather than the next sequential 006 because a concurrent sibling phase (idempotency-keys table), developed independently from the same `develop` base, claims 010 — see file header comment for full reasoning. Numbers 006-010 are reserved for that and other in-flight concurrent phases; confirm no gap collision before merging. |
 
 ## Why 001 Is Skipped
 
@@ -35,6 +36,7 @@ psql $DATABASE_URL < services/flag-api/internal/db/migrations/002_enterprise.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/003_compliance.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/004_sso.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/005_scheduled_changes_v2.sql
+psql $DATABASE_URL < services/flag-api/internal/db/migrations/011_scheduler_retry_columns.sql
 ```
 
 The `make dev` target (Docker Compose) runs `schema.sql` automatically via the
