@@ -84,6 +84,7 @@ func main() {
 
 	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
@@ -111,6 +112,11 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"status":"ok"}`)

@@ -90,6 +90,7 @@ func main() {
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
+	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
@@ -113,6 +114,11 @@ func main() {
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(rateMw.RateLimit)
+	// Load shedding runs AFTER rate limiting: rate limiting rejects
+	// over-quota callers first, regardless of system load; load shedding
+	// then additionally rejects when the service itself is saturated,
+	// regardless of any individual caller's quota standing.
+	r.Use(loadShedMw.LoadShed)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
