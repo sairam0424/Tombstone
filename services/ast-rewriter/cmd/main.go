@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/ast-rewriter/internal/health"
 	"github.com/tombstone/ast-rewriter/internal/rewriter"
 	"github.com/tombstone/ast-rewriter/internal/scanner"
 	"github.com/tombstone/ast-rewriter/internal/telemetry"
@@ -69,13 +70,6 @@ func decodeJSON(r *http.Request, dst any) error {
 }
 
 // ---- handlers ----------------------------------------------------------------
-
-func healthHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"service": "ast-rewriter",
-	})
-}
 
 func scanHandler(log *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +201,11 @@ func main() {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
-	r.Get("/health", healthHandler)
+	// ast-rewriter has no Postgres or Redis dependency — it is a stateless
+	// scan/rewrite worker, so Checker with both fields nil always reports ready.
+	healthChecker := &health.Checker{}
+	r.Get("/health", healthChecker.Livez)
+	r.Get("/readyz", healthChecker.Readyz)
 	r.Post("/api/v1/scan", scanHandler(log))
 	r.Post("/api/v1/rewrite", rewriteHandler(log))
 

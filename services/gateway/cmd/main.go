@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/gateway/internal/api/v1"
+	"github.com/tombstone/gateway/internal/health"
 	"github.com/tombstone/gateway/internal/hub"
 	"github.com/tombstone/gateway/internal/telemetry"
 )
@@ -77,9 +78,16 @@ func main() {
 	}
 	logger.Info("Redis Streams consumers started", zap.Strings("environments", knownEnvs))
 
+	// Reclaim sweep: every 15s (roughly matching reclaimIdleThreshold's
+	// scale), scan each environment's PEL for entries a poison-message
+	// unmarshal failure left pending and either XCLAIM-retry them or
+	// dead-letter them once they exceed maxDeliveryAttempts. See dlq.go.
+	go runReclaimLoop(ctx, broadcaster, knownEnvs, logger)
+
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
 	metricsH := v1.NewGatewayMetricsHandler(h, logger)
+	dlqH := v1.NewDLQHandler(rdb, logger)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -97,12 +105,25 @@ func main() {
 		fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
 	})
 
+	// Gateway has no Postgres dependency; readiness is gated on Redis only.
+	healthChecker := &health.Checker{RDB: rdb}
+	r.Get("/readyz", healthChecker.Readyz)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/stream", sseH.Stream)
 		r.Get("/snapshot", snapH.GetSnapshot)
 		r.Route("/gateway", func(r chi.Router) {
 			r.Get("/metrics", metricsH.GetMetrics)
 		})
+	})
+
+	// Internal DLQ inspection/replay routes — not part of the public SDK
+	// surface. Deliberately unauthenticated at this layer today (same trust
+	// boundary as /health); add auth middleware here before exposing this
+	// beyond an internal network.
+	r.Route("/internal/dlq/{environment}", func(r chi.Router) {
+		r.Get("/", dlqH.ListDLQ)
+		r.Post("/replay", dlqH.ReplayDLQ)
 	})
 
 	srv := &http.Server{
@@ -130,4 +151,33 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// reclaimTickInterval controls how often ReclaimStalePending sweeps each
+// environment's PEL. 15s gives ~2 sweeps per reclaimIdleThreshold window
+// (30s) — frequent enough that a poison message doesn't sit unclaimed for
+// long, without turning the sweep into a hot loop.
+const reclaimTickInterval = 15 * time.Second
+
+// runReclaimLoop periodically calls ReclaimStalePending for every known
+// environment's primary stream until ctx is cancelled. Runs alongside
+// RunStreamConsumer's per-environment goroutines, not instead of them.
+func runReclaimLoop(ctx context.Context, b *hub.Broadcaster, environments []string, logger *zap.Logger) {
+	ticker := time.NewTicker(reclaimTickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, env := range environments {
+				streamKey := hub.StreamKey(env)
+				if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+					logger.Warn("reclaim sweep failed",
+						zap.String("stream", streamKey), zap.Error(err))
+				}
+			}
+		}
+	}
 }

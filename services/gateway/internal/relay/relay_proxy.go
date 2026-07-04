@@ -173,7 +173,7 @@ func (rp *RelayProxy) runUpstreamStream(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(hub.JitterBackoff(backoff)):
 		}
 
 		if backoff < sseMaxBackoff {

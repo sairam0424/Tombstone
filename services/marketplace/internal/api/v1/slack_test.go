@@ -21,7 +21,7 @@ func newTestHandler(flagAPIURL string) *v1.Handler {
 	reg := registry.NewRegistry(nil, zap.NewNop())
 	dispatcher := webhook.NewDispatcher(reg, zap.NewNop())
 	h := v1.NewHandler(reg, dispatcher, zap.NewNop())
-	slackApp := integrations.NewSlackApp("", "", flagAPIURL, "")
+	slackApp := integrations.NewSlackApp("", "", flagAPIURL, "", zap.NewNop())
 	h.SetSlackApp(slackApp)
 	return h
 }
@@ -86,7 +86,7 @@ func TestHandleSlackCommands_SignatureRequired_MissingHeaders(t *testing.T) {
 	reg := registry.NewRegistry(nil, zap.NewNop())
 	dispatcher := webhook.NewDispatcher(reg, zap.NewNop())
 	h := v1.NewHandler(reg, dispatcher, zap.NewNop())
-	h.SetSlackApp(integrations.NewSlackApp("", "test-secret-value", "http://localhost:8081", ""))
+	h.SetSlackApp(integrations.NewSlackApp("", "test-secret-value", "http://localhost:8081", "", zap.NewNop()))
 
 	body := "command=%2Ftombstone&text=status+checkout-v2&user_id=U123&channel_id=C123"
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/marketplace/slack/commands", strings.NewReader(body))

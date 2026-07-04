@@ -15,6 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/tombstone/marketplace/internal/httpclient"
 )
 
 // SlackApp handles interactive Slack app features:
@@ -26,18 +30,23 @@ type SlackApp struct {
 	signingSecret string // SLACK_SIGNING_SECRET
 	apiURL        string // flag-api URL for fetching flag state
 	flagAPIToken  string // FLAG_API_TOKEN — Bearer token for flag-api RBAC (flags:kill_switch)
-	httpClient    *http.Client
+	resilientHTTP *httpclient.ResilientClient
 }
 
 // NewSlackApp constructs a SlackApp with the given credentials and flag-api URL.
 // flagAPIToken must carry the flags:kill_switch RBAC permission on flag-api.
-func NewSlackApp(botToken, signingSecret, apiURL, flagAPIToken string) *SlackApp {
+// logger may be nil (defaults to a no-op logger), matching this package's other
+// constructors (e.g. rollback.NewExecutor, syncer.NewSyncer).
+func NewSlackApp(botToken, signingSecret, apiURL, flagAPIToken string, logger *zap.Logger) *SlackApp {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &SlackApp{
 		botToken:      botToken,
 		signingSecret: signingSecret,
 		apiURL:        apiURL,
 		flagAPIToken:  flagAPIToken,
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		resilientHTTP: httpclient.NewResilientClient(httpclient.DefaultConfig(), &http.Client{Timeout: 5 * time.Second}, logger),
 	}
 }
 
@@ -89,7 +98,7 @@ type TextObj struct {
 
 // Button is a Slack Block Kit interactive button element.
 type Button struct {
-	Type     string   `json:"type"`   // always "button"
+	Type     string   `json:"type"` // always "button"
 	Text     TextObj  `json:"text"`
 	ActionID string   `json:"action_id"`
 	Value    string   `json:"value,omitempty"`
@@ -336,7 +345,7 @@ func (s *SlackApp) PostMessage(ctx context.Context, channelID string, msg SlackM
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.botToken)
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("slack: post message: %w", err)
 	}
@@ -411,7 +420,11 @@ func (s *SlackApp) killConfirmMessage(flagKey string) SlackMessage {
 // listCommand returns a message listing flags for the given environment.
 func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 	apiURL := fmt.Sprintf("%s/api/v1/flags?environment=%s&limit=10", s.apiURL, url.QueryEscape(env))
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return errorMessage("Could not build flag-api request: " + err.Error()), nil
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
@@ -419,9 +432,9 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 
 	var result struct {
 		Flags []struct {
-			Key    string `json:"key"`
-			State  bool   `json:"state"`
-			Rollout int   `json:"rollout_pct"`
+			Key     string `json:"key"`
+			State   bool   `json:"state"`
+			Rollout int    `json:"rollout_pct"`
 		} `json:"flags"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -459,7 +472,11 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 // searchCommand searches flags matching the query string.
 func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	apiURL := fmt.Sprintf("%s/api/v1/flags/search?q=%s", s.apiURL, url.QueryEscape(query))
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return errorMessage("Could not build flag-api request: " + err.Error()), nil
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
@@ -547,14 +564,14 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 
 	apiURL := fmt.Sprintf("%s/api/v1/flags/%s/kill?environment=%s",
 		s.apiURL, url.PathEscape(flagKey), url.QueryEscape(env))
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, apiURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("kill switch: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.flagAPIToken)
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return fmt.Errorf("kill switch: request failed: %w", err)
 	}
@@ -588,7 +605,11 @@ func (s *SlackApp) fetchFlagData(flagKey, env string) (map[string]interface{}, e
 	apiURL := fmt.Sprintf("%s/api/v1/flags/%s?environment=%s",
 		s.apiURL, url.PathEscape(flagKey), url.QueryEscape(env))
 
-	resp, err := s.httpClient.Get(apiURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL, nil) //nolint:noctx
+	if err != nil {
+		return nil, fmt.Errorf("build get flag request: %w", err)
+	}
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return nil, fmt.Errorf("get flag: %w", err)
 	}
@@ -615,7 +636,13 @@ func (s *SlackApp) postResponse(responseURL string, msg SlackMessage) error {
 		return fmt.Errorf("post response: marshal: %w", err)
 	}
 
-	resp, err := s.httpClient.Post(responseURL, "application/json", bytes.NewReader(payload)) //nolint:noctx
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, responseURL, bytes.NewReader(payload)) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("post response: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.resilientHTTP.Do(req.Context(), req)
 	if err != nil {
 		return fmt.Errorf("post response: HTTP post: %w", err)
 	}
