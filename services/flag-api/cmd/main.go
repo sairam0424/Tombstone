@@ -88,7 +88,7 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware()
+	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
