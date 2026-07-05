@@ -129,8 +129,8 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 			}
 		}()
 
-		// Health check is always exempt.
-		if r.URL.Path == "/health" {
+		// Health and readiness checks are always exempt.
+		if r.URL.Path == "/health" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -21,15 +21,17 @@ type Handler struct {
 	logger        *zap.Logger
 	slackApp      *integrations.SlackApp
 	resilientHTTP *httpclient.ResilientClient
+	flagAPIToken  string
 }
 
 // NewHandler constructs a Handler.
-func NewHandler(reg *registry.Registry, dispatcher *webhook.Dispatcher, logger *zap.Logger) *Handler {
+func NewHandler(reg *registry.Registry, dispatcher *webhook.Dispatcher, logger *zap.Logger, flagAPIToken string) *Handler {
 	return &Handler{
 		reg:           reg,
 		dispatcher:    dispatcher,
 		logger:        logger,
 		resilientHTTP: httpclient.NewResilientClient(httpclient.DefaultConfig(), nil, logger),
+		flagAPIToken:  flagAPIToken,
 	}
 }
 

@@ -18,9 +18,13 @@ dev: ## Start full local dev stack, run migrations and seed
 down: ## Stop all services
 	$(COMPOSE) down
 
-migrate: ## Apply database schema
+migrate: ## Apply baseline schema and all incremental migrations
 	docker exec $$($(COMPOSE) ps -q postgres) psql -U tombstone -d tombstone -f /docker-entrypoint-initdb.d/schema.sql 2>/dev/null || \
 	$(COMPOSE) exec -T postgres psql -U tombstone -d tombstone < services/flag-api/internal/db/schema.sql
+	@for f in $$(ls services/flag-api/internal/db/migrations/*.sql 2>/dev/null | sort); do \
+		echo "Applying migration: $$f"; \
+		$(COMPOSE) exec -T postgres psql -U tombstone -d tombstone < $$f; \
+	done
 
 seed: ## Insert sample flags into dev database
 	bash scripts/seed-dev.sh

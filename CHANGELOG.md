@@ -11,6 +11,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.2.1] - 2026-07-05
+
+### Fixed
+- REG-001: Slack kill-switch was sending `environment` as a URL query parameter while the KillSwitch handler reads it from the JSON body — always returned HTTP 400, making the primary on-call incident-response path non-functional (#74)
+- REG-002: Four-eyes approval workflow (change-request list/approve/reject routes) was fully implemented but never registered in `flag-api/cmd/main.go` — all three endpoints were inaccessible (#74)
+- F-01: `make migrate` now applies all incremental migration files after `schema.sql`; previously only the baseline schema was applied, causing fresh deployments to crash with "relation scheduled_changes does not exist" (#74)
+- SEC-DATADOG: Datadog-triggered auto kill-switch was silently failing — `postKillSwitch` sent no `Authorization` header, every call received HTTP 401 from flag-api but was reported as success (#74)
+- `/readyz` health probe added to exempt paths in rate-limiting and load-shedding middleware across flag-api and evaluator — Kubernetes readiness probes were receiving 429/503 under sustained load (#74)
+- Audit log `actor` field was always `"unknown"` due to a context-key type mismatch between `auth.go` and `flags.go`; aligned to use `middleware.ContextKeyActor` (#74)
+- Removed unused `pyod>=0.9.0` dependency from intelligence service that blocked `uv sync` on Python 3.12 (#74)
+- CI test steps no longer use `|| true` — test failures now correctly block merges (#74)
+- Added `pytest-asyncio` to intelligence CI test setup so `async def` tests can run (#74)
+
 ## [1.2.0] - 2026-07-05
 
 ### Added

@@ -6,6 +6,13 @@ from unittest.mock import MagicMock, patch
 
 from app.search.embedding_model import LocalEmbeddingModel, create_embedding_model
 
+# boto3 is an optional Bedrock dependency — skip those tests in CI where boto3
+# is not installed (it's in the bedrock extras group, not base deps).
+boto3_available = pytest.mark.skipif(
+    __import__("importlib").util.find_spec("boto3") is None,
+    reason="boto3 not installed (Bedrock extras not available in this environment)",
+)
+
 
 @pytest.mark.asyncio
 async def test_local_embedding_model_embed_returns_1024_dims():
@@ -32,6 +39,7 @@ def test_create_embedding_model_unknown_backend_raises():
         create_embedding_model("unknown_backend")
 
 
+@boto3_available
 @pytest.mark.asyncio
 async def test_bedrock_embedding_model_embed_returns_1024_dims():
     """BedrockEmbeddingModel.embed() calls invoke_model and returns 1024-dim vectors."""
@@ -66,6 +74,7 @@ async def test_bedrock_embedding_model_embed_returns_1024_dims():
     assert call_kwargs["modelId"] == "amazon.titan-embed-text-v2:0"
 
 
+@boto3_available
 @pytest.mark.asyncio
 async def test_bedrock_embedding_model_embed_multiple_texts():
     """BedrockEmbeddingModel.embed() calls invoke_model once per text."""

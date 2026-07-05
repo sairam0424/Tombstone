@@ -102,7 +102,7 @@ func NewLoadShedMiddleware(cfg LoadShedConfig, logger *zap.Logger) *LoadShedMidd
 // immediately with 503 + Retry-After, WITHOUT calling next.ServeHTTP.
 func (m *LoadShedMiddleware) LoadShed(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		if r.URL.Path == "/health" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

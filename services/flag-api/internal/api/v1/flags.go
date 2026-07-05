@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/transparency"
 )
 
@@ -492,18 +493,14 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 }
 
 // actorFromContext reads the actor identity set by the auth middleware.
-// The middleware uses middleware.ContextKeyActor which is of type contextKey("actor").
-// We import it indirectly via the package-level variable injected into main.go.
+// Uses middleware.ContextKeyActor — the same named type as auth.go — so the
+// context lookup succeeds regardless of package boundary.
 func actorFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(ActorContextKey).(string); ok {
+	if v, ok := ctx.Value(middleware.ContextKeyActor).(string); ok {
 		return v
 	}
 	return "unknown"
 }
-
-// ActorContextKey is the shared context key — must match middleware.ContextKeyActor exactly.
-// Both are struct{name string}{"actor"} so the key comparison works across packages.
-var ActorContextKey = struct{ name string }{"actor"}
 
 func ipFromRequest(r *http.Request) string {
 	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
