@@ -128,8 +128,8 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 			}
 		}()
 
-		// Exempt the health endpoint.
-		if r.URL.Path == "/api/v1/health" {
+		// Exempt the health and readiness endpoints.
+		if r.URL.Path == "/api/v1/health" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

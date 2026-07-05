@@ -44,13 +44,14 @@ psql $DATABASE_URL < services/flag-api/internal/db/migrations/004_sso.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/005_scheduled_changes_v2.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/010_idempotency_keys.sql
 psql $DATABASE_URL < services/flag-api/internal/db/migrations/011_scheduler_retry_columns.sql
+psql $DATABASE_URL < services/flag-api/internal/db/migrations/012_idempotency_actor_scope.sql
 ```
 
 Migrations 006-009 are not separate files — they are applied inline as part of
 `schema.sql` itself (see the `-- Migration 00N` comments inside that file for
 prerequisites, variations, pgvector embeddings, and Rekor integration
-respectively). Migrations 010 and 011 are the next standalone files after 005,
-applied in that order.
+respectively). Migrations 010, 011, and 012 are the next standalone files after
+005, applied in that order.
 
 The `make dev` target (Docker Compose) runs `schema.sql` automatically via the
 `db` service init scripts. Manual migrations must be applied separately unless
