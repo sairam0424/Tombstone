@@ -14,6 +14,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/middleware"
 )
 
 // TestActorFromContext verifies the actor extraction returns a safe default
@@ -31,7 +33,7 @@ func TestActorFromContext(t *testing.T) {
 	})
 
 	t.Run("actor set in context is returned", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), ActorContextKey, "alice@example.com")
+		ctx := context.WithValue(context.Background(), middleware.ContextKeyActor, "alice@example.com")
 		actor := actorFromContext(ctx)
 		if actor != "alice@example.com" {
 			t.Errorf("actorFromContext = %q, want %q", actor, "alice@example.com")
