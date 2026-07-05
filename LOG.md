@@ -30,6 +30,10 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-07-05 · OSS launch assets generated for v1.2.1 · #product
+What: Generated 6 launch assets covering all pending platforms (Show HN, Product Hunt, Twitter, awesome-go, StackShare, LinkedIn). Assets are ready-to-publish drafts; gate items (awesome-go needs A+ grade, Product Hunt needs warm-up, CNCF needs 300 stars) documented in DISCOVERABILITY_LOG.md.
+Refs: [show-hn-v121.md](docs/submissions/show-hn-v121.md) (new), [product-hunt.md](docs/submissions/product-hunt.md) (new), [twitter-thread.md](docs/submissions/twitter-thread.md) (new), [awesome-go-pr.md](docs/submissions/awesome-go-pr.md) (new), [outreach-v121.md](docs/submissions/outreach-v121.md) (new), [linkedin-v121.md](docs/submissions/linkedin-v121.md) (new), [DISCOVERABILITY_LOG.md](docs/DISCOVERABILITY_LOG.md) (updated).
+
 ## 2026-07-05 · v1.2.1 — comprehensive documentation suite (12 new files) · #product #analysis
 What: Added 12 documentation files covering evaluation model, ML intelligence, K8s deployment, SDK integration, API reference, Day 2 operations, Helm compatibility, and 5 operational runbooks. Based on 106-agent deep-research findings identifying critical adoption blockers.
 Refs: [EVALUATION_MODEL.md](docs/EVALUATION_MODEL.md) (new), [INTELLIGENCE_MODEL.md](docs/INTELLIGENCE_MODEL.md) (new), [DAY2_OPERATIONS.md](docs/DAY2_OPERATIONS.md) (new), [DEPLOYMENT_KUBERNETES.md](docs/DEPLOYMENT_KUBERNETES.md) (new), [SDK_INTEGRATION_GUIDE.md](docs/SDK_INTEGRATION_GUIDE.md) (new), [API_REFERENCE.md](docs/API_REFERENCE.md) (new), [infra/helm/flagmind/COMPATIBILITY.md](infra/helm/flagmind/COMPATIBILITY.md) (new), [docs/runbooks/](docs/runbooks/) (5 new runbooks), README.md (updated), docs/README.md (updated).
