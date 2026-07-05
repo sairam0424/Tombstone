@@ -30,6 +30,10 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-07-05 · v1.2.1 — 5 critical regression fixes from adversarial validation · #infra #analysis #product
+What: 26-agent adversarial pre-release validation found 5 critical no-go issues (Slack kill-switch broken, four-eyes approval unreachable, fresh deploy crash, Datadog auto kill-switch silent failure, /readyz under rate-limiting). All fixed in PR #74, re-validated, re-promoted as v1.2.1.
+Refs: PR #74 merged. release/v1.2.1 → PR to main.
+
 ## 2026-07-05 · post-release housekeeping + schema.sql baseline fix · #infra #harness
 What: Synced develop to main HEAD after v1.2.0 release. Removed all resilience-initiative agent worktrees (13 freed). Added idempotency_keys table with actor-scoped unique index to schema.sql baseline so fresh installs don't need migration 010+012 separately.
 Refs: [schema.sql](services/flag-api/internal/db/schema.sql) (updated).

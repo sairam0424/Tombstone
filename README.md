@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.2.0
+## What Is in v1.2.1
 
-This is the v1.2.0 self-hosted release of Tombstone — the production resilience upgrade. Everything runs locally with `make dev`.
+This is the v1.2.1 self-hosted release of Tombstone — the production resilience upgrade plus critical regression fixes from adversarial pre-release testing. Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -190,7 +190,7 @@ This is the v1.2.0 self-hosted release of Tombstone — the production resilienc
 | Webhook delivery deduplication | Stable |
 | Intelligence asyncio hardening + warehouse query timeouts | Stable |
 
-Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.0 details.
+Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.1 details.
 
 ---
 
