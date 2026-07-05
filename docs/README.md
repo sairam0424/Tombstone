@@ -38,3 +38,14 @@ Main text = *what's true now*. Append an optional `## Timeline` for *what happen
 | File | Description |
 |------|-------------|
 | `pr-flag-annotations.md` | PR annotation schema and conventions for feature flag changes |
+| `EVALUATION_MODEL.md` | 5-step SDK evaluation pipeline, hash algorithms, flag state semantics, blast radius scoring, worked examples |
+| `INTELLIGENCE_MODEL.md` | ML layer for non-ML engineers: 3-model anomaly ensemble, LinUCB bandit, CUPED, collision detection |
+| `DAY2_OPERATIONS.md` | Capacity planning, upgrade procedure, backup/restore, monitoring thresholds, secret rotation |
+| `DEPLOYMENT_KUBERNETES.md` | Helm single/multi-region deployment, tombstone-operator, manual manifests for incomplete chart |
+| `SDK_INTEGRATION_GUIDE.md` | Per-language quickstarts, TombstoneTestClient patterns, OpenFeature provider, common gotchas |
+| `API_REFERENCE.md` | REST endpoint table, MCP tools, SDK packages, rate limits, OpenAPI location |
+| `runbooks/CIRCUIT_BREAKER.md` | CB states, trip thresholds, Redis key inspection, manual reset, troubleshooting |
+| `runbooks/DLQ_REDIS_STREAMS.md` | PEL inspection, DLQ management API, poison message identification, replay |
+| `runbooks/RATE_LIMITING.md` | SDK vs IP tiers, Lua bucket mechanics, Redis state inspection, capacity planning |
+| `runbooks/AUTO_ROLLBACK.md` | Full rollback chain, telemetry flow, verifying via audit_log, re-enable procedure |
+| `runbooks/SCHEDULED_CHANGES.md` | 30s poll loop, SKIP LOCKED, retry schedule, terminal FAILED, manual trigger |
