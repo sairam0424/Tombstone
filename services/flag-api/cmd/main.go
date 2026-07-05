@@ -99,6 +99,7 @@ func main() {
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
+	crH := v1.NewChangeRequestHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -186,6 +187,14 @@ func main() {
 			r.With(rbacMw.RequirePermission("admin", "admin")).
 				Get("/tokens", breakGlassH.ListTokens)
 		})
+
+		// Four-eyes approval workflow: list is available to any authenticated user;
+		// approve/reject require OWNER or ADMIN (flags:kill_switch permission).
+		r.Get("/change-requests", crH.ListChangeRequests)
+		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+			Post("/change-requests/{id}/approve", crH.ApproveChangeRequest)
+		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+			Post("/change-requests/{id}/reject", crH.RejectChangeRequest)
 	})
 
 	scimToken := os.Getenv("SCIM_TOKEN")
