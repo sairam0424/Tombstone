@@ -39,7 +39,7 @@ jobs:
         working-directory: services/${{ matrix.service }}
         env:
           GOWORK: "off"
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic || true
+        run: go test ./... -coverprofile=coverage.out -covermode=atomic
 
       - name: Upload Go coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -77,8 +77,8 @@ jobs:
 
       - name: pytest with coverage
         run: |
-          uv pip install --system pytest-cov || true
-          python -m pytest tests/ --cov=app --cov-report=xml:coverage.xml -v || true
+          uv pip install --system pytest-cov pytest-asyncio || true
+          python -m pytest tests/ --cov=app --cov-report=xml:coverage.xml -v --asyncio-mode=auto
 
       - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@v5

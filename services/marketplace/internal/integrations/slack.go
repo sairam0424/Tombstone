@@ -554,16 +554,18 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 	flagKey, env := parts[0], parts[1]
 
 	type killBody struct {
-		Actor string `json:"actor"`
+		Actor       string `json:"actor"`
+		Environment string `json:"environment"`
+		Reason      string `json:"reason"`
 	}
-	body := killBody{Actor: action.UserID}
+	body := killBody{Actor: action.UserID, Environment: env, Reason: "slack_kill_switch"}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("kill switch: marshal body: %w", err)
 	}
 
-	apiURL := fmt.Sprintf("%s/api/v1/flags/%s/kill?environment=%s",
-		s.apiURL, url.PathEscape(flagKey), url.QueryEscape(env))
+	apiURL := fmt.Sprintf("%s/api/v1/flags/%s/kill",
+		s.apiURL, url.PathEscape(flagKey))
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, apiURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("kill switch: build request: %w", err)

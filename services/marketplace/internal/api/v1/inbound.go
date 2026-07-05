@@ -182,7 +182,7 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	if isCriticalSeverity(payload.Severity) {
 		for _, t := range triggered {
 			if t.Status == "BLOCKED" {
-				if err := postKillSwitch(ctx, h.resilientHTTP, flagAPIBase, t.FlagKey, payload.AlertID); err != nil {
+				if err := h.postKillSwitch(ctx, flagAPIBase, t.FlagKey, payload.AlertID); err != nil {
 					h.logger.Error("datadog inbound: kill switch failed",
 						zap.String("flag", t.FlagKey),
 						zap.Error(err),
@@ -272,7 +272,9 @@ func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientCl
 
 // postKillSwitch sends a kill-switch command to flag-api for the given flag.
 // Endpoint: POST /api/v1/flags/{flag_key}/kill-switch
-func postKillSwitch(ctx context.Context, resilientHTTP *httpclient.ResilientClient, flagAPIBase, flagKey, alertID string) error {
+// The Authorization Bearer header is set from h.flagAPIToken so flag-api does
+// not reject the request with HTTP 401.
+func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, alertID string) error {
 	body := map[string]string{
 		"reason": fmt.Sprintf("auto-kill: Datadog alert %s triggered blast-radius BLOCKED", alertID),
 		"actor":  "tombstone-marketplace-inbound",
@@ -288,8 +290,9 @@ func postKillSwitch(ctx context.Context, resilientHTTP *httpclient.ResilientClie
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.flagAPIToken)
 
-	resp, err := resilientHTTP.Do(ctx, req)
+	resp, err := h.resilientHTTP.Do(ctx, req)
 	if err != nil {
 		return fmt.Errorf("kill-switch request: %w", err)
 	}
