@@ -77,8 +77,8 @@ jobs:
 
       - name: pytest with coverage
         run: |
-          uv pip install --system pytest-cov || true
-          python -m pytest tests/ --cov=app --cov-report=xml:coverage.xml -v
+          uv pip install --system pytest-cov pytest-asyncio || true
+          python -m pytest tests/ --cov=app --cov-report=xml:coverage.xml -v --asyncio-mode=auto
 
       - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@v5
