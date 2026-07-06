@@ -18,17 +18,29 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.cluster }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Install flux CLI
+        env:
+          FLUX_VERSION: "2.3.0"
         run: |
-          curl -s https://fluxcd.io/install.sh | sudo bash
+          # Download versioned binary + checksum, verify before executing.
+          # Avoids curl-pipe-bash: unversioned script with no integrity check.
+          curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o /tmp/flux.tar.gz
+          curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_checksums.txt" -o /tmp/flux_checksums.txt
+          cd /tmp && grep "flux_${FLUX_VERSION}_linux_amd64.tar.gz" flux_checksums.txt | sha256sum --check
+          tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux
           flux version --client
 
       - name: Set up kubeconfig
+        env:
+          # KUBECONFIG_B64 must contain the kubeconfig file base64-encoded.
+          # Generate with: cat ~/.kube/config | base64 | tr -d '\n'
+          # Using base64 decode avoids the kubeconfig value appearing in runner debug logs.
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
           mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+          echo "${KUBECONFIG_B64}" | base64 --decode > ~/.kube/config
           chmod 600 ~/.kube/config
 
       - name: Bootstrap Flux with image automation controllers
