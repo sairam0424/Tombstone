@@ -1,0 +1,60 @@
+# gitops/clusters/production/argocd/notifications.yaml
+# Routes Argo CD sync-failed events to Tombstone marketplace Slack endpoint.
+# The marketplace service handles the Slack message formatting and delivery.
+# No duplicate Slack webhook needed — reuses existing marketplace integration.
+---
+# argocd-notifications-cm: configure webhook service pointing at marketplace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # Service: tombstone-marketplace webhook
+  service.webhook.tombstone-marketplace: |
+    url: http://marketplace.tombstone.svc.cluster.local:8086/api/v1/marketplace/slack/actions
+    headers:
+      - name: Content-Type
+        value: application/json
+      - name: Authorization
+        value: Bearer $tombstone-marketplace-token
+
+  # Trigger: fire when sync fails
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Failed']
+      send: [tombstone-sync-failed]
+
+  # Template: build the payload in Tombstone marketplace Slack action format
+  template.tombstone-sync-failed: |
+    webhook:
+      tombstone-marketplace:
+        method: POST
+        path: /api/v1/marketplace/slack/actions
+        body: |
+          {
+            "type": "block_actions",
+            "actions": [{
+              "action_id": "gitops_sync_failed",
+              "value": "{{.app.metadata.name}}"
+            }],
+            "message": {
+              "text": "Argo CD sync FAILED for *{{.app.metadata.name}}* in {{.app.spec.destination.namespace}}\nError: {{.app.status.operationState.message}}"
+            }
+          }
+
+  # Default subscriptions: watch all apps
+  defaultTriggers: |
+    - on-sync-failed
+---
+# argocd-notifications-secret: marketplace API token
+# In production, populate via --set-string or ExternalSecrets operator.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-notifications-secret
+  namespace: argocd
+type: Opaque
+stringData:
+  # Set via: kubectl create secret generic argocd-notifications-secret \
+  #   --from-literal=tombstone-marketplace-token=$FLAG_API_TOKEN -n argocd
+  tombstone-marketplace-token: ""
