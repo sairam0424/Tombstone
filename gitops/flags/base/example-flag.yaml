@@ -1,0 +1,23 @@
+apiVersion: tombstone.dev/v1alpha1
+kind: FeatureFlag
+metadata:
+  name: checkout-v2
+  namespace: tombstone
+  labels:
+    team: payments
+    lifecycle: experiment
+spec:
+  key: checkout-v2
+  type: BOOLEAN
+  safeDefault: "false"
+  owner: "payments-team"
+  tags:
+    - checkout
+    - experiment
+  environments:
+    production:
+      enabled: false
+      rolloutPct: 0
+    staging:
+      enabled: true
+      rolloutPct: 100
