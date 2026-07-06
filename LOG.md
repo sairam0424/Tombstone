@@ -30,6 +30,23 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-07-06 · v1.3.0 — Helm completion, Python SDK parity, Redoc explorer · #product #infra
+What: Closed 3 documented v1.3.0 gaps: Helm chart v0.2.0 with Deployment templates for all 5 services (evaluator+HPA, intelligence, marketplace), Python SDK v0.2.0 with 5-step evaluation parity (prerequisites, targeting rules, full operator surface — no new deps), Redoc API explorer embedded in flag-api at /api/v1/docs (no CDN).
+Refs: [CHANGELOG.md](CHANGELOG.md) (updated), [infra/helm/flagmind/](infra/helm/flagmind/) (updated), [packages/sdks/flagmind-python/](packages/sdks/flagmind-python/) (updated), [services/flag-api/internal/docs/](services/flag-api/internal/docs/) (new).
+
+
+## 2026-07-05 · OSS launch assets generated for v1.2.1 · #product
+What: Generated 6 launch assets covering all pending platforms (Show HN, Product Hunt, Twitter, awesome-go, StackShare, LinkedIn). Assets are ready-to-publish drafts; gate items (awesome-go needs A+ grade, Product Hunt needs warm-up, CNCF needs 300 stars) documented in DISCOVERABILITY_LOG.md.
+Refs: [show-hn-v121.md](docs/submissions/show-hn-v121.md) (new), [product-hunt.md](docs/submissions/product-hunt.md) (new), [twitter-thread.md](docs/submissions/twitter-thread.md) (new), [awesome-go-pr.md](docs/submissions/awesome-go-pr.md) (new), [outreach-v121.md](docs/submissions/outreach-v121.md) (new), [linkedin-v121.md](docs/submissions/linkedin-v121.md) (new), [DISCOVERABILITY_LOG.md](docs/DISCOVERABILITY_LOG.md) (updated).
+
+## 2026-07-05 · v1.2.1 — comprehensive documentation suite (12 new files) · #product #analysis
+What: Added 12 documentation files covering evaluation model, ML intelligence, K8s deployment, SDK integration, API reference, Day 2 operations, Helm compatibility, and 5 operational runbooks. Based on 106-agent deep-research findings identifying critical adoption blockers.
+Refs: [EVALUATION_MODEL.md](docs/EVALUATION_MODEL.md) (new), [INTELLIGENCE_MODEL.md](docs/INTELLIGENCE_MODEL.md) (new), [DAY2_OPERATIONS.md](docs/DAY2_OPERATIONS.md) (new), [DEPLOYMENT_KUBERNETES.md](docs/DEPLOYMENT_KUBERNETES.md) (new), [SDK_INTEGRATION_GUIDE.md](docs/SDK_INTEGRATION_GUIDE.md) (new), [API_REFERENCE.md](docs/API_REFERENCE.md) (new), [infra/helm/flagmind/COMPATIBILITY.md](infra/helm/flagmind/COMPATIBILITY.md) (new), [docs/runbooks/](docs/runbooks/) (5 new runbooks), README.md (updated), docs/README.md (updated).
+
+## 2026-07-05 · v1.2.1 — 5 critical regression fixes from adversarial validation · #infra #analysis #product
+What: 26-agent adversarial pre-release validation found 5 critical no-go issues (Slack kill-switch broken, four-eyes approval unreachable, fresh deploy crash, Datadog auto kill-switch silent failure, /readyz under rate-limiting). All fixed in PR #74, re-validated, re-promoted as v1.2.1.
+Refs: PR #74 merged. release/v1.2.1 → PR to main.
+
 ## 2026-07-05 · post-release housekeeping + schema.sql baseline fix · #infra #harness
 What: Synced develop to main HEAD after v1.2.0 release. Removed all resilience-initiative agent worktrees (13 freed). Added idempotency_keys table with actor-scoped unique index to schema.sql baseline so fresh installs don't need migration 010+012 separately.
 Refs: [schema.sql](services/flag-api/internal/db/schema.sql) (updated).

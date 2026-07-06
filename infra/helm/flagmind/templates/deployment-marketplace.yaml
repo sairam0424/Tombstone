@@ -1,0 +1,57 @@
+{{- if .Values.marketplace.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tombstone.fullname" . }}-marketplace
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+    app.kubernetes.io/component: marketplace
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: marketplace
+  template:
+    metadata:
+      labels:
+        {{- include "tombstone.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: marketplace
+    spec:
+      serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: marketplace
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.marketplace.image.repository }}:{{ .Values.marketplace.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.marketplace.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.marketplace.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.marketplace.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          envFrom:
+            - configMapRef:
+                name: tombstone-config
+            - secretRef:
+                name: tombstone-secrets
+          resources:
+            requests:
+              cpu: {{ .Values.marketplace.resources.requests.cpu }}
+              memory: {{ .Values.marketplace.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.marketplace.resources.limits.cpu }}
+              memory: {{ .Values.marketplace.resources.limits.memory }}
+{{- end }}

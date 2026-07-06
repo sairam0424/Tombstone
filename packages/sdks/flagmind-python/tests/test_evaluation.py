@@ -83,3 +83,79 @@ def test_murmurhash3_bucket_matches_typescript_reference():
             f"Hash parity FAILED: ({flag_key!r}, {user_id!r}, {rollout_pct}%) "
             f"bucket={bucket}, expected={expected}, got={actual}"
         )
+
+
+from tombstone.exceptions import InconclusiveMatchError, RequiresServerEvaluation
+from tombstone.types import TargetingRule, PropertyCondition
+
+
+def test_inconclusive_match_error_is_exception():
+    err = InconclusiveMatchError("missing attr")
+    assert isinstance(err, Exception)
+
+
+def test_requires_server_evaluation_is_exception():
+    err = RequiresServerEvaluation("needs server")
+    assert isinstance(err, Exception)
+
+
+def test_targeting_rule_dataclass():
+    rule = TargetingRule(
+        id="rule-1",
+        conditions=[PropertyCondition(attribute="country", operator="eq", values=["US"], negate=False)],
+        rollout_pct=100.0,
+        variation=True,
+    )
+    assert rule.id == "rule-1"
+    assert rule.rollout_pct == 100.0
+
+
+def test_flag_state_has_targeting_rules():
+    from tombstone.types import FlagEnvironmentState
+    flag = FlagEnvironmentState(
+        flag_key="f", enabled=True, rollout_pct=100.0,
+        safe_default=False, environment="prod",
+        targeting_rules=[], prerequisites=[],
+    )
+    assert flag.targeting_rules == []
+    assert flag.prerequisites == []
+
+
+def test_snapshot_deserialization_includes_targeting_rules():
+    """Client._apply_snapshot must populate targeting_rules and prerequisites."""
+    from tombstone.client import TombstoneClient
+    client = TombstoneClient(sdk_key="test", environment="prod")
+
+    snapshot_payload = {
+        "environment": "prod",
+        "flags": [
+            {
+                "flag_key": "my-flag",
+                "enabled": True,
+                "rollout_pct": 100.0,
+                "safe_default": False,
+                "prerequisites": [{"flag_key": "parent", "required_value": True}],
+                "targeting_rules": [
+                    {
+                        "id": "r1",
+                        "conditions": [
+                            {"attribute": "country", "operator": "eq", "values": ["US"], "negate": False}
+                        ],
+                        "rollout_pct": 100.0,
+                        "variation": True,
+                    }
+                ],
+            }
+        ],
+        "hash": "abc",
+        "ts": 1000,
+    }
+    client._apply_snapshot(snapshot_payload)
+
+    state = client._cache.get("my-flag")
+    assert state is not None
+    assert len(state.prerequisites) == 1
+    assert state.prerequisites[0]["flag_key"] == "parent"
+    assert len(state.targeting_rules) == 1
+    assert state.targeting_rules[0].id == "r1"
+    assert state.targeting_rules[0].conditions[0].attribute == "country"

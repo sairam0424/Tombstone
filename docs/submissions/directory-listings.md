@@ -45,14 +45,62 @@ Tombstone treats your feature flag inventory as a live causal graph of productio
 - Differentiator: "The only OSS flag platform with circuit-breaker auto-rollback and blast-radius scoring"
 
 ### StackShare (stackshare.io/contribute/tool)
-- Category: Feature Flags
-- Supported platforms: Linux, Docker, Kubernetes
-- Pricing: Free / Open Source
+
+**All fields ready to paste:**
+
+| Field | Value |
+|-------|-------|
+| Name | Tombstone |
+| Website | https://github.com/sairam0424/Tombstone |
+| Tagline (60 chars) | Self-hosted blast-radius gates for feature flags |
+| Category | Feature Flags |
+| Supported platforms | Linux, Docker, Kubernetes |
+| Pricing | Free / Open Source |
+| Alternatives | LaunchDarkly, Unleash, Flagsmith, Flipt, GrowthBook |
+
+**Description (500 chars — paste into "Description" field):**
+```
+Tombstone is a self-hosted production intelligence layer for feature flags. Before any
+rollout, blast-radius scoring shows whether a change is BLOCKED, HIGH, MEDIUM, or LOW
+risk. After a rollout, circuit-breaker auto-rollback disables a flag automatically when
+error rates exceed threshold — no pager required. The "What Changed?" query correlates
+incidents to flag changes in milliseconds. MIT licensed. Go + Python + TypeScript.
+Self-hosted via Docker Compose.
+```
+
+**Category tags (select all that apply on StackShare form):**
+- Feature Flags
+- Developer Tools
+- DevOps
+- Self-Hosted
+- Open Source
 
 ### devhunt.org
-- Categories: DevOps, Infrastructure, Open Source
-- Tags: feature-flags, golang, self-hosted, circuit-breaker
-- Description hook: Start with the Knight Capital story (440M loss from feature flag)
+
+**All fields ready to paste:**
+
+| Field | Value |
+|-------|-------|
+| Name | Tombstone |
+| GitHub URL | https://github.com/sairam0424/Tombstone |
+| Website URL | https://github.com/sairam0424/Tombstone |
+| Tags | developer-tools, open-source, devops, infrastructure, self-hosted |
+
+**Short description (160 chars — paste into "Description" field):**
+```
+Self-hosted feature flag platform with circuit-breaker auto-rollback and blast-radius
+gating. Prevents Knight Capital–style incidents. MIT, Docker Compose.
+```
+
+**Full description (500 chars — paste into "Full Description" field):**
+```
+Knight Capital lost $440M in 45 minutes from a stale feature flag. Tombstone prevents
+that. It adds three safety layers to your flag rollouts: blast-radius scoring that blocks
+high-impact changes before they go live, circuit-breaker auto-rollback that disables a
+flag automatically when error rates spike, and causal incident correlation that answers
+"which flag caused this?" in milliseconds. Self-hosted, MIT licensed. Go + Python +
+TypeScript. One command to start: make dev.
+```
 
 ### G2 (sell.g2.com)
 - Category: Feature Flag Management

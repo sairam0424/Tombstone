@@ -1,7 +1,7 @@
 # Tombstone Discoverability Log
 
-All distribution and discoverability actions taken for Tombstone v1.0.0.
-Last updated: 2026-06-28.
+All distribution and discoverability actions taken for Tombstone v1.0.0 – v1.2.1.
+Last updated: 2026-07-05.
 
 ---
 
@@ -54,7 +54,9 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 | Newsletter | Contact | Sent | Status |
 |------------|---------|------|--------|
 | DevOps Weekly | gareth@morethanseven.net | 2026-06-28 | Awaiting review |
+| DevOps Weekly (v1.2.1 follow-up) | gareth@morethanseven.net | ⏸ Not sent — see newsletter-emails.md | — |
 | Go Weekly | peter@cooperpress.com | 2026-06-28 | Awaiting review |
+| Go Weekly (v1.2.1 follow-up) | peter@cooperpress.com | ⏸ Not sent — see newsletter-emails.md | — |
 
 ---
 
@@ -63,6 +65,7 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 | Platform | Status | URL | Date |
 |----------|--------|-----|------|
 | selfh.st/apps | ✅ Submitted | https://selfh.st/submit | 2026-06-28 |
+| StackShare | ✅ Live | https://stackshare.io/tombstone | 2026-07-05 |
 | openalternative.co | ❌ Blocked | Requires custom domain (no github.com URLs) | — |
 
 ---
@@ -71,12 +74,12 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 
 | Repository | PR | Status | Date |
 |------------|-----|--------|------|
-| open-feature/community (interested-parties.md) | [#554](https://github.com/open-feature/community/pull/554) | Open — awaiting review | 2026-06-28 |
+| open-feature/community (interested-parties.md) | [#554](https://github.com/open-feature/community/pull/554) | Open — CodeRabbit flagged as promotional, awaiting human review | 2026-06-28 |
 | seifrajhi/awesome-platform-engineering-tools | [#162](https://github.com/seifrajhi/awesome-platform-engineering-tools/pull/162) | Open — awaiting review | 2026-06-28 |
-| shospodarets/awesome-platform-engineering | [#53](https://github.com/shospodarets/awesome-platform-engineering/pull/53) | Open — awaiting review | 2026-06-28 |
-| rootsongjc/awesome-cloud-native | [#132](https://github.com/rootsongjc/awesome-cloud-native/pull/132) | Open — awaiting review | 2026-06-28 |
-| dastergon/awesome-sre | [#298](https://github.com/dastergon/awesome-sre/pull/298) | Open — awaiting review | 2026-06-28 |
-| pheature-flags/awesome-feature-flags | [#12](https://github.com/pheature-flags/awesome-feature-flags/pull/12) | Open — awaiting review | 2026-06-28 |
+| shospodarets/awesome-platform-engineering | [#54](https://github.com/shospodarets/awesome-platform-engineering/pull/54) | Open — fresh PR (replaced closed #53) | 2026-07-05 |
+| rootsongjc/awesome-cloud-native | [#138](https://github.com/rootsongjc/awesome-cloud-native/pull/138) | Open — fresh PR (replaced conflicted #132) | 2026-07-05 |
+| dastergon/awesome-sre | [#298](https://github.com/dastergon/awesome-sre/pull/298) | Open — clean, awaiting review | 2026-06-28 |
+| pheature-flags/awesome-feature-flags | [#12](https://github.com/pheature-flags/awesome-feature-flags/pull/12) | Open — clean, awaiting review | 2026-06-28 |
 
 ---
 
@@ -89,14 +92,40 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 
 ---
 
+## v1.2.1 Launch Assets (2026-07-05)
+
+All assets are ready-to-publish drafts. Nothing has been posted yet.
+
+| File | Target Platform | Status |
+|------|----------------|--------|
+| `docs/submissions/show-hn-v121.md` | Hacker News Show HN | 📝 Ready to publish |
+| `docs/submissions/product-hunt.md` | Product Hunt | 📝 Ready to publish |
+| `docs/submissions/twitter-thread.md` | Twitter / X | 📝 Ready to publish |
+| `docs/submissions/awesome-go-pr.md` | awesome-go + awesome-selfhosted | 📝 Ready to publish |
+| `docs/submissions/outreach-v121.md` | DevOps Weekly, Go Weekly, StackShare, devhunt.org, CNCF Slack, Platform Engineering Slack | 📝 Ready to publish |
+| `docs/submissions/linkedin-v121.md` | LinkedIn (post + carousel script) | 📝 Ready to publish |
+
+### Gate items still blocked
+
+| Platform | Gate | ETA |
+|----------|------|-----|
+| awesome-go | Repository age ≥ 5 months + A+ Go Report Card | November 2026 |
+| awesome-selfhosted | Repository age ≥ 4 months | October 2026 |
+| CNCF Landscape | 300 GitHub stars | TBD |
+| Product Hunt | 4–6 weeks of community warm-up (active PH engagement) | TBD |
+| CNCF Slack #openfeature | PR #554 merge required | TBD |
+
+---
+
 ## Remaining — Pending
 
 ### Needs account setup (browser, ~15 min each)
 | Platform | Notes |
 |----------|-------|
-| StackShare | stackshare.io — add under "Feature Flags" category |
-| devhunt.org | Submit form — content in `docs/submissions/directory-listings.md` |
-| CNCF Slack | slack.cncf.io → join #openfeature + #wg-platforms |
+| StackShare | stackshare.io — all fields in `docs/submissions/outreach-v121.md` |
+| devhunt.org | Submit form — all fields in `docs/submissions/outreach-v121.md` |
+| CNCF Slack #openfeature | Exact message in `docs/submissions/outreach-v121.md` — hold until PR #554 merged |
+| Platform Engineering Slack #show-and-tell | Exact message in `docs/submissions/outreach-v121.md` — send any time |
 | VS Code Marketplace | Create publisher → `vsce publish` from `workspace-vscode-ext/` |
 | JetBrains Marketplace | plugins.jetbrains.com → upload ZIP from `./gradlew buildPlugin` |
 
@@ -107,5 +136,5 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 | awesome-go | November 2026 (5-month age) + A+ Go Report Card |
 | awesome-selfhosted | October 2026 (4-month age) |
 | openalternative.co | Custom domain for Tombstone |
-| Show HN | Live playground + polished demo GIF |
-| Product Hunt | 4–6 weeks community warm-up first |
+| Show HN | ⏸ Backlog — post Tuesday–Thursday 9–11am ET, asset ready in `show-hn-v1.2.1.md` |
+| Product Hunt | 4–6 weeks community warm-up first (listing ready in `product-hunt.md`) |

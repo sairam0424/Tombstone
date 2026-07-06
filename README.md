@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.2.0
+## What Is in v1.2.1
 
-This is the v1.2.0 self-hosted release of Tombstone — the production resilience upgrade. Everything runs locally with `make dev`.
+This is the v1.2.1 self-hosted release of Tombstone — the production resilience upgrade plus critical regression fixes from adversarial pre-release testing. Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -190,7 +190,7 @@ This is the v1.2.0 self-hosted release of Tombstone — the production resilienc
 | Webhook delivery deduplication | Stable |
 | Intelligence asyncio hardening + warehouse query timeouts | Stable |
 
-Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.0 details.
+Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for full v1.2.1 details.
 
 ---
 
@@ -199,15 +199,19 @@ Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for
 | Guide | What it covers |
 |-------|---------------|
 | [Why Tombstone](docs/WHY_TOMBSTONE.md) | USPs, competitive comparison, use cases, honest caveats — start here to evaluate |
-| [Discoverability Roadmap](docs/DISCOVERABILITY.md) | GitHub topics, OSS launch strategy, awesome-go, CNCF, OpenFeature — how to grow Tombstone |
-| [Discoverability Log](docs/DISCOVERABILITY_LOG.md) | Every distribution action taken — packages published, articles live, PRs open, newsletters sent |
-| [Submission Guide](docs/SUBMISSION_GUIDE.md) | Every platform where Tombstone can be listed — 77 platforms, prioritized by effort/impact with exact URLs and steps |
-| [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
 | [Getting Started](docs/GETTING_STARTED.md) | 10-minute walkthrough from `make dev` to first flag in production |
+| [User Guide](docs/USER_GUIDE.md) | Complete guide — what feature flags are, how to use Tombstone, every workflow explained |
+| [SDK Integration Guide](docs/SDK_INTEGRATION_GUIDE.md) | Per-language quickstarts, testing patterns, OpenFeature provider, gotchas |
+| [API Reference](docs/API_REFERENCE.md) | REST endpoints, MCP tools, SDK packages, rate limits |
+| [Evaluation Model](docs/EVALUATION_MODEL.md) | How flag evaluation works: 5-step pipeline, hash bucketing, flag states, worked examples |
+| [Intelligence Model](docs/INTELLIGENCE_MODEL.md) | ML layer: anomaly detection, LinUCB rollout advisor, CUPED, collision detection — for non-ML engineers |
+| [Day 2 Operations](docs/DAY2_OPERATIONS.md) | Capacity planning, upgrade procedure, backup/restore, monitoring, secret rotation |
+| [Kubernetes Deployment](docs/DEPLOYMENT_KUBERNETES.md) | Helm single/multi-region, tombstone-operator, manual manifests |
+| [Runbooks](docs/runbooks/) | Circuit breaker, DLQ, rate limiting, auto-rollback, scheduled changes |
 | [Glossary](docs/GLOSSARY.md) | Blast radius, tombstoning, kill switch, circuit breaker, and more |
 | [Contributing](CONTRIBUTING.md) | How to set up dev environment and submit PRs |
 | [Security](SECURITY.md) | Vulnerability reporting, self-hosted security checklist, JWT setup |
-| [Support](SUPPORT.md) | Where to get help — Discussions, Issues, Security |
+| [Discoverability Roadmap](docs/DISCOVERABILITY.md) | GitHub topics, OSS launch strategy, awesome-go, CNCF, OpenFeature — how to grow Tombstone |
 
 **Evaluating Tombstone?** Read [Why Tombstone](docs/WHY_TOMBSTONE.md) — competitive comparison and use cases.
 **New to feature flags?** Start with the [User Guide](docs/USER_GUIDE.md).

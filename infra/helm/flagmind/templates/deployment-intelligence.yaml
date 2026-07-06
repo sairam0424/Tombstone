@@ -1,0 +1,60 @@
+{{- if .Values.intelligence.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tombstone.fullname" . }}-intelligence
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intelligence
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: intelligence
+  template:
+    metadata:
+      labels:
+        {{- include "tombstone.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: intelligence
+    spec:
+      serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: intelligence
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.intelligence.image.repository }}:{{ .Values.intelligence.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.intelligence.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.intelligence.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.intelligence.service.port }}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          envFrom:
+            - configMapRef:
+                name: tombstone-config
+            - secretRef:
+                name: tombstone-secrets
+          env:
+            - name: IS_PRIMARY_REGION
+              value: {{ .Values.intelligence.isPrimaryRegion | quote }}
+          resources:
+            requests:
+              cpu: {{ .Values.intelligence.resources.requests.cpu }}
+              memory: {{ .Values.intelligence.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.intelligence.resources.limits.cpu }}
+              memory: {{ .Values.intelligence.resources.limits.memory }}
+{{- end }}

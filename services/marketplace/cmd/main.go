@@ -73,7 +73,7 @@ func main() {
 	reg := registry.NewRegistry(rdb, logger)
 	reg.LoadFromRedis(context.Background())
 	dispatcher := webhook.NewDispatcher(reg, logger)
-	handler := v1.NewHandler(reg, dispatcher, logger)
+	handler := v1.NewHandler(reg, dispatcher, logger, os.Getenv("FLAG_API_TOKEN"))
 
 	// Interactive Slack app — wired at runtime if SLACK_BOT_TOKEN is set.
 	slackEnabled := false

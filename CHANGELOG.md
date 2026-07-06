@@ -11,6 +11,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.3.0] - 2026-07-06
+
+### Added
+- **Helm chart v0.2.0**: Deployment templates for evaluator, intelligence, and marketplace services — Helm chart now deploys all 5 application services. evaluator gains an optional HPA (`evaluator.autoscaling.*`). intelligence deployment exposes `IS_PRIMARY_REGION` env var from `values.yaml`. All templates use `tombstone.selectorLabels` (not `tombstone.labels`) in `spec.selector.matchLabels` to prevent helm upgrade immutability failures.
+- **Python SDK 5-step evaluation parity** (`tombstone-sdk` v0.2.0): Full targeting rule matching (eq/neq/in/nin/contains/startsWith/endsWith/gt/gte/lt/lte/semver_gt/semver_gte/semver_lt/semver_lte/semver_eq/date_before/date_after), prerequisite flag evaluation with memoized `evaluation_cache`, two-tier exception pattern (`InconclusiveMatchError` / `RequiresServerEvaluation`). No new runtime dependencies — zero-dependency semver via `paddedVersionString()` helper.
+- **Redoc interactive API explorer** at `GET /api/v1/docs` in flag-api — embedded via `go-redoc`, no CDN dependency, public endpoint, reads the grpc-gateway OpenAPI spec at `/api/v1/openapi.json`.
+
+### Fixed
+- Helm COMPATIBILITY.md "Known Gap" for evaluator/intelligence/marketplace Deployment templates — gap is now closed.
+- Python SDK `SDK_INTEGRATION_GUIDE.md` caveat about Python SDK missing prerequisites and rule matching — no longer applicable.
+
+---
+
+## [1.2.1] - 2026-07-05
+
+### Fixed
+- REG-001: Slack kill-switch was sending `environment` as a URL query parameter while the KillSwitch handler reads it from the JSON body — always returned HTTP 400, making the primary on-call incident-response path non-functional (#74)
+- REG-002: Four-eyes approval workflow (change-request list/approve/reject routes) was fully implemented but never registered in `flag-api/cmd/main.go` — all three endpoints were inaccessible (#74)
+- F-01: `make migrate` now applies all incremental migration files after `schema.sql`; previously only the baseline schema was applied, causing fresh deployments to crash with "relation scheduled_changes does not exist" (#74)
+- SEC-DATADOG: Datadog-triggered auto kill-switch was silently failing — `postKillSwitch` sent no `Authorization` header, every call received HTTP 401 from flag-api but was reported as success (#74)
+- `/readyz` health probe added to exempt paths in rate-limiting and load-shedding middleware across flag-api and evaluator — Kubernetes readiness probes were receiving 429/503 under sustained load (#74)
+- Audit log `actor` field was always `"unknown"` due to a context-key type mismatch between `auth.go` and `flags.go`; aligned to use `middleware.ContextKeyActor` (#74)
+- Removed unused `pyod>=0.9.0` dependency from intelligence service that blocked `uv sync` on Python 3.12 (#74)
+- CI test steps no longer use `|| true` — test failures now correctly block merges (#74)
+- Added `pytest-asyncio` to intelligence CI test setup so `async def` tests can run (#74)
+
 ## [1.2.0] - 2026-07-05
 
 ### Added
