@@ -5,7 +5,18 @@ Update this file AFTER completing any task with new learnings.
 
 ## Lessons Learned
 
-*(empty — populate as work progresses)*
+## v1.3.0 Phase A — Helm Chart Completion (2026-07-06)
+- Helm Deployment `spec.selector.matchLabels` MUST use `tombstone.selectorLabels` (not `tombstone.labels`) — `tombstone.labels` contains `helm.sh/chart` which carries a version string, making the selector immutable across helm upgrades. This causes `helm upgrade` to fail with "selector is immutable". Always use `selectorLabels` in both `spec.selector.matchLabels` AND `spec.template.metadata.labels`.
+- HPA template should be gated by `.Values.<service>.autoscaling.enabled` — keeps it dormant in most environments (disabled by default) while allowing per-environment enablement via value overrides.
+- values.yaml for marketplace had port 8084, but CLAUDE.md documents marketplace at 8086 — the values.yaml was pre-existing and was not changed as the task only required adding autoscaling to the evaluator block. Future tasks should reconcile this discrepancy.
+- `helm lint` INFO about missing icon is harmless — `0 chart(s) failed` is the only gate that matters for CI.
+
+## v1.3.0 Phase A — Task A2: Intelligence Deployment template (2026-07-06)
+- Python FastAPI services need higher probe delays than Go services: `livenessProbe.initialDelaySeconds: 15` / `readinessProbe.initialDelaySeconds: 20` — Python cold-start (importing numpy, scikit-learn, etc.) is 3-5x slower than Go binary startup.
+- Liveness and readiness split: liveness hits `/health` (trivial, no dependency checks) while readiness hits `/readyz` (checks Postgres + Redis). This prevents restart storms — if Postgres is briefly unavailable, the pod stays Running (liveness OK) but stops receiving traffic (readiness fails), rather than being killed and restarted in a loop.
+- `terminationGracePeriodSeconds: 60` for Python (vs 30 for Go) — Python processes may hold open DB connections or in-flight ML inference tasks that need time to drain cleanly.
+- Extra `env:` block (not `envFrom:`) for `IS_PRIMARY_REGION` is correct — it's a per-deployment override from `values.yaml`, not a shared config map value. Using `env:` also allows per-cluster override via `--set intelligence.isPrimaryRegion=false` in helm commands.
+- COMPATIBILITY.md "Known Gap" section should be updated as the LAST step of chart completion, after all Deployment templates are verified — it documents the state of the entire chart, not just the current task.
 
 ## Common Pitfalls (pre-filled from architecture decisions)
 

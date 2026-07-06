@@ -63,6 +63,7 @@ evaluator:
 
 intelligence:
   enabled: true
+  isPrimaryRegion: "true"
   image:
     repository: tombstone/intelligence
     tag: "0.1.0"
