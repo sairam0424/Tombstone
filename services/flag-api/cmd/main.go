@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
+	"github.com/tombstone/flag-api/internal/docs"
 	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
@@ -137,6 +138,12 @@ func main() {
 
 	healthChecker := &health.Checker{DB: db, RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// Redoc interactive API explorer — public, no auth middleware.
+	// Must be registered BEFORE the auth-gated /api/v1 route group.
+	docsHandler := docs.NewHandler("/api/v1/openapi.json")
+	r.Handle("/api/v1/docs", docsHandler)
+	r.Handle("/api/v1/docs/*", docsHandler)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
