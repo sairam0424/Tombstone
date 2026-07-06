@@ -42,7 +42,7 @@ The dashboard opens at **http://localhost:3000**.
 | **gateway** | http://localhost:8080 | SSE streaming to SDKs, real-time flag updates |
 | **evaluator** | http://localhost:8082 | Blast-radius scoring, circuit-breaker auto-rollback, SLO tracking |
 | **intelligence** | http://localhost:8083 | Anomaly detection, stale flag cleanup, rollout recommendations |
-| **gitops-sync** | http://localhost:8084 | YAML-as-code flag sync from Git |
+| **gitops-sync** | http://localhost:8084 | YAML-as-code flag sync from Git — **DEPRECATED** (replaced by tombstone-operator + GitOps pipeline) |
 | **ast-rewriter** | http://localhost:8085 | Dead-code scanner for stale flag cleanup |
 | **marketplace** | http://localhost:8086 | Integrations: Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear |
 | **PostgreSQL** | localhost:5433 | Primary store + pgvector |
@@ -155,6 +155,47 @@ function CheckoutButton() {
   return enabled ? <NewCheckout /> : <LegacyCheckout />;
 }
 ```
+
+---
+
+## GitOps & Deployment
+
+Tombstone ships a full GitOps stack supporting three provider modes. The `tombstone-operator` Kubernetes operator manages `FeatureFlag` and `FlagPolicy` CRDs; GitOps tooling (Flux CD, Argo CD, or both) reconciles the `gitops/` directory tree against your cluster, enforcing desired flag state declaratively and triggering blast-radius gated rollouts without manual kubectl.
+
+### Provider modes
+
+| Mode | Infra ownership | Apps + flags ownership | Extra capabilities |
+|------|----------------|----------------------|--------------------|
+| `flux` | Flux (infrastructure/ + apps/ + flags/) | Flux | ImageUpdateAutomation, ImagePolicy, spec.ignore.paths rollout protection |
+| `argocd` | Flux (infrastructure/ only) | Argo CD | Lua health checks, sync waves, Argo Rollouts blast-radius AnalysisTemplate, Slack notifications |
+| `both` | Flux (infrastructure/ only) | Argo CD | All of the above — recommended for full observability |
+
+### Bootstrap (run in order)
+
+```bash
+# Step 1 — always required: installs tombstone-operator CRDs via Flux
+gh workflow run flux-bootstrap.yml \
+  -f kubeconfig_b64="$(base64 -i ~/.kube/config)"
+
+# Step 2 — required for argocd or both modes: installs Argo CD + applies provider overlay
+gh workflow run argocd-bootstrap.yml \
+  -f provider=both \
+  -f kubeconfig_b64="$(base64 -i ~/.kube/config)"
+```
+
+> **Order is critical.** `argocd-bootstrap.yml` depends on the `FeatureFlag`/`FlagPolicy` CRDs installed in Step 1. Running Step 2 first will fail.
+
+### gitops/ directory layout
+
+```
+gitops/
+├── infrastructure/   # Flux-owned: tombstone-operator chart, ImagePolicy, ImageUpdateAutomation
+├── apps/             # tombstone services (flag-api, gateway, evaluator, …) — Flux or Argo CD
+├── flags/            # FeatureFlag + FlagPolicy custom resources — Flux or Argo CD
+└── providers/        # Kustomize overlays: flux/, argocd/, both/
+```
+
+> `gitops-sync` (the legacy Go service at `:8084`) is **deprecated** — its YAML-as-code sync role is fully replaced by the tombstone-operator `FeatureFlagReconciler` and the GitOps pipeline above.
 
 ---
 
