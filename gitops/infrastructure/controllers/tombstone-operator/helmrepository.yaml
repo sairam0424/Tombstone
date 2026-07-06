@@ -1,0 +1,9 @@
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: tombstone-operator
+  namespace: tombstone
+spec:
+  type: oci
+  interval: 10m
+  url: oci://ghcr.io/sairam0424/charts

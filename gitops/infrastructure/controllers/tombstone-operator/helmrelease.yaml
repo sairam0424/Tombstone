@@ -1,0 +1,35 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tombstone-operator
+  namespace: tombstone
+spec:
+  interval: 15m
+  chart:
+    spec:
+      chart: tombstone-operator
+      version: ">=0.1.0"
+      sourceRef:
+        kind: HelmRepository
+        name: tombstone-operator
+        namespace: tombstone
+      interval: 15m
+  install:
+    # CreateReplace: upgrades CRDs on helm upgrade — never deletes.
+    # Default 'Create' silently skips CRD schema upgrades, which would leave
+    # FeatureFlag/FlagEnvironment/FlagPolicy schemas stale after operator updates.
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    replicaCount: 1
+    tombstoneApiUrl: http://flag-api.tombstone.svc.cluster.local:8081
+    tombstoneApiToken:
+      secretKeyRef:
+        name: tombstone-secrets
+        key: FLAG_API_TOKEN
