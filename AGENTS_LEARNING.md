@@ -170,6 +170,11 @@ Update this file AFTER completing any task with new learnings.
 - Python `match` statement requires Python 3.10+ — confirmed this repo uses Python 3.12+ (pyproject.toml) so structural pattern matching is safe.
 - TDD red-green cycle: confirmed — `ModuleNotFoundError: No module named 'tombstone.matching'` before implementation, 22/22 new tests pass after, full suite 50/50.
 
+## Flux GitOps Integration — Task 4: Staging overlay (2026-07-06)
+- Kustomize security restriction applies to individual FILE references too, not just directory traversal. `resources: - ../production/tombstone/namespace.yaml` fails with "file is not in or below" even though `../production` as a DIRECTORY reference is allowed. Always use directory references (`- ../production`) for base overlay patterns, never individual file paths from sibling directories.
+- `patchesStrategicMerge` is deprecated in Kustomize v5 — use `patches` with `path:` key instead. Both work functionally but `patches` avoids the deprecation warning in `kubectl kustomize` output.
+- A kustomize overlay at `gitops/apps/staging/` can reference `../production` (the production directory) as its base — kustomize allows parent-directory traversal when pointing to a DIRECTORY (which has its own kustomization.yaml), just not to individual files above the overlay's root. This is the canonical overlay pattern: staging extends production by pointing to its directory and applying strategic merge patches.
+
 ## Flux GitOps Integration — Task 3: ImagePolicy + ImageUpdateAutomation (2026-07-06)
 - Kustomize security restriction: a `kustomization.yaml` cannot reference files **outside** its own directory tree. `../image-automation/policies.yaml` (parent traversal) is rejected with "file is not in or below" error. Solution: place the `image-automation/` subdirectory **inside** `controllers/` (i.e. `gitops/infrastructure/controllers/image-automation/`) so all referenced paths are descendants of the kustomization root.
 - The plan's commit message says "8 tombstone-* images" but the policies.yaml only covers 5 services (flag-api, gateway, evaluator, intelligence, marketplace) — gitops-sync, ast-rewriter, and tombstone-operator are not scanned via ImagePolicy. The commit message was kept verbatim from the plan; note the discrepancy for future audits.
