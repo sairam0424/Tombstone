@@ -30,6 +30,11 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 <!-- entries below this line, newest first -->
 
+## 2026-07-06 · v1.3.0 — Helm completion, Python SDK parity, Redoc explorer · #product #infra
+What: Closed 3 documented v1.3.0 gaps: Helm chart v0.2.0 with Deployment templates for all 5 services (evaluator+HPA, intelligence, marketplace), Python SDK v0.2.0 with 5-step evaluation parity (prerequisites, targeting rules, full operator surface — no new deps), Redoc API explorer embedded in flag-api at /api/v1/docs (no CDN).
+Refs: [CHANGELOG.md](CHANGELOG.md) (updated), [infra/helm/flagmind/](infra/helm/flagmind/) (updated), [packages/sdks/flagmind-python/](packages/sdks/flagmind-python/) (updated), [services/flag-api/internal/docs/](services/flag-api/internal/docs/) (new).
+
+
 ## 2026-07-05 · OSS launch assets generated for v1.2.1 · #product
 What: Generated 6 launch assets covering all pending platforms (Show HN, Product Hunt, Twitter, awesome-go, StackShare, LinkedIn). Assets are ready-to-publish drafts; gate items (awesome-go needs A+ grade, Product Hunt needs warm-up, CNCF needs 300 stars) documented in DISCOVERABILITY_LOG.md.
 Refs: [show-hn-v121.md](docs/submissions/show-hn-v121.md) (new), [product-hunt.md](docs/submissions/product-hunt.md) (new), [twitter-thread.md](docs/submissions/twitter-thread.md) (new), [awesome-go-pr.md](docs/submissions/awesome-go-pr.md) (new), [outreach-v121.md](docs/submissions/outreach-v121.md) (new), [linkedin-v121.md](docs/submissions/linkedin-v121.md) (new), [DISCOVERABILITY_LOG.md](docs/DISCOVERABILITY_LOG.md) (updated).
