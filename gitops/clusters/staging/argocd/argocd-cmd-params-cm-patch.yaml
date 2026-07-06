@@ -1,0 +1,13 @@
+# gitops/clusters/production/argocd/argocd-cmd-params-cm-patch.yaml
+# CRITICAL: RespectIgnoreDifferences=true prevents Argo CD from overwriting
+# ignoreDifferences fields during sync. Without this, ignoreDifferences only
+# suppresses the OutOfSync display -- the actual sync still overwrites rolloutPct.
+# (Confirmed finding from deep research -- ignoreDifferences alone is insufficient.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  application.resourceTrackingMethod: "annotation"
+  server.application.namespaces: "tombstone"
