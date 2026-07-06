@@ -65,6 +65,7 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 | Platform | Status | URL | Date |
 |----------|--------|-----|------|
 | selfh.st/apps | ✅ Submitted | https://selfh.st/submit | 2026-06-28 |
+| StackShare | ✅ Live | https://stackshare.io/tombstone | 2026-07-05 |
 | openalternative.co | ❌ Blocked | Requires custom domain (no github.com URLs) | — |
 
 ---
@@ -73,12 +74,12 @@ Pull: `docker pull ghcr.io/sairam0424/tombstone-flag-api:latest`
 
 | Repository | PR | Status | Date |
 |------------|-----|--------|------|
-| open-feature/community (interested-parties.md) | [#554](https://github.com/open-feature/community/pull/554) | Open — awaiting review | 2026-06-28 |
+| open-feature/community (interested-parties.md) | [#554](https://github.com/open-feature/community/pull/554) | Open — CodeRabbit flagged as promotional, awaiting human review | 2026-06-28 |
 | seifrajhi/awesome-platform-engineering-tools | [#162](https://github.com/seifrajhi/awesome-platform-engineering-tools/pull/162) | Open — awaiting review | 2026-06-28 |
-| shospodarets/awesome-platform-engineering | [#53](https://github.com/shospodarets/awesome-platform-engineering/pull/53) | Open — awaiting review | 2026-06-28 |
-| rootsongjc/awesome-cloud-native | [#132](https://github.com/rootsongjc/awesome-cloud-native/pull/132) | Open — awaiting review | 2026-06-28 |
-| dastergon/awesome-sre | [#298](https://github.com/dastergon/awesome-sre/pull/298) | Open — awaiting review | 2026-06-28 |
-| pheature-flags/awesome-feature-flags | [#12](https://github.com/pheature-flags/awesome-feature-flags/pull/12) | Open — awaiting review | 2026-06-28 |
+| shospodarets/awesome-platform-engineering | [#54](https://github.com/shospodarets/awesome-platform-engineering/pull/54) | Open — fresh PR (replaced closed #53) | 2026-07-05 |
+| rootsongjc/awesome-cloud-native | [#138](https://github.com/rootsongjc/awesome-cloud-native/pull/138) | Open — fresh PR (replaced conflicted #132) | 2026-07-05 |
+| dastergon/awesome-sre | [#298](https://github.com/dastergon/awesome-sre/pull/298) | Open — clean, awaiting review | 2026-06-28 |
+| pheature-flags/awesome-feature-flags | [#12](https://github.com/pheature-flags/awesome-feature-flags/pull/12) | Open — clean, awaiting review | 2026-06-28 |
 
 ---
 
@@ -135,5 +136,5 @@ All assets are ready-to-publish drafts. Nothing has been posted yet.
 | awesome-go | November 2026 (5-month age) + A+ Go Report Card |
 | awesome-selfhosted | October 2026 (4-month age) |
 | openalternative.co | Custom domain for Tombstone |
-| Show HN | Live playground + polished demo GIF (asset ready in `show-hn-v121.md`) |
+| Show HN | ⏸ Backlog — post Tuesday–Thursday 9–11am ET, asset ready in `show-hn-v1.2.1.md` |
 | Product Hunt | 4–6 weeks community warm-up first (listing ready in `product-hunt.md`) |

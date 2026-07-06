@@ -95,14 +95,11 @@ To connect: add to your Claude Code config with `claude mcp add tombstone -- npx
 ## OpenAPI Reference
 
 Full auto-generated OpenAPI documentation is served by flag-api at:
+- **JSON spec:** `GET http://localhost:8081/api/v1/openapi.json`
+- **Interactive explorer (Redoc):** `GET http://localhost:8081/api/v1/docs`
 
-```
-GET http://localhost:8081/api/v1/openapi.json
-```
-
-The JSON schema is generated from `proto/v1/` via grpc-gateway. Import it into Postman, Insomnia, or any OpenAPI-compatible client.
-
-A hosted interactive reference (Swagger UI / Redoc) is planned for v1.3.0.
+The JSON schema is generated from `proto/v1/` via grpc-gateway. Import into Postman, Insomnia, or any OpenAPI-compatible client.
+The interactive explorer is embedded in the binary (no CDN dependency) via `go-redoc`.
 
 ---
 

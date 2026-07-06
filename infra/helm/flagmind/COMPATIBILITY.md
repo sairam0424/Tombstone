@@ -40,19 +40,19 @@ The operator is NOT deployed by this Helm chart — it must be deployed separate
 
 ---
 
-## Known Gap: Incomplete Helm Coverage
+## Known Gap: Incomplete Helm Coverage (CLOSED in v0.2.0)
 
-**This chart currently only deploys `flag-api` and `gateway` via Deployment templates.**
+All services now have Deployment templates.
 
 | Service | Helm Deployment template | values.yaml entry |
 |---------|--------------------------|-------------------|
 | flag-api | ✅ `deployment-flag-api.yaml` | ✅ `flagApi:` |
 | gateway | ✅ `deployment-gateway.yaml` | ✅ `gateway:` |
-| evaluator | ❌ not yet | ✅ `evaluator:` |
-| intelligence | ❌ not yet | ✅ `intelligence:` |
-| marketplace | ❌ not yet | ✅ `marketplace:` |
+| evaluator | ✅ `deployment-evaluator.yaml` + HPA | ✅ `evaluator:` |
+| intelligence | ✅ `deployment-intelligence.yaml` | ✅ `intelligence:` |
+| marketplace | ✅ `deployment-marketplace.yaml` | ✅ `marketplace:` |
 
-Services without Deployment templates must be deployed manually (see `docs/DEPLOYMENT_KUBERNETES.md`).
+**tombstone-operator** lives in a separate chart (`infra/helm/tombstone-operator/`) — Helm CRDs are never upgraded or deleted on helm upgrade/uninstall, making co-location operationally unsafe.
 
 ---
 

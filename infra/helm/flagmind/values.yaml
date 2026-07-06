@@ -55,9 +55,15 @@ evaluator:
   service:
     type: ClusterIP
     port: 8082
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
 
 intelligence:
   enabled: true
+  isPrimaryRegion: "true"
   image:
     repository: tombstone/intelligence
     tag: "0.1.0"
@@ -86,7 +92,13 @@ marketplace:
       memory: 512Mi
   service:
     type: ClusterIP
-    port: 8084
+    port: 8086
+
+secrets:
+  dbUrl: ""
+  redisUrl: ""
+  jwtToken: ""
+  apiToken: ""
 
 postgresql:
   enabled: false
