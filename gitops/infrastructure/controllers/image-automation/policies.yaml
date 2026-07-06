@@ -1,7 +1,7 @@
 ---
 # ImageRepository scans ghcr.io for new tags.
 # One ImagePolicy per service selects the latest semver tag.
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: tombstone-flag-api
@@ -12,7 +12,7 @@ spec:
   secretRef:
     name: ghcr-pull-secret
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: tombstone-flag-api
@@ -24,7 +24,7 @@ spec:
     semver:
       range: ">=1.0.0"
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: tombstone-gateway
@@ -35,7 +35,7 @@ spec:
   secretRef:
     name: ghcr-pull-secret
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: tombstone-gateway
@@ -47,7 +47,7 @@ spec:
     semver:
       range: ">=1.0.0"
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: tombstone-evaluator
@@ -58,7 +58,7 @@ spec:
   secretRef:
     name: ghcr-pull-secret
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: tombstone-evaluator
@@ -70,7 +70,7 @@ spec:
     semver:
       range: ">=1.0.0"
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: tombstone-intelligence
@@ -81,7 +81,7 @@ spec:
   secretRef:
     name: ghcr-pull-secret
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: tombstone-intelligence
@@ -93,7 +93,7 @@ spec:
     semver:
       range: ">=1.0.0"
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: tombstone-marketplace
@@ -104,7 +104,7 @@ spec:
   secretRef:
     name: ghcr-pull-secret
 ---
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: tombstone-marketplace
