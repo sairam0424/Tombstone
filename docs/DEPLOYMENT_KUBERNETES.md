@@ -2,6 +2,26 @@
 
 This guide covers deploying Tombstone to Kubernetes: single-region via Helm, multi-region, the tombstone-operator, and manual deployment for services not yet in the Helm chart.
 
+## GitOps Deployment (Recommended) — Flux CD
+
+For production deployments, use Flux CD v2.3+. See `gitops/README.md` for the
+full operator guide. Bootstrap command:
+
+```bash
+flux bootstrap github \
+  --owner=sairam0424 \
+  --repository=Tombstone \
+  --branch=main \
+  --path=gitops/clusters/production \
+  --personal \
+  --components-extra=image-reflector-controller,image-automation-controller
+```
+
+After bootstrap, Flux manages all deployments automatically. The manual Helm
+commands below are for reference or emergency use only.
+
+---
+
 See `infra/helm/flagmind/COMPATIBILITY.md` for version requirements and upgrade safety notes.
 
 ---

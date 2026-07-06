@@ -5,6 +5,14 @@ Update this file AFTER completing any task with new learnings.
 
 ## Lessons Learned
 
+## Flux GitOps Integration — Tasks 6+7: CI GitOps handoff + deprecation (2026-07-06)
+- The `update-gitops-tags` CI job uses `env:` to pass `steps.tag.outputs.version` into the `run:` shell — this avoids direct `${{ ... }}` interpolation inside `run:` blocks, which is the safe GitHub Actions pattern for preventing command injection (even though tag refs are controlled by the actor pushing, not attacker-supplied event payloads, consistency with the secure pattern is preferable).
+- `inputs.cluster` from `workflow_dispatch` is also passed via `env: CLUSTER:` rather than inline `${{ inputs.cluster }}` in the `run:` block — `workflow_dispatch` inputs are actor-controlled, but inputs can contain shell metacharacters if the actor is malicious; the env-var pattern is always correct here.
+- `gitops-sync` removal from the docker-publish matrix is a 3-line block removal (name + context + port) — the service source code at `services/gitops-sync/` is deliberately preserved per the deprecation convention. Never delete source code as part of a GitOps migration; only remove it from CI publish matrices and Helm chart references.
+- The gitops/README.md uses a plain ASCII arrow (`->`) instead of Unicode `→` — consistent with the Excalidraw diagram rule about avoiding Unicode glyphs in plain text files that may be rendered in constrained contexts.
+- Prepending a new section to an existing Markdown file: anchor the edit on the first heading + its subtitle paragraph (unique text), replace that block with the heading + subtitle + new section + separator `---`. This keeps the file structure intact and the edit is idempotent.
+- CHANGELOG [Unreleased] block: always replace the empty `## [Unreleased]\n\n---` stub with the full entry block ending in `---` — keeping the separator ensures the next version heading renders correctly in Keep a Changelog format.
+
 ## Flux GitOps Integration — Task 5: flags/ directory for FeatureFlag CRs (2026-07-06)
 - The production and staging overlays for `gitops/flags/` are structurally identical (`resources: ../../base`, `namespace: tombstone`) — the overlay pattern is used for future per-environment customizations (e.g. patch to override `rolloutPct` in staging) rather than immediate differences.
 - `namespace: tombstone` in the overlay kustomization.yaml applies the namespace to ALL resources from the base, including both FeatureFlag and FlagPolicy CRs — no need to set namespace in the base manifests themselves.
