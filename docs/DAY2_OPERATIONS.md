@@ -4,6 +4,92 @@ Steady-state operations for teams running Tombstone in production: capacity plan
 
 ---
 
+## GitOps Operations
+
+### Checking Flux Health
+
+```bash
+# List all Kustomization objects and their reconciliation status
+flux get kustomizations
+
+# Inspect the infrastructure Kustomization specifically
+flux get kustomization tombstone-infrastructure -n flux-system
+
+# Force a reconciliation (re-applies source + kustomization in one shot)
+flux reconcile kustomization tombstone-infrastructure -n flux-system --with-source
+```
+
+### Checking Image Automation
+
+```bash
+# List all ImageRepository objects (flag-api, intelligence, etc.)
+flux get imagerepository -n flux-system
+
+# List all ImagePolicy objects and the latest resolved tag
+flux get imagepolicy -n flux-system
+
+# Force-poll the container registry for new tags
+flux reconcile imagerepository tombstone-flag-api -n flux-system
+
+# Force an ImageUpdateAutomation run (writes updated tags to git)
+flux reconcile imageupdateautomation tombstone-image-updater -n flux-system
+```
+
+### Checking Argo CD Status (provider=argocd|both)
+
+```bash
+# List all Application objects and their sync/health state
+kubectl get applications -n argocd
+argocd app list
+
+# Inspect a specific application (shows resource tree + conditions)
+argocd app get tombstone-app
+
+# Manually trigger a sync of the flags Application
+argocd app sync tombstone-flags
+```
+
+### Checking Argo Rollouts (provider=both)
+
+```bash
+# List Rollout objects and their current canary step
+kubectl get rollouts -n tombstone
+
+# List AnalysisRun objects (blast-radius gate results)
+kubectl get analysisrun -n tombstone
+
+# Manually query the blast-radius evaluator (LOW/MEDIUM=promote, HIGH/BLOCKED=abort)
+curl "http://evaluator:8082/api/v1/blast-radius?flag_key=checkout-v2"
+```
+
+### Switching GitOps Provider
+
+```bash
+# 1. Verify Flux infrastructure Kustomization is Ready before layering Argo CD on top
+flux get kustomization tombstone-infrastructure -n flux-system
+
+# 2. Apply the target overlay (flux | argocd | both)
+kubectl apply -k gitops/providers/both/
+
+# 3. Wait for the Argo CD server to become available
+kubectl rollout status deployment/argocd-server -n argocd
+
+# Note: argocd-bootstrap.yml MUST run AFTER flux-bootstrap.yml —
+# the tombstone-operator CRDs must exist before Argo CD can apply FeatureFlag resources.
+```
+
+### GitOps Drift Alerts
+
+**Flux side:** The `spec.ignore.paths` field in each Kustomization protects `rolloutPct` from being overwritten during reconciliation — ML-driven rollout mutations made by the evaluator are intentionally excluded from drift detection.
+
+**Argo CD side:** Sync failures trigger a notification to the marketplace Slack integration:
+```
+POST marketplace.tombstone.svc:8086/api/v1/marketplace/slack/actions
+```
+Configure this in `gitops/providers/argocd/notifications-cm.yaml`. Both `ignoreDifferences` AND `RespectIgnoreDifferences: true` in the Application spec are required — `ignoreDifferences` alone does **not** prevent Argo CD from overwriting those fields during a sync.
+
+---
+
 ## Capacity Planning
 
 ### Database Connections
