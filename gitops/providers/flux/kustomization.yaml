@@ -1,0 +1,10 @@
+# gitops/providers/flux/kustomization.yaml
+# Flux-only provider: uses existing Flux Kustomization chain.
+# Active when GITOPS_PROVIDER=flux (default).
+# No changes needed — gitops/clusters/*/flux-system/gotk-sync.yaml already bootstraps Flux.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# This overlay intentionally has no resources.
+# Flux bootstrap is handled by gitops/clusters/<env>/flux-system/gotk-sync.yaml.
+# See gitops/README.md for bootstrap instructions.
+resources: []
