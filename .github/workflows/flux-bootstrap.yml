@@ -1,0 +1,75 @@
+name: Flux Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: 'Target cluster (production|staging)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  bootstrap:
+    name: Bootstrap Flux on ${{ inputs.cluster }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.cluster }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install flux CLI
+        env:
+          FLUX_VERSION: "2.3.0"
+        run: |
+          # Download versioned binary + checksum, verify before executing.
+          # Avoids curl-pipe-bash: unversioned script with no integrity check.
+          curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o /tmp/flux.tar.gz
+          curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_checksums.txt" -o /tmp/flux_checksums.txt
+          cd /tmp && grep "flux_${FLUX_VERSION}_linux_amd64.tar.gz" flux_checksums.txt | sha256sum --check
+          tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux
+          flux version --client
+
+      - name: Set up kubeconfig
+        env:
+          # KUBECONFIG_B64 must contain the kubeconfig file base64-encoded.
+          # Generate with: cat ~/.kube/config | base64 | tr -d '\n'
+          # Using base64 decode avoids the kubeconfig value appearing in runner debug logs.
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_B64}" | base64 --decode > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Bootstrap Flux with image automation controllers
+        env:
+          GITHUB_TOKEN: ${{ secrets.FLUX_GITHUB_TOKEN }}
+          CLUSTER: ${{ inputs.cluster }}
+        run: |
+          flux bootstrap github \
+            --owner=sairam0424 \
+            --repository=Tombstone \
+            --branch=main \
+            --path="gitops/clusters/${CLUSTER}" \
+            --personal \
+            --components-extra=image-reflector-controller,image-automation-controller \
+            --token-auth
+
+      - name: Wait for Flux to be ready
+        run: flux check
+
+      - name: Verify infrastructure Kustomization is Ready
+        run: |
+          kubectl wait kustomization/tombstone-infrastructure \
+            -n flux-system \
+            --for=condition=Ready \
+            --timeout=5m
+
+      - name: Verify apps Kustomization is Ready
+        run: |
+          kubectl wait kustomization/tombstone-apps \
+            -n flux-system \
+            --for=condition=Ready \
+            --timeout=5m

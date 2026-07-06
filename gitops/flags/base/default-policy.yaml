@@ -1,0 +1,12 @@
+apiVersion: tombstone.dev/v1alpha1
+kind: FlagPolicy
+metadata:
+  name: default-policy
+  namespace: tombstone
+spec:
+  # Empty selector matches all FeatureFlag resources in the namespace.
+  selector: {}
+  maxStaleDays: 90
+  maxBlastRadiusPct: 50
+  requireOwner: true
+  requireTags: false

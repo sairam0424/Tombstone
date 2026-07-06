@@ -1,0 +1,117 @@
+---
+# ImageRepository scans ghcr.io for new tags.
+# One ImagePolicy per service selects the latest semver tag.
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: tombstone-flag-api
+  namespace: flux-system
+spec:
+  image: ghcr.io/sairam0424/tombstone-flag-api
+  interval: 5m
+  secretRef:
+    name: ghcr-pull-secret
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: tombstone-flag-api
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: tombstone-flag-api
+  policy:
+    semver:
+      range: ">=1.0.0"
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: tombstone-gateway
+  namespace: flux-system
+spec:
+  image: ghcr.io/sairam0424/tombstone-gateway
+  interval: 5m
+  secretRef:
+    name: ghcr-pull-secret
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: tombstone-gateway
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: tombstone-gateway
+  policy:
+    semver:
+      range: ">=1.0.0"
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: tombstone-evaluator
+  namespace: flux-system
+spec:
+  image: ghcr.io/sairam0424/tombstone-evaluator
+  interval: 5m
+  secretRef:
+    name: ghcr-pull-secret
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: tombstone-evaluator
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: tombstone-evaluator
+  policy:
+    semver:
+      range: ">=1.0.0"
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: tombstone-intelligence
+  namespace: flux-system
+spec:
+  image: ghcr.io/sairam0424/tombstone-intelligence
+  interval: 5m
+  secretRef:
+    name: ghcr-pull-secret
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: tombstone-intelligence
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: tombstone-intelligence
+  policy:
+    semver:
+      range: ">=1.0.0"
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: tombstone-marketplace
+  namespace: flux-system
+spec:
+  image: ghcr.io/sairam0424/tombstone-marketplace
+  interval: 5m
+  secretRef:
+    name: ghcr-pull-secret
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: tombstone-marketplace
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: tombstone-marketplace
+  policy:
+    semver:
+      range: ">=1.0.0"
