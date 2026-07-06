@@ -11,6 +11,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.3.0] - 2026-07-06
+
+### Added
+- **Helm chart v0.2.0**: Deployment templates for evaluator, intelligence, and marketplace services — Helm chart now deploys all 5 application services. evaluator gains an optional HPA (`evaluator.autoscaling.*`). intelligence deployment exposes `IS_PRIMARY_REGION` env var from `values.yaml`. All templates use `tombstone.selectorLabels` (not `tombstone.labels`) in `spec.selector.matchLabels` to prevent helm upgrade immutability failures.
+- **Python SDK 5-step evaluation parity** (`tombstone-sdk` v0.2.0): Full targeting rule matching (eq/neq/in/nin/contains/startsWith/endsWith/gt/gte/lt/lte/semver_gt/semver_gte/semver_lt/semver_lte/semver_eq/date_before/date_after), prerequisite flag evaluation with memoized `evaluation_cache`, two-tier exception pattern (`InconclusiveMatchError` / `RequiresServerEvaluation`). No new runtime dependencies — zero-dependency semver via `paddedVersionString()` helper.
+- **Redoc interactive API explorer** at `GET /api/v1/docs` in flag-api — embedded via `go-redoc`, no CDN dependency, public endpoint, reads the grpc-gateway OpenAPI spec at `/api/v1/openapi.json`.
+
+### Fixed
+- Helm COMPATIBILITY.md "Known Gap" for evaluator/intelligence/marketplace Deployment templates — gap is now closed.
+- Python SDK `SDK_INTEGRATION_GUIDE.md` caveat about Python SDK missing prerequisites and rule matching — no longer applicable.
+
+---
+
 ## [1.2.1] - 2026-07-05
 
 ### Fixed
