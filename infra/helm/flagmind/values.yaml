@@ -92,7 +92,13 @@ marketplace:
       memory: 512Mi
   service:
     type: ClusterIP
-    port: 8084
+    port: 8086
+
+secrets:
+  dbUrl: ""
+  redisUrl: ""
+  jwtToken: ""
+  apiToken: ""
 
 postgresql:
   enabled: false

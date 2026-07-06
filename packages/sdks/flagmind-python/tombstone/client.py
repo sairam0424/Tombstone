@@ -94,36 +94,45 @@ class TombstoneClient:
 
         new_cache: dict[str, FlagEnvironmentState] = {}
         for raw in payload.get("flags", []):
-            # Deserialize targeting rules
-            targeting_rules = []
-            for r in raw.get("targeting_rules", []):
-                conditions = [
-                    PropertyCondition(
-                        attribute=c["attribute"],
-                        operator=c["operator"],
-                        values=c.get("values", []),
-                        negate=c.get("negate", False),
-                    )
-                    for c in r.get("conditions", [])
-                ]
-                targeting_rules.append(
-                    TargetingRule(
-                        id=r.get("id", ""),
-                        conditions=conditions,
-                        rollout_pct=float(r.get("rollout_pct", 100.0)),
-                        variation=r.get("variation", True),
-                    )
-                )
+            try:
+                flag_key = raw["flag_key"]
+            except (KeyError, TypeError):
+                logger.warning("Tombstone: skipping malformed flag entry in snapshot: %r", raw)
+                continue
 
-            new_cache[raw["flag_key"]] = FlagEnvironmentState(
-                flag_key=raw["flag_key"],
-                enabled=raw.get("enabled", False),
-                rollout_pct=float(raw.get("rollout_pct", 0.0)),
-                safe_default=raw.get("safe_default", False),
-                environment=payload.get("environment", self._environment),
-                targeting_rules=targeting_rules,
-                prerequisites=raw.get("prerequisites", []),
-            )
+            try:
+                # Deserialize targeting rules
+                targeting_rules = []
+                for r in raw.get("targeting_rules", []):
+                    conditions = [
+                        PropertyCondition(
+                            attribute=c["attribute"],
+                            operator=c["operator"],
+                            values=c.get("values", []),
+                            negate=c.get("negate", False),
+                        )
+                        for c in r.get("conditions", [])
+                    ]
+                    targeting_rules.append(
+                        TargetingRule(
+                            id=r.get("id", ""),
+                            conditions=conditions,
+                            rollout_pct=float(r.get("rollout_pct", 100.0)),
+                            variation=r.get("variation", True),
+                        )
+                    )
+
+                new_cache[flag_key] = FlagEnvironmentState(
+                    flag_key=flag_key,
+                    enabled=raw.get("enabled", False),
+                    rollout_pct=float(raw.get("rollout_pct", 0.0)),
+                    safe_default=raw.get("safe_default", False),
+                    environment=payload.get("environment", self._environment),
+                    targeting_rules=targeting_rules,
+                    prerequisites=raw.get("prerequisites", []),
+                )
+            except Exception as exc:
+                logger.warning("Tombstone: failed to deserialize flag '%s': %s", flag_key, exc)
 
         with self._lock:
             self._cache = new_cache
