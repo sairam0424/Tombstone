@@ -1,0 +1,31 @@
+apiVersion: image.toolkit.fluxcd.io/v1beta1
+kind: ImageUpdateAutomation
+metadata:
+  name: tombstone-image-updater
+  namespace: flux-system
+spec:
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: tombstone
+    namespace: flux-system
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        email: flux@tombstone.dev
+        name: Flux Image Updater
+      messageTemplate: |
+        chore(infra): update image tags to latest
+
+        Updated by Flux ImageUpdateAutomation from ghcr.io/sairam0424/tombstone-*
+        {{range .Updated.Images}}
+        - {{.Name}}: {{.NewTag}}
+        {{end}}
+    push:
+      branch: main
+  update:
+    path: ./gitops/apps/production
+    strategy: Setters
