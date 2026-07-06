@@ -12,6 +12,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Added
 - **Flux CD v2.3+ GitOps integration** (`gitops/`): infrastructure/apps/flags Kustomization layers with `dependsOn` + `healthChecks` guaranteeing CRD-before-CR ordering. tombstone-operator HelmRelease uses `spec.install.crds: CreateReplace` to enable CRD schema upgrades. ImageUpdateAutomation covers all 8 `ghcr.io/sairam0424/tombstone-*` images with semver policies. Staging overlay sets `IS_PRIMARY_REGION=false`. Flag definitions (`gitops/flags/`) are now GitOps-managed FeatureFlag CRs.
 - `flux-bootstrap.yml` GitHub Actions workflow for one-command cluster bootstrap.
+- **Argo CD v2.11 GitOps provider** (`gitops/providers/argocd/`, `gitops/providers/both/`): split-responsibility dual-controller deployment. Flux retains infrastructure (operator CRDs, ImageUpdateAutomation). Argo CD manages flagmind chart + FeatureFlag/FlagPolicy CRs with ignoreDifferences + RespectIgnoreDifferences=true protecting ML rolloutPct mutations.
+- **Argo CD Lua health checks** for Tombstone CRDs: FeatureFlag (Pending->Progressing, Synced->Healthy, Error->Degraded), FlagPolicy (Compliant->Healthy, Violation->Degraded), FlagEnvironment. App-of-Apps health rollup restored (removed in Argo CD v1.8).
+- **Argo Rollouts v1.7 + blast-radius AnalysisTemplate** (`tombstone-blast-radius`): canary analysis polling `GET /api/v1/blast-radius?flag_key=<key>` on evaluator — promotes on LOW/MEDIUM, aborts on HIGH/BLOCKED.
+- **Argo CD Notifications -> marketplace Slack**: sync-failed events routed through `marketplace.tombstone.svc:8086/api/v1/marketplace/slack/actions` — no duplicate Slack webhook.
+- `argocd-bootstrap.yml` GitHub Actions workflow: installs Argo CD after Flux bootstrap, with provider selection (argocd|both).
+- `gitops/providers/` Kustomize overlay pattern: deploy-time GitOps provider selection with no runtime CRD (avoids circular operator bootstrap dependency).
 
 ### Changed
 - `docker-publish.yml`: gitops-sync image removed from publish matrix — deprecated in favour of tombstone-operator FeatureFlagReconciler.
