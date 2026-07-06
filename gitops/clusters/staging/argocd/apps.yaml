@@ -1,0 +1,61 @@
+# gitops/clusters/staging/argocd/apps.yaml
+# Staging: same structure but targetRevision=develop, namespace differences.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tombstone-app
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sairam0424/Tombstone
+    targetRevision: develop
+    path: gitops/apps/staging
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tombstone
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: tombstone.io
+      kind: FeatureFlag
+      jsonPointers:
+        - /spec/environments/production/rolloutPct
+        - /spec/environments/staging/rolloutPct
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tombstone-flags
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sairam0424/Tombstone
+    targetRevision: develop
+    path: gitops/flags/overlays/staging
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tombstone
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: tombstone.io
+      kind: FeatureFlag
+      jsonPointers:
+        - /spec/environments/production/rolloutPct
+        - /spec/environments/staging/rolloutPct

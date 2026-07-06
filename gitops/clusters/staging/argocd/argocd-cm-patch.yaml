@@ -1,0 +1,113 @@
+# gitops/clusters/production/argocd/argocd-cm-patch.yaml
+# Patches argocd-cm to add:
+# 1. Lua health checks for Tombstone's custom CRDs (tombstone.io/v1alpha1)
+# 2. Restore App-of-Apps health rollup (removed in Argo CD v1.8, must be manually restored)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  # Restore Application health rollup -- removed in Argo CD v1.8 (issue #3781).
+  # Without this, the parent App-of-Apps never becomes Healthy even when all children are.
+  resource.customizations.health.argoproj.io_Application: |
+    hs = {}
+    hs.status = "Progressing"
+    hs.message = ""
+    if obj.status ~= nil then
+      if obj.status.health ~= nil then
+        hs.status = obj.status.health.status
+        if obj.status.health.message ~= nil then
+          hs.message = obj.status.health.message
+        end
+      end
+    end
+    return hs
+
+  # FeatureFlag health check.
+  # Maps Tombstone's phase values to Argo CD health states:
+  #   Pending  -> Progressing (reconcile in progress)
+  #   Synced   -> Healthy     (mirrored to flag-api successfully)
+  #   Error    -> Degraded    (sync failed, requires intervention)
+  resource.customizations.health.tombstone.io_FeatureFlag: |
+    hs = {}
+    if obj.status == nil or obj.status.phase == nil then
+      hs.status = "Progressing"
+      hs.message = "Awaiting first reconcile"
+      return hs
+    end
+    phase = obj.status.phase
+    if phase == "Synced" then
+      hs.status = "Healthy"
+      hs.message = "Flag synced to flag-api"
+    elseif phase == "Pending" then
+      hs.status = "Progressing"
+      hs.message = "Reconcile in progress"
+    elseif phase == "Error" then
+      hs.status = "Degraded"
+      if obj.status.conditions ~= nil then
+        for i, c in ipairs(obj.status.conditions) do
+          if c.type == "Synced" and c.status == "False" then
+            hs.message = c.message
+            break
+          end
+        end
+      end
+      if hs.message == "" then hs.message = "Sync error -- check flag-api" end
+    else
+      hs.status = "Unknown"
+      hs.message = "Unrecognized phase: " .. phase
+    end
+    return hs
+
+  # FlagPolicy health check.
+  # Maps Tombstone's policy phase values to Argo CD health states:
+  #   Compliant -> Healthy    (all flags within policy bounds)
+  #   Violation -> Degraded   (flags violating policy)
+  #   Error     -> Degraded   (evaluation failed)
+  resource.customizations.health.tombstone.io_FlagPolicy: |
+    hs = {}
+    if obj.status == nil or obj.status.phase == nil then
+      hs.status = "Progressing"
+      hs.message = "Awaiting first evaluation"
+      return hs
+    end
+    phase = obj.status.phase
+    if phase == "Compliant" then
+      hs.status = "Healthy"
+      hs.message = "All flags within policy bounds"
+    elseif phase == "Violation" then
+      hs.status = "Degraded"
+      local flags = ""
+      if obj.status.violatingFlags ~= nil then
+        flags = table.concat(obj.status.violatingFlags, ", ")
+      end
+      hs.message = "Policy violated by: " .. flags
+    elseif phase == "Error" then
+      hs.status = "Degraded"
+      hs.message = "Policy evaluation error"
+    else
+      hs.status = "Unknown"
+      hs.message = "Unrecognized phase: " .. phase
+    end
+    return hs
+
+  # FlagEnvironment health check.
+  resource.customizations.health.tombstone.io_FlagEnvironment: |
+    hs = {}
+    if obj.status == nil or obj.status.phase == nil then
+      hs.status = "Progressing"
+      hs.message = "Awaiting first reconcile"
+      return hs
+    end
+    if obj.status.phase == "Synced" then
+      hs.status = "Healthy"
+      hs.message = "Environment synced"
+    elseif obj.status.phase == "Pending" then
+      hs.status = "Progressing"
+      hs.message = "Reconcile in progress"
+    else
+      hs.status = "Degraded"
+      hs.message = "Sync error"
+    end
+    return hs

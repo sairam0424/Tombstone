@@ -1,0 +1,44 @@
+# gitops/apps/production/tombstone/rollout-analysis.yaml
+# Example Argo Rollout for flag-api using tombstone-blast-radius AnalysisTemplate.
+# This replaces the Deployment for flag-api when Argo Rollouts is active.
+# The canary step polls blast-radius before promoting to 100%.
+#
+# NOTE: This file is included by the argocd provider only. The Flux provider
+# continues to use the standard Deployment via the flagmind Helm chart.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: tombstone-flag-api-rollout
+  namespace: tombstone
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tombstone
+      app.kubernetes.io/component: flag-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tombstone
+        app.kubernetes.io/component: flag-api
+    spec:
+      containers:
+        - name: flag-api
+          image: ghcr.io/sairam0424/tombstone-flag-api:v1.3.0
+          ports:
+            - name: http
+              containerPort: 8081
+  strategy:
+    canary:
+      # Step 1: send 20% traffic to canary
+      # Step 2: run blast-radius analysis — abort if HIGH/BLOCKED
+      # Step 3: promote to 100%
+      steps:
+        - setWeight: 20
+        - analysis:
+            templates:
+              - templateName: tombstone-blast-radius
+            args:
+              - name: flag-key
+                value: "flag-api-deployment"
+        - setWeight: 100

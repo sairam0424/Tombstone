@@ -1,0 +1,71 @@
+# .github/workflows/argocd-bootstrap.yml
+# Installs Argo CD on a cluster after Flux bootstrap has installed tombstone-operator.
+# Run AFTER flux-bootstrap.yml — Flux must install tombstone-operator CRDs first.
+name: Argo CD Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: 'Target cluster (production|staging)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      provider:
+        description: 'GitOps provider (argocd|both)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - argocd
+          - both
+
+jobs:
+  bootstrap:
+    name: Bootstrap Argo CD (${{ inputs.cluster }}, provider=${{ inputs.provider }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.cluster }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@3e0aec4d80787158d308d7b364cb1381784a5f79 # v4
+
+      - name: Set up kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_B64}" | base64 --decode > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify Flux infrastructure is ready (tombstone-operator must be installed first)
+        run: |
+          kubectl wait kustomization/tombstone-infrastructure \
+            -n flux-system \
+            --for=condition=Ready \
+            --timeout=5m
+
+      - name: Apply Argo CD provider manifests
+        env:
+          CLUSTER: ${{ inputs.cluster }}
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          kubectl apply -k "gitops/providers/${PROVIDER}/"
+
+      - name: Wait for Argo CD to be ready
+        run: |
+          kubectl wait deployment/argocd-server \
+            -n argocd \
+            --for=condition=Available \
+            --timeout=5m
+
+      - name: Verify tombstone-app Application syncs
+        run: |
+          kubectl wait application/tombstone-app \
+            -n argocd \
+            --for=condition=Synced \
+            --timeout=10m

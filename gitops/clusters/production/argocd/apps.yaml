@@ -1,0 +1,101 @@
+# gitops/clusters/production/argocd/apps.yaml
+# App-of-Apps pattern: root Application manages tombstone-app and tombstone-flags.
+# Sync waves ensure tombstone-app (Helm chart) deploys before tombstone-flags (CRs).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tombstone-root
+  namespace: argocd
+  # App-of-Apps: manages all Tombstone Argo CD Applications.
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sairam0424/Tombstone
+    targetRevision: main
+    path: gitops/clusters/production/argocd
+    directory:
+      include: "apps-children.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# tombstone-app: owns the flagmind Helm chart (5 services).
+# Sync wave 1: deploys after tombstone-operator (managed by Flux, wave -1 conceptually).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tombstone-app
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sairam0424/Tombstone
+    targetRevision: main
+    path: gitops/apps/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tombstone
+  syncPolicy:
+    automated:
+      prune: true
+      # selfHeal=true: Argo CD will revert drift.
+      # PROTECTED: rolloutPct fields are excluded via ignoreDifferences + RespectIgnoreDifferences.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+  # CRITICAL: ignoreDifferences suppresses OutOfSync display for ML-managed fields.
+  # RespectIgnoreDifferences=true (in syncOptions above) prevents overwrite during sync.
+  # Without BOTH, rolloutPct is overwritten to Git value on every reconcile.
+  ignoreDifferences:
+    - group: tombstone.io
+      kind: FeatureFlag
+      jsonPointers:
+        - /spec/environments/production/rolloutPct
+        - /spec/environments/staging/rolloutPct
+    - group: tombstone.io
+      kind: FlagEnvironment
+      jsonPointers:
+        - /spec/defaultRolloutPct
+---
+# tombstone-flags: owns FeatureFlag + FlagPolicy CRs.
+# Sync wave 2: CRs applied after flagmind chart (tombstone-operator must be running).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tombstone-flags
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/sairam0424/Tombstone
+    targetRevision: main
+    path: gitops/flags/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tombstone
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: tombstone.io
+      kind: FeatureFlag
+      jsonPointers:
+        - /spec/environments/production/rolloutPct
+        - /spec/environments/staging/rolloutPct
