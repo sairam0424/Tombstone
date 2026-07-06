@@ -1,0 +1,16 @@
+# Kustomize strategic merge patch — only overrides fields that differ from production.
+# IS_PRIMARY_REGION=false: intelligence service runs in read-only replica mode.
+# replicaCount=1: staging uses single replicas to reduce resource use.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tombstone
+  namespace: tombstone
+spec:
+  values:
+    replicaCount: 1
+    intelligence:
+      isPrimaryRegion: "false"
+    evaluator:
+      autoscaling:
+        enabled: false
