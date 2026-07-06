@@ -1,0 +1,5 @@
+# This GitRepository is already defined in clusters/production/flux-system/gotk-sync.yaml.
+# This file documents the dependency — image-automation reads from the same source.
+# No additional manifest needed; ImageUpdateAutomation.spec.sourceRef references
+# the existing GitRepository named 'tombstone' in namespace 'flux-system'.
+# File kept as documentation only.

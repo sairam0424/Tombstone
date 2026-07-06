@@ -3,3 +3,5 @@ kind: Kustomization
 resources:
   - tombstone-operator/helmrepository.yaml
   - tombstone-operator/helmrelease.yaml
+  - image-automation/policies.yaml
+  - image-automation/update-automation.yaml
