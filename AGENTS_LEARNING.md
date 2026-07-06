@@ -5,7 +5,18 @@ Update this file AFTER completing any task with new learnings.
 
 ## Lessons Learned
 
-*(empty — populate as work progresses)*
+## v1.3.0 Phase A — Helm Chart Completion (2026-07-06)
+- Helm Deployment `spec.selector.matchLabels` MUST use `tombstone.selectorLabels` (not `tombstone.labels`) — `tombstone.labels` contains `helm.sh/chart` which carries a version string, making the selector immutable across helm upgrades. This causes `helm upgrade` to fail with "selector is immutable". Always use `selectorLabels` in both `spec.selector.matchLabels` AND `spec.template.metadata.labels`.
+- HPA template should be gated by `.Values.<service>.autoscaling.enabled` — keeps it dormant in most environments (disabled by default) while allowing per-environment enablement via value overrides.
+- values.yaml for marketplace had port 8084, but CLAUDE.md documents marketplace at 8086 — the values.yaml was pre-existing and was not changed as the task only required adding autoscaling to the evaluator block. Future tasks should reconcile this discrepancy.
+- `helm lint` INFO about missing icon is harmless — `0 chart(s) failed` is the only gate that matters for CI.
+
+## v1.3.0 Phase A — Task A2: Intelligence Deployment template (2026-07-06)
+- Python FastAPI services need higher probe delays than Go services: `livenessProbe.initialDelaySeconds: 15` / `readinessProbe.initialDelaySeconds: 20` — Python cold-start (importing numpy, scikit-learn, etc.) is 3-5x slower than Go binary startup.
+- Liveness and readiness split: liveness hits `/health` (trivial, no dependency checks) while readiness hits `/readyz` (checks Postgres + Redis). This prevents restart storms — if Postgres is briefly unavailable, the pod stays Running (liveness OK) but stops receiving traffic (readiness fails), rather than being killed and restarted in a loop.
+- `terminationGracePeriodSeconds: 60` for Python (vs 30 for Go) — Python processes may hold open DB connections or in-flight ML inference tasks that need time to drain cleanly.
+- Extra `env:` block (not `envFrom:`) for `IS_PRIMARY_REGION` is correct — it's a per-deployment override from `values.yaml`, not a shared config map value. Using `env:` also allows per-cluster override via `--set intelligence.isPrimaryRegion=false` in helm commands.
+- COMPATIBILITY.md "Known Gap" section should be updated as the LAST step of chart completion, after all Deployment templates are verified — it documents the state of the entire chart, not just the current task.
 
 ## Common Pitfalls (pre-filled from architecture decisions)
 
@@ -112,6 +123,37 @@ Update this file AFTER completing any task with new learnings.
   (`if lock.locked(): return 409`) over blocking the request — there's a small unavoidable TOCTOU race
   between the `.locked()` check and actually acquiring the lock, but it's benign (worst case: an
   occasional missed 409, caller blocks briefly instead of fast-failing) — not worth over-engineering.
+
+## v1.3.0 Phase C — Task C1: Redoc interactive API explorer (2026-07-06)
+- `go-redoc` plan referenced `v0.0.7` and a chi sub-package (`github.com/mvrilo/go-redoc/chi`) — neither exists. The available versions are `v0.1.1`–`v0.1.5`; v0.1.5 only ships adapters for gin, fiber, and echo (not chi). **Fix**: use `goredoc.Redoc{SpecPath: specURL}` + `doc.Body()` to get the pre-rendered HTML, then wrap in a plain `http.HandlerFunc`. This gives identical behavior to any adapter — same embedded JS bundle, no CDN, serves the HTML.
+- `goredoc.Redoc.Handler()` panics if `SpecFile` is empty (it tries to read a local file). For a spec served at a URL, use `Body()` instead, which only needs `SpecPath` to populate the template URL — no filesystem access.
+- Docs routes MUST be registered BEFORE `r.Route("/api/v1", ...)` — chi routes are matched in registration order, and if the auth-gated group is registered first it will intercept `/api/v1/docs`. Register `r.Handle("/api/v1/docs", ...)` and `r.Handle("/api/v1/docs/*", ...)` directly on the root router.
+- `go-redoc` embeds `redoc.standalone.js` via `//go:embed` — no CDN call at runtime, making it suitable for air-gapped or restricted environments.
+
+## v1.3.0 Phase B — Task B4: Snapshot deserialization + all_flags wiring (2026-07-06)
+- `_apply_snapshot` previously ignored `targeting_rules` and `prerequisites` from the API payload — flags were stored with empty lists. The fix iterates `raw.get("targeting_rules", [])` and constructs `TargetingRule(id, conditions=[PropertyCondition(...)], rollout_pct, variation)` objects; `prerequisites` is passed through as raw dicts (schema: `[{"flag_key": str, "required_value": bool}]`).
+- The evaluate method in `TombstoneClient` now takes a shallow copy of `self._cache` under the lock (`all_flags = dict(self._cache)`) and passes it along with a fresh `evaluation_cache={}` to the `evaluate()` function — this enables the prerequisite pipeline (Step 2) to look up other flags from the same snapshot without needing any additional I/O.
+- Shallow copy `dict(self._cache)` is correct here: `FlagEnvironmentState` objects are not mutated anywhere, so sharing references is safe. The new dict only protects against the top-level `_cache` dict being replaced while evaluation is in progress.
+- Local imports inside `_apply_snapshot` (`from tombstone.types import ...`) keep the module-level import list clean and avoid circular import risk — `client.py` already imports `FlagEnvironmentState` at the top, but the targeted local import is also fine because Python caches module imports.
+- TDD: test failed with `AssertionError: assert 0 == 1` (prerequisites empty list), not an AttributeError — confirming the types already had the field (from B1) but the snapshot deserialization simply wasn't populating it. One targeted fix (replace `_apply_snapshot`) resolved both prerequisites and targeting_rules in one shot.
+
+## v1.3.0 Phase B — Task B3: 5-step evaluation pipeline (2026-07-06)
+- `evaluate()` signature extended with two optional kwargs: `all_flags: dict[str, FlagEnvironmentState] | None = None` and `evaluation_cache: dict[str, bool] | None = None`. Both default to `{}` on first call — existing callers passing only the 4 positional args continue to work unchanged.
+- `_check_prerequisites()` receives the `evaluation_cache` dict by reference and mutates it (adds entries). This is intentional — it's a memoization cache shared across a single top-level `evaluate()` call, preventing redundant re-evaluation of the same prerequisite flag (PostHog shipped pattern).
+- Prerequisite chain: if `dep_key` missing from `all_flags`, cache it as `False` and return False immediately — missing flag == unmet prerequisite. This is conservative/safe: a misconfigured prerequisite reference fails closed.
+- `_match_targeting_rules()` catches `InconclusiveMatchError` per rule and `continue`s to the next — missing attributes should not block evaluation of subsequent rules. Returning `None` from this function signals "no rule matched, continue to fallthrough".
+- Rule rollout: even within a matched targeting rule, users are bucketed via MurmurHash3 against `rule.rollout_pct` — this allows gradual rollout of a targeted variation (e.g. US users, but only 50% of them). Same hash formula as fallthrough: `mmh3.hash(flag_key + user_id, seed=0, signed=False) % 100`.
+- Pipeline order: preliminary (Step 1) → prerequisites (Step 2) → targeting rules (Step 3) → fallthrough rollout (Step 5). Step 4 is "rule matching fallthrough" in the TypeScript SDK but is handled inline in Step 3 here — functionally equivalent.
+- TDD confirmed: 5 of 6 tests failed before implementation (1 passed by coincidence — `test_targeting_rule_no_match_falls_through` already worked since fallthrough was implemented). All 6 pass after.
+
+## v1.3.0 Phase B — Task B2: match_property full operator surface (2026-07-06)
+- `_padded_version()` (GrowthBook pattern): strip leading `v` and build metadata (`+...`), split on `[-.]`, left-pad numeric segments to 5 chars with `rjust(5, " ")`, then append `"~"` as a 4th part for 3-part versions — this makes `1.0.0 > 1.0.0-beta` because `"~"` sorts after any lowercase alpha suffix. No external dependencies needed.
+- Pre-release ordering: `1.0.0-beta` → `["    1","    0","    0","beta"]` vs `1.0.0` → `["    1","    0","    0","~"]`. Python `"b" < "~"` is True, so the 4-element list comparison correctly resolves `1.0.0-beta < 1.0.0`.
+- All string operators (contains/startsWith/endsWith) should compare in uppercase (`.upper()`) — avoids locale-dependent `.lower()` issues with Turkish-i, ß, etc. The case-insensitive contract just needs consistency, not locale correctness.
+- Missing attribute MUST raise `InconclusiveMatchError` — never silently return False. Silent False would make "attribute not present" indistinguishable from "attribute present but no match", hiding misconfigured targeting rules.
+- Numeric operators: cast both sides to `float` — this handles integer values stored as strings (e.g. score="75") correctly for all comparisons including lt/lte/gt/gte.
+- Python `match` statement requires Python 3.10+ — confirmed this repo uses Python 3.12+ (pyproject.toml) so structural pattern matching is safe.
+- TDD red-green cycle: confirmed — `ModuleNotFoundError: No module named 'tombstone.matching'` before implementation, 22/22 new tests pass after, full suite 50/50.
 
 ## Phase 8 — Streams DLQ (2026-07-04)
 - `services/intelligence`'s `uv sync` still fails out of the box on the dead `pyod>=0.9.0` line (pulls `numba`/`llvmlite`, which reject Python 3.13). This is the SAME workaround already noted for the "intelligence-asyncio-hardening" branch: comment out the `pyod` line in `pyproject.toml`, `uv sync --all-packages`, run tests, then revert `pyproject.toml` (and do NOT commit the generated `uv.lock` — it wasn't tracked before and isn't part of this change). No new AGENTS_LEARNING entry was needed beyond this pointer since the prior phase already documents the root cause.

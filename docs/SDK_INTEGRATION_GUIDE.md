@@ -117,7 +117,7 @@ enabled = client.is_enabled("checkout-v2", {
 variant = client.get_variation("checkout-layout", "control", {"user_id": "user-123"})
 ```
 
-**Python SDK differences from TypeScript**: The Python SDK implements a simplified 3-step pipeline (preliminary → targeting → rollout) without prerequisites or full rule-matching. For applications that use prerequisite flags or complex targeting rules, use the TypeScript SDK. See `docs/SDK_CONTRACT.md` for the exact feature parity matrix.
+**Python SDK parity with TypeScript**: As of v0.2.0, the Python SDK implements the full 5-step evaluation pipeline including prerequisites and full targeting rule matching. See `docs/SDK_CONTRACT.md` for the feature parity matrix.
 
 ---
 
@@ -210,12 +210,7 @@ Never share the same `sdkKey` across production and staging. Each environment ha
 
 ### Python SDK feature parity
 
-The Python SDK does not implement:
-- Prerequisite flag evaluation (prerequisite flags are always treated as met)
-- Complex targeting rules (only simple rollout percentage is evaluated)
-- OpenFeature provider
-
-For full feature parity on Python services, call the flag-api REST API directly or use the TypeScript SDK via a sidecar.
+The Python SDK (v0.2.0+) implements the full 5-step evaluation pipeline with parity to the TypeScript SDK: prerequisites, targeting rules (all operators), and fallthrough rollout.
 
 ### Edge SDK requires Cloudflare KV binding
 
