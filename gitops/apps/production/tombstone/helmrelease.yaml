@@ -1,0 +1,66 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tombstone
+  namespace: tombstone
+spec:
+  interval: 15m
+  chart:
+    spec:
+      chart: ./infra/helm/flagmind
+      sourceRef:
+        kind: GitRepository
+        name: tombstone
+        namespace: flux-system
+      interval: 15m
+  install:
+    crds: Skip
+    remediation:
+      retries: 3
+  upgrade:
+    crds: Skip
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  # Ignore runtime-managed fields: rolloutPct is bumped by intelligence service
+  # (ML LinUCB) and circuit-breaker auto-rollback. Drift detection must not
+  # revert these intentional runtime mutations back to Git state.
+  ignore:
+    paths:
+      - /spec/environments/*/rolloutPct
+  valuesFrom:
+    - kind: Secret
+      name: tombstone-secrets
+      valuesKey: helm-values.yaml
+      optional: false
+  values:
+    replicaCount: 2
+    global:
+      imageRegistry: ghcr.io/sairam0424/
+      imagePullPolicy: IfNotPresent
+    flagApi:
+      enabled: true
+      image:
+        repository: tombstone-flag-api
+        tag: "v1.3.0" # {"$imagepolicy": "flux-system:tombstone-flag-api:tag"}
+    gateway:
+      enabled: true
+      image:
+        repository: tombstone-gateway
+        tag: "v1.3.0" # {"$imagepolicy": "flux-system:tombstone-gateway:tag"}
+    evaluator:
+      enabled: true
+      image:
+        repository: tombstone-evaluator
+        tag: "v1.3.0" # {"$imagepolicy": "flux-system:tombstone-evaluator:tag"}
+    intelligence:
+      enabled: true
+      isPrimaryRegion: "true"
+      image:
+        repository: tombstone-intelligence
+        tag: "v1.3.0" # {"$imagepolicy": "flux-system:tombstone-intelligence:tag"}
+    marketplace:
+      enabled: true
+      image:
+        repository: tombstone-marketplace
+        tag: "v1.3.0" # {"$imagepolicy": "flux-system:tombstone-marketplace:tag"}
