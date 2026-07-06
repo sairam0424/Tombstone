@@ -57,8 +57,13 @@ class TombstoneClient:
         try:
             with self._lock:
                 flag_state = self._cache.get(flag_key)
+                all_flags = dict(self._cache)  # shallow copy under lock
             default_value = self._defaults.get(flag_key, False)
-            return evaluate(flag_state, context, default_value, flag_key)
+            return evaluate(
+                flag_state, context, default_value, flag_key,
+                all_flags=all_flags,
+                evaluation_cache={},
+            )
         except Exception as exc:
             logger.error("Tombstone: evaluate error for %s: %s", flag_key, exc)
             return EvaluationResult(
@@ -84,17 +89,42 @@ class TombstoneClient:
         with self._lock:
             return list(self._cache.keys())
 
-    def _apply_snapshot(self, data: dict) -> None:
+    def _apply_snapshot(self, payload: dict) -> None:
+        from tombstone.types import FlagEnvironmentState, TargetingRule, PropertyCondition
+
         new_cache: dict[str, FlagEnvironmentState] = {}
-        for flag in data.get("flags", []):
-            state = FlagEnvironmentState(
-                flag_key=flag["flag_key"],
-                enabled=flag.get("enabled", False),
-                rollout_pct=float(flag.get("rollout_pct", 0)),
-                safe_default=flag.get("safe_default", False),
-                environment=flag.get("environment", self._environment),
+        for raw in payload.get("flags", []):
+            # Deserialize targeting rules
+            targeting_rules = []
+            for r in raw.get("targeting_rules", []):
+                conditions = [
+                    PropertyCondition(
+                        attribute=c["attribute"],
+                        operator=c["operator"],
+                        values=c.get("values", []),
+                        negate=c.get("negate", False),
+                    )
+                    for c in r.get("conditions", [])
+                ]
+                targeting_rules.append(
+                    TargetingRule(
+                        id=r.get("id", ""),
+                        conditions=conditions,
+                        rollout_pct=float(r.get("rollout_pct", 100.0)),
+                        variation=r.get("variation", True),
+                    )
+                )
+
+            new_cache[raw["flag_key"]] = FlagEnvironmentState(
+                flag_key=raw["flag_key"],
+                enabled=raw.get("enabled", False),
+                rollout_pct=float(raw.get("rollout_pct", 0.0)),
+                safe_default=raw.get("safe_default", False),
+                environment=payload.get("environment", self._environment),
+                targeting_rules=targeting_rules,
+                prerequisites=raw.get("prerequisites", []),
             )
-            new_cache[state.flag_key] = state
+
         with self._lock:
             self._cache = new_cache
 

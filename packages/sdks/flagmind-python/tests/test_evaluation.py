@@ -119,3 +119,43 @@ def test_flag_state_has_targeting_rules():
     )
     assert flag.targeting_rules == []
     assert flag.prerequisites == []
+
+
+def test_snapshot_deserialization_includes_targeting_rules():
+    """Client._apply_snapshot must populate targeting_rules and prerequisites."""
+    from tombstone.client import TombstoneClient
+    client = TombstoneClient(sdk_key="test", environment="prod")
+
+    snapshot_payload = {
+        "environment": "prod",
+        "flags": [
+            {
+                "flag_key": "my-flag",
+                "enabled": True,
+                "rollout_pct": 100.0,
+                "safe_default": False,
+                "prerequisites": [{"flag_key": "parent", "required_value": True}],
+                "targeting_rules": [
+                    {
+                        "id": "r1",
+                        "conditions": [
+                            {"attribute": "country", "operator": "eq", "values": ["US"], "negate": False}
+                        ],
+                        "rollout_pct": 100.0,
+                        "variation": True,
+                    }
+                ],
+            }
+        ],
+        "hash": "abc",
+        "ts": 1000,
+    }
+    client._apply_snapshot(snapshot_payload)
+
+    state = client._cache.get("my-flag")
+    assert state is not None
+    assert len(state.prerequisites) == 1
+    assert state.prerequisites[0]["flag_key"] == "parent"
+    assert len(state.targeting_rules) == 1
+    assert state.targeting_rules[0].id == "r1"
+    assert state.targeting_rules[0].conditions[0].attribute == "country"
