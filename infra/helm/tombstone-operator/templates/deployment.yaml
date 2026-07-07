@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tombstone-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tombstone-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tombstone-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tombstone-operator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tombstone-operator.fullname" . }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --leader-elect={{ .Values.leaderElect }}
+            - --metrics-bind-address=:8088
+            - --health-probe-bind-address=:8089
+          env:
+            - name: TOMBSTONE_API_URL
+              value: {{ .Values.tombstone.apiUrl | quote }}
+            - name: TOMBSTONE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tombstone.apiToken.secretName }}
+                  key: {{ .Values.tombstone.apiToken.secretKey }}
+          ports:
+            - name: metrics
+              containerPort: 8088
+              protocol: TCP
+            - name: health
+              containerPort: 8089
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8089
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8089
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
