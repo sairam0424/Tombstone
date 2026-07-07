@@ -1,12 +1,18 @@
 # gitops/clusters/staging/argocd/kustomization.yaml
 # Staging uses the same Argo CD install manifest and patches as production.
 # Patch files referenced from production overlay -- same health checks and params.
+# NOTE: argocd-cm-patch.yaml and argocd-cmd-params-cm-patch.yaml are intentional
+# copies of gitops/clusters/production/argocd/ — kustomize security model prevents
+# cross-directory patch file references (../production/argocd/*.yaml is rejected).
+# Keep these in sync manually when updating Lua health checks or operator config.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: argocd
 resources:
   - namespace.yaml
   - argocd-install-v2.11.0.yaml
+  - argo-rollouts-install-v1.7.0.yaml
+  - rollouts.yaml
 patches:
   - path: argocd-cm-patch.yaml
     target:

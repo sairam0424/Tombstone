@@ -21,7 +21,7 @@ from tombstone.types import EvaluationContext, PropertyCondition
 _SEMVER_OPS = {"semver_gt", "semver_gte", "semver_lt", "semver_lte", "semver_eq"}
 _NUMERIC_OPS = {"gt", "gte", "lt", "lte"}
 _DATE_OPS = {"date_before", "date_after"}
-_STRING_OPS = {"contains", "startsWith", "endsWith"}
+_STRING_OPS = {"contains", "startswith", "endswith"}
 
 
 def _padded_version(v: str) -> str:
@@ -62,7 +62,14 @@ def match_property(condition: PropertyCondition, context: EvaluationContext) -> 
     (e.g. cohort membership checks that need server data).
     """
     attr_val = _get_attr(condition, context)
-    op = condition.operator
+    op = condition.operator.lower()
+    # Normalize wire-format aliases to SDK operator names
+    _OP_ALIASES = {
+        "not_in": "nin", "prefix": "startswith", "suffix": "endswith",
+        "semver_gte": "semver_gte", "semver_lte": "semver_lte",
+        "date_before": "date_before", "date_after": "date_after",
+    }
+    op = _OP_ALIASES.get(op, op)
     values = condition.values  # always a list
 
     result: bool
@@ -87,9 +94,9 @@ def match_property(condition: PropertyCondition, context: EvaluationContext) -> 
         match op:
             case "contains":
                 result = any(v in low_attr for v in low_vals)
-            case "startsWith":
+            case "startswith":
                 result = any(low_attr.startswith(v) for v in low_vals)
-            case "endsWith":
+            case "endswith":
                 result = any(low_attr.endswith(v) for v in low_vals)
             case _:
                 result = False

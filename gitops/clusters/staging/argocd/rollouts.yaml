@@ -1,0 +1,48 @@
+# gitops/clusters/production/argocd/rollouts.yaml
+# Argo Rollouts v1.7 installation + blast-radius canary AnalysisTemplate.
+---
+# Install Argo Rollouts controller in argo-rollouts namespace.
+# Vendor this file for production:
+# curl -sL https://github.com/argoproj/argo-rollouts/releases/download/v1.7.0/install.yaml \
+#   -o gitops/clusters/production/argocd/argo-rollouts-install-v1.7.0.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-rollouts
+---
+# AnalysisTemplate: polls Tombstone blast-radius endpoint as canary gate.
+# Usage: reference this template in a Rollout spec.analysis.templates[].
+# The canary pod will be promoted only if blast-radius returns LOW or MEDIUM.
+# HIGH or BLOCKED risk causes the analysis to fail and the rollout to abort.
+#
+# Wire to a Rollout with:
+#   spec:
+#     analysis:
+#       templates:
+#         - templateName: tombstone-blast-radius
+#       args:
+#         - name: flag-key
+#           value: "checkout-v2"
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: tombstone-blast-radius
+  namespace: tombstone
+spec:
+  args:
+    - name: flag-key
+  metrics:
+    - name: blast-radius-gate
+      # Poll blast-radius endpoint every 30 seconds for 5 minutes max.
+      interval: 30s
+      count: 10
+      # Fail if HIGH or BLOCKED. LOW and MEDIUM allow promotion.
+      successCondition: result.risk_score == "LOW" || result.risk_score == "MEDIUM"
+      failureCondition: result.risk_score == "HIGH" || result.risk_score == "BLOCKED"
+      failureLimit: 1
+      provider:
+        web:
+          # GET is the default — no body needed since flag_key is in the URL.
+          url: "http://evaluator.tombstone.svc.cluster.local:8082/api/v1/blast-radius?flag_key={{args.flag-key}}"
+          timeoutSeconds: 10
+          jsonPath: "{$}"

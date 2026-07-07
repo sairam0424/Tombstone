@@ -24,6 +24,18 @@ from tombstone.types import (
 
 logger = logging.getLogger(__name__)
 
+FNV_OFFSET = 2166136261
+FNV_PRIME = 16777619
+
+
+def _fnv1a_32_bucket(key: str) -> int:
+    """FNV-1a 32-bit hash → bucket [0, 100). Mirrors TypeScript hashVersion=2 implementation."""
+    h = FNV_OFFSET
+    for c in key.encode("utf-8"):
+        h ^= c
+        h = (h * FNV_PRIME) & 0xFFFFFFFF
+    return h % 100
+
 
 def _check_prerequisites(
     flag_state: FlagEnvironmentState,
@@ -31,18 +43,30 @@ def _check_prerequisites(
     all_flags: dict[str, FlagEnvironmentState],
     evaluation_cache: dict[str, bool],
     flag_key: str,
+    seen_keys: set[str] | None = None,
 ) -> bool:
     """Return True if all prerequisites are satisfied, False otherwise.
 
     Uses evaluation_cache to memoize results — each dependent flag is
     evaluated at most once per top-level call (PostHog shipped pattern).
+    seen_keys tracks the current dependency chain to detect and break cycles.
     """
+    if seen_keys is None:
+        seen_keys = set()
+    seen_keys = seen_keys | {flag_key}  # immutable update — don't mutate caller's set
+
     for prereq in flag_state.prerequisites:
         dep_key = prereq.get("flag_key", "")
         required = prereq.get("required_value", True)
 
         if dep_key in evaluation_cache:
             dep_result = evaluation_cache[dep_key]
+        elif dep_key in seen_keys:
+            # Cycle detected — fail-open (skip this prereq, treat as satisfied)
+            logger.debug(
+                "Circular prerequisite detected: '%s' already in chain %s", dep_key, seen_keys
+            )
+            continue
         else:
             dep_flag = all_flags.get(dep_key)
             if dep_flag is None:
@@ -54,6 +78,7 @@ def _check_prerequisites(
                     dep_flag, context, False, dep_key,
                     all_flags=all_flags,
                     evaluation_cache=evaluation_cache,
+                    _seen_keys=seen_keys,
                 )
                 dep_result = bool(dep_eval.value)
                 evaluation_cache[dep_key] = dep_result
@@ -100,6 +125,7 @@ def evaluate(
     flag_key: str,
     all_flags: dict[str, FlagEnvironmentState] | None = None,
     evaluation_cache: dict[str, bool] | None = None,
+    _seen_keys: set[str] | None = None,
 ) -> EvaluationResult:
     """5-step evaluation pipeline.
 
@@ -108,6 +134,7 @@ def evaluate(
                don't need prerequisite support).
     evaluation_cache: mutable dict passed through recursive prerequisite
                       calls to prevent redundant re-evaluation.
+    _seen_keys: internal — tracks the current prerequisite chain for cycle detection.
     """
     # Initialise cache on first call
     if evaluation_cache is None:
@@ -129,7 +156,8 @@ def evaluate(
     # ── Step 2: Prerequisites ─────────────────────────────────────────────────
     if flag_state.prerequisites:
         prereqs_met = _check_prerequisites(
-            flag_state, context, all_flags, evaluation_cache, flag_key
+            flag_state, context, all_flags, evaluation_cache, flag_key,
+            seen_keys=_seen_keys,
         )
         if not prereqs_met:
             return EvaluationResult(
@@ -139,13 +167,20 @@ def evaluate(
                 flag_key=flag_key,
             )
 
-    # ── Step 3: Individual targeting rules ────────────────────────────────────
+    # ── Step 3: Individual targeting — explicit target list ───────────────────
+    if flag_state.target_list and context.user_id in flag_state.target_list:
+        return EvaluationResult(
+            value=True, reason="TARGET_MATCH", from_cache=True, flag_key=flag_key
+        )
+
+    # ── Step 4: Targeting rules (sorted by priority ascending, 0 = highest) ──
     if flag_state.targeting_rules:
-        rule_result = _match_targeting_rules(flag_state.targeting_rules, context, flag_key)
+        sorted_rules = sorted(flag_state.targeting_rules, key=lambda r: r.priority)
+        rule_result = _match_targeting_rules(sorted_rules, context, flag_key)
         if rule_result is not None:
             return rule_result
 
-    # ── Step 5: Fallthrough rollout (MurmurHash3) ─────────────────────────────
+    # ── Step 5: Fallthrough rollout ───────────────────────────────────────────
     if flag_state.rollout_pct >= 100:
         return EvaluationResult(
             value=True, reason="FALLTHROUGH", from_cache=True, flag_key=flag_key
@@ -156,7 +191,10 @@ def evaluate(
             value=default_value, reason="FALLTHROUGH", from_cache=True, flag_key=flag_key
         )
 
-    bucket = mmh3.hash(flag_key + context.user_id, seed=0, signed=False) % 100
+    if flag_state.hash_version == 2:
+        bucket = _fnv1a_32_bucket(flag_key + context.user_id)
+    else:
+        bucket = mmh3.hash(flag_key + context.user_id, seed=0, signed=False) % 100
     in_rollout = bucket < flag_state.rollout_pct
 
     return EvaluationResult(

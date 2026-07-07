@@ -45,6 +45,13 @@ data:
   # Default subscriptions: watch all apps
   defaultTriggers: |
     - on-sync-failed
+
+  # Subscriptions: enable notifications for all apps via tombstone-marketplace
+  subscriptions: |
+    - recipients:
+        - tombstone-marketplace
+      triggers:
+        - on-sync-failed
 ---
 # argocd-notifications-secret: marketplace API token
 # In production, populate via --set-string or ExternalSecrets operator.
@@ -55,6 +62,8 @@ metadata:
   namespace: argocd
 type: Opaque
 stringData:
-  # Set via: kubectl create secret generic argocd-notifications-secret \
-  #   --from-literal=tombstone-marketplace-token=$FLAG_API_TOKEN -n argocd
+  # Run this after Argo CD bootstrap:
+  # kubectl create secret generic argocd-notifications-secret \
+  #   --from-literal=tombstone-marketplace-token=$(kubectl get secret tombstone-secrets -n tombstone -o jsonpath='{.data.FLAG_API_TOKEN}' | base64 --decode) \
+  #   -n argocd --dry-run=client -o yaml | kubectl apply -f -
   tombstone-marketplace-token: ""

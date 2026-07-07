@@ -17,6 +17,10 @@ def _flag(
     rollout_pct: float = 100.0,
     safe_default: object = False,
     environment: str = "production",
+    targeting_rules=None,
+    prerequisites=None,
+    hash_version: int = 1,
+    target_list=None,
 ) -> FlagEnvironmentState:
     return FlagEnvironmentState(
         flag_key=flag_key,
@@ -24,6 +28,10 @@ def _flag(
         rollout_pct=rollout_pct,
         safe_default=safe_default,
         environment=environment,
+        targeting_rules=targeting_rules or [],
+        prerequisites=prerequisites or [],
+        hash_version=hash_version,
+        target_list=target_list or [],
     )
 
 
@@ -159,3 +167,66 @@ def test_snapshot_deserialization_includes_targeting_rules():
     assert len(state.targeting_rules) == 1
     assert state.targeting_rules[0].id == "r1"
     assert state.targeting_rules[0].conditions[0].attribute == "country"
+
+
+# ── V-6: TARGET_MATCH ────────────────────────────────────────────────────────
+
+def test_target_list_match_returns_target_match():
+    flag = _flag("f", target_list=["user-vip", "user-beta"])
+    result = evaluate(flag, EvaluationContext(user_id="user-vip"), False, "f")
+    assert result.reason == "TARGET_MATCH"
+    assert result.value is True
+
+
+def test_target_list_miss_falls_through():
+    flag = _flag("f", target_list=["user-vip"])
+    result = evaluate(flag, EvaluationContext(user_id="user-regular"), False, "f")
+    assert result.reason == "FALLTHROUGH"
+
+
+# ── V-6: hashVersion=2 FNV-1a ────────────────────────────────────────────────
+
+def test_hash_version_2_fnv_stickiness():
+    flag = _flag("f", rollout_pct=50.0, hash_version=2)
+    ctx = EvaluationContext(user_id="sticky-user-42")
+    first = evaluate(flag, ctx, False, "f")
+    for _ in range(10):
+        assert evaluate(flag, ctx, False, "f").value == first.value
+
+
+# ── V-7: Rule priority ordering ──────────────────────────────────────────────
+
+def test_rule_priority_ordering():
+    # Lower priority number = higher priority. Rule with priority=0 should match first.
+    flag = _flag(
+        "f",
+        targeting_rules=[
+            TargetingRule(
+                id="r2",
+                conditions=[PropertyCondition("country", "eq", ["US"], False)],
+                rollout_pct=100.0,
+                variation="second",
+                priority=1,
+            ),
+            TargetingRule(
+                id="r1",
+                conditions=[PropertyCondition("country", "eq", ["US"], False)],
+                rollout_pct=100.0,
+                variation="first",
+                priority=0,
+            ),
+        ],
+    )
+    result = evaluate(flag, EvaluationContext(user_id="u", attrs={"country": "US"}), False, "f")
+    assert result.value == "first"
+
+
+# ── V-7: Circular prerequisite guard ─────────────────────────────────────────
+
+def test_circular_prerequisite_does_not_recurse_infinitely():
+    a = _flag("a", prerequisites=[{"flag_key": "b", "required_value": True}])
+    b = _flag("b", prerequisites=[{"flag_key": "a", "required_value": True}])
+    all_flags = {"a": a, "b": b}
+    # Should not raise RecursionError
+    result = evaluate(a, EvaluationContext(user_id="u"), False, "a", all_flags=all_flags)
+    assert result.reason in ("PREREQUISITE_FAILED", "FALLTHROUGH", "ERROR")

@@ -34,6 +34,7 @@ class TargetingRule:
     conditions: list[PropertyCondition]
     rollout_pct: float
     variation: object  # the value to return when this rule matches
+    priority: int = 0
 
 
 @dataclass
@@ -46,6 +47,8 @@ class FlagEnvironmentState:
     targeting_rules: list[TargetingRule] = field(default_factory=list)
     prerequisites: list[dict] = field(default_factory=list)
     # prerequisites schema: [{"flag_key": str, "required_value": bool}]
+    hash_version: int = 1
+    target_list: list = field(default_factory=list)
 
 
 @dataclass
