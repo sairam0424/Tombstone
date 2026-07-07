@@ -1,0 +1,29 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/sairam0424/tombstone-operator
+  tag: v1.4.1
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+tombstone:
+  apiUrl: http://flag-api.tombstone.svc.cluster.local:8081
+  apiToken:
+    secretName: tombstone-secrets
+    secretKey: FLAG_API_TOKEN
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+leaderElect: false
