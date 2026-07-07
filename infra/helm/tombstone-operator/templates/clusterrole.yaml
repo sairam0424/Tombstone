@@ -1,0 +1,63 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tombstone-operator.fullname" . }}-manager-role
+  labels:
+    {{- include "tombstone-operator.labels" . | nindent 4 }}
+rules:
+  # Tombstone CRDs — full CRUD
+  - apiGroups:
+      - tombstone.io
+    resources:
+      - featureflags
+      - flaginvironments
+      - flagpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Tombstone CRD status subresources
+  - apiGroups:
+      - tombstone.io
+    resources:
+      - featureflags/status
+      - flaginvironments/status
+      - flagpolicies/status
+    verbs:
+      - get
+      - update
+      - patch
+  # Tombstone CRD finalizers
+  - apiGroups:
+      - tombstone.io
+    resources:
+      - featureflags/finalizers
+      - flaginvironments/finalizers
+      - flagpolicies/finalizers
+    verbs:
+      - update
+  # Core events — observability
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # Leases — leader election
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
