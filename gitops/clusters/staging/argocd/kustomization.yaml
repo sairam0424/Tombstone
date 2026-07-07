@@ -5,6 +5,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - argocd-install-v2.11.0.yaml
+  - argo-rollouts-install-v1.7.0.yaml
+  - rollouts.yaml
 patches:
   - path: argocd-cm-patch.yaml
     target:
