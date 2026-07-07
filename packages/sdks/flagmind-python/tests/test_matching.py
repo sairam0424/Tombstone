@@ -86,6 +86,18 @@ def test_semver_pre_release_less_than_release():
     assert match_property(_cond("app_version", "semver_lt", ["1.0.0"]), _ctx(app_version="1.0.0-beta")) is True
 
 
+# ── UPPERCASE / wire-format operator normalization ────────────────────────────
+
+def test_uppercase_operator_eq():
+    assert match_property(_cond("country", "EQ", ["US"]), _ctx(country="US")) is True
+
+def test_prefix_alias_for_startswith():
+    assert match_property(_cond("role", "PREFIX", ["admin"]), _ctx(role="admin_eu")) is True
+
+def test_suffix_alias_for_endswith():
+    assert match_property(_cond("email", "SUFFIX", [".io"]), _ctx(email="bob@acme.io")) is True
+
+
 # ── missing attribute ─────────────────────────────────────────────────────────
 
 def test_missing_attribute_raises_inconclusive():
