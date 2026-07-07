@@ -5,3 +5,4 @@ resources:
   - tombstone-operator/helmrelease.yaml
   - image-automation/policies.yaml
   - image-automation/update-automation.yaml
+  - ghcr-pull-secret.yaml
