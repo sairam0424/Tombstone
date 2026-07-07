@@ -9,6 +9,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+---
+
+## [1.4.2] - 2026-07-07
+
 ### Added
 - **Flux CD v2.3+ GitOps integration** (`gitops/`): infrastructure/apps/flags Kustomization layers with `dependsOn` + `healthChecks` guaranteeing CRD-before-CR ordering. tombstone-operator HelmRelease uses `spec.install.crds: CreateReplace` to enable CRD schema upgrades. ImageUpdateAutomation covers all 8 `ghcr.io/sairam0424/tombstone-*` images with semver policies. Staging overlay sets `IS_PRIMARY_REGION=false`. Flag definitions (`gitops/flags/`) are now GitOps-managed FeatureFlag CRs.
 - `flux-bootstrap.yml` GitHub Actions workflow for one-command cluster bootstrap.
