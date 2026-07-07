@@ -24,22 +24,22 @@ jobs:
           - path: services/flag-api
             name: tombstone-flag-api
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Install syft (SBOM generator)
-        uses: anchore/sbom-action/download-syft@v0
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
 
       - name: Generate SBOM (CycloneDX)
         run: syft ${{ matrix.package.path }} -o cyclonedx-json > ${{ matrix.package.name }}-sbom.json
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
 
       - name: Sign SBOM (keyless via GitHub OIDC)
         run: cosign sign-blob --yes ${{ matrix.package.name }}-sbom.json --bundle ${{ matrix.package.name }}-sbom.bundle
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             ${{ matrix.package.name }}-sbom.json
