@@ -68,16 +68,16 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv pip install --system -e . || true
+        run: uv pip install --system -e .
 
       - name: ruff check
         run: |
           pip install ruff
-          ruff check . --ignore F401 || true
+          ruff check . --ignore F401
 
       - name: pytest with coverage
         run: |
-          uv pip install --system pytest-cov pytest-asyncio || true
+          uv pip install --system pytest-cov pytest-asyncio
           python -m pytest tests/ --cov=app --cov-report=xml:coverage.xml -v --asyncio-mode=auto
 
       - name: Upload Python coverage to Codecov
@@ -109,7 +109,7 @@ jobs:
         run: npm install
 
       - name: build @tombstone/core
-        run: npm run build || true
+        run: npm run build
 
   python-sdk:
     name: Python SDK
@@ -130,10 +130,10 @@ jobs:
         run: pip install uv
 
       - name: Install SDK and test deps
-        run: uv pip install --system mmh3 && uv pip install --system -e . || true
+        run: uv pip install --system mmh3 && uv pip install --system -e .
 
       - name: pytest
-        run: python -m pytest tests/ -v || true
+        run: python -m pytest tests/ -v
 
   ruby-sdk:
     name: Ruby SDK
@@ -146,7 +146,7 @@ jobs:
           bundler-cache: true
           # Physical directory still named flagmind-ruby (gem renamed to tombstone)
           working-directory: packages/sdks/flagmind-ruby
-      - run: cd packages/sdks/flagmind-ruby && bundle exec rspec || true
+      - run: cd packages/sdks/flagmind-ruby && bundle exec rspec
 
   java-sdk:
     name: Java SDK
@@ -158,7 +158,7 @@ jobs:
           distribution: temurin
           java-version: "21"
       # Physical directory still named flagmind-java (package renamed to io.tombstone)
-      - run: cd packages/sdks/flagmind-java && ./gradlew test || true
+      - run: cd packages/sdks/flagmind-java && ./gradlew test
 
   terraform-provider:
     name: Terraform Provider
