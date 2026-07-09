@@ -5,7 +5,7 @@ plugins {
 
 group = "io.tombstone"
 version = '0.1.0'
-sourceCompatibility = JavaVersion.VERSION_21
+sourceCompatibility = '21'
 
 repositories {
     mavenCentral()

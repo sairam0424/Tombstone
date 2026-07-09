@@ -49,6 +49,71 @@ Exception: `rolloutPct` fields on FlagEnvironment CRs are excluded from drift de
 (`spec.ignore.paths: ["/spec/environments/*/rolloutPct"]`) because the ML intelligence
 service (LinUCB) and circuit-breaker auto-rollback modify these at runtime.
 
+## Provider Modes
+
+Select a provider mode by applying the corresponding overlay under `gitops/providers/`:
+
+| Mode | Ownership | Use Case |
+|------|-----------|----------|
+| `flux` | Flux manages everything: infrastructure, apps, and flag CRs | Default. Simpler setup; ideal for teams already using Flux. |
+| `argocd` | Flux manages infrastructure only; Argo CD manages apps + flag CRs | Preferred when the org already runs Argo CD for other apps. |
+| `both` | Same split as `argocd` + Argo Rollouts for canary blast-radius gating | Production with automated canary analysis against the evaluator blast-radius API. |
+
+```bash
+# Apply a provider overlay (replace <mode> with flux, argocd, or both)
+kubectl apply -k gitops/providers/<mode>/
+```
+
+## Operational Commands
+
+### Flux
+
+```bash
+# View all kustomization sync statuses
+flux get kustomizations -n flux-system
+
+# Force immediate reconciliation from Git
+flux reconcile kustomization tombstone-flags -n flux-system --with-source
+
+# Suspend reconciliation during maintenance
+flux suspend kustomization tombstone-apps -n flux-system
+
+# Resume after maintenance
+flux resume kustomization tombstone-apps -n flux-system
+```
+
+### Argo CD
+
+```bash
+# List all Applications and health/sync status
+argocd app list
+
+# Sync an Application from Git immediately
+argocd app sync tombstone-apps
+
+# Inspect detailed Application state
+argocd app get tombstone-apps
+
+# Roll back to a previous revision
+argocd app rollback tombstone-apps <revision>
+```
+
+## Known Caveats
+
+**Staging patch duplication.** `gitops/apps/staging/` is a patch overlay over
+`gitops/apps/production/`. If you add a new HelmRelease value in production, you must
+also evaluate whether the staging patch needs a corresponding override — otherwise
+staging silently inherits the production value (e.g. replica count, `IS_PRIMARY_REGION`).
+
+**`--components-extra` is required for image automation.** Flux bootstrap must include
+`--components-extra=image-reflector-controller,image-automation-controller` or the
+`ImagePolicy` and `ImageUpdateAutomation` resources will fail to reconcile. The error
+message ("no matches for kind ImageUpdateAutomation") does not make this obvious.
+
+**`RespectIgnoreDifferences=true` is mandatory for Argo CD.** Without this flag on each
+Application, Argo CD overwrites ML-managed `rolloutPct` values on every sync — even when
+`ignoreDifferences` is configured. Both settings are required together.
+
 ## gitops-sync Service (Deprecated)
 
 `services/gitops-sync/` is kept for reference but is no longer published as a Docker

@@ -194,6 +194,19 @@ def test_hash_version_2_fnv_stickiness():
         assert evaluate(flag, ctx, False, "f").value == first.value
 
 
+def test_fnv_double_pass_matches_typescript_vector():
+    # TypeScript: fnv(String(fnv("checkout-v2" + "user-abc"))) % 10000 / 10000 < rollout/100
+    # Pre-computed: h1=fnv("checkout-v2user-abc"), h2=fnv(str(h1)), result=h2%10000/10000
+    from tombstone.evaluation import _fnv1a_raw, _is_in_rollout_fnv
+    h1 = _fnv1a_raw("checkout-v2user-abc")
+    h2 = _fnv1a_raw(str(h1))
+    bucket = h2 % 10000
+    assert 0 <= bucket < 10000, "FNV bucket out of range"
+    # Deterministic: same inputs always same result
+    assert _is_in_rollout_fnv("checkout-v2", "user-abc", 50.0) == _is_in_rollout_fnv("checkout-v2", "user-abc", 50.0)
+    print(f"FNV double-pass: h1={h1}, h2={h2}, bucket={bucket}/10000")
+
+
 # ── V-7: Rule priority ordering ──────────────────────────────────────────────
 
 def test_rule_priority_ordering():

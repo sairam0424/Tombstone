@@ -4,6 +4,75 @@ Steady-state operations for teams running Tombstone in production: capacity plan
 
 ---
 
+## GitOps Operations
+
+### Flux CD Commands
+
+```bash
+# View kustomization sync status
+flux get kustomizations -n flux-system
+
+# Force immediate reconciliation (e.g. after a hotfix commit)
+flux reconcile kustomization tombstone-flags -n flux-system --with-source
+
+# Suspend automatic reconciliation (e.g. during a maintenance window)
+flux suspend kustomization tombstone-apps -n flux-system
+
+# Resume reconciliation after maintenance
+flux resume kustomization tombstone-apps -n flux-system
+```
+
+### Argo CD Commands
+
+```bash
+# List all Applications and their sync status
+argocd app list
+
+# Sync an Application manually (forces reconciliation from Git)
+argocd app sync tombstone-apps
+
+# Inspect Application health and sync details
+argocd app get tombstone-apps
+
+# Roll back an Application to a previous revision
+argocd app rollback tombstone-apps <revision>
+```
+
+### Kubernetes Rollouts (provider=both)
+
+```bash
+# List all Argo Rollouts in the tombstone namespace
+kubectl get rollouts -n tombstone
+
+# View AnalysisRun results (blast-radius canary gate)
+kubectl get analysisrun -n tombstone
+```
+
+### Provider Switching Procedure
+
+To switch GitOps provider (e.g. flux -> argocd):
+
+1. Suspend active Flux kustomizations: `flux suspend kustomization tombstone-apps -n flux-system`
+2. Apply the target provider overlay: `kubectl apply -k gitops/providers/argocd/`
+3. Verify Argo CD Applications are synced: `argocd app list`
+4. To roll back: `kubectl delete -k gitops/providers/argocd/` then `flux resume kustomization tombstone-apps -n flux-system`
+
+> **Warning:** Never run both providers unsuspended against the same namespace simultaneously — they will fight over `rolloutPct` fields.
+
+### Drift Alerts Routing
+
+Flux drift alerts are emitted via `spec.alert` resources in `gitops/clusters/*/alerts.yaml`:
+
+| Severity | Destination | Condition |
+|----------|-------------|-----------|
+| Info | Slack `#flags-gitops` | Successful reconciliation |
+| Warning | Slack `#flags-alerts` | Reconciliation stalled >10 min |
+| Critical | PagerDuty + marketplace kill-switch endpoint | Drift detected on `tombstone-flags` kustomization |
+
+For Argo CD notifications (provider=argocd or both), sync-failed events are routed to the marketplace Slack kill-switch endpoint via `argocd-notifications-secret`. See `gitops/README.md` for configuration details.
+
+---
+
 ## Capacity Planning
 
 ### Database Connections
