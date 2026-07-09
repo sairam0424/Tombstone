@@ -158,11 +158,12 @@ jobs:
           distribution: temurin
           java-version: "21"
       # Physical directory still named flagmind-java (package renamed to io.tombstone)
-      # Install Gradle directly — gradlew wrapper not committed, gradle/actions SHA unresolvable
-      - name: Install Gradle
+      # Use gradle 8.7 from official distribution — apt gradle is too old for useJUnitPlatform()
+      - name: Install Gradle 8.7
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gradle
+          wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt/gradle
+          echo "/opt/gradle/gradle-8.7/bin" >> $GITHUB_PATH
       - run: cd packages/sdks/flagmind-java && gradle test
 
   terraform-provider:
