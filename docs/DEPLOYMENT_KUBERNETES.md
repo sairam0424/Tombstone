@@ -22,6 +22,62 @@ commands below are for reference or emergency use only.
 
 ---
 
+## GitOps Deployment — Argo CD Provider
+
+Tombstone supports three GitOps provider modes. Choose based on your existing
+cluster tooling:
+
+| Provider Mode | Who Owns What | When to Use |
+|---------------|---------------|-------------|
+| `flux` | Flux manages infrastructure + apps + flag CRs | Default. Flux-only clusters. |
+| `argocd` | Flux manages infrastructure; Argo CD manages apps + flag CRs | Org already runs Argo CD. |
+| `both` | Same as `argocd` + Argo Rollouts canary analysis | Production with blast-radius gating. |
+
+### Step 1 — Bootstrap Flux (infrastructure + CRDs)
+
+Run the Flux bootstrap first. This installs tombstone-operator and all CRDs via
+the `flux-bootstrap.yml` job. Argo CD cannot create FeatureFlag resources until
+the CRDs exist.
+
+```bash
+kubectl apply -f gitops/providers/argocd/flux-bootstrap.yml
+```
+
+Wait for the tombstone-operator to report Ready before proceeding:
+
+```bash
+kubectl rollout status deployment/tombstone-operator -n tombstone-system
+```
+
+### Step 2 — Bootstrap Argo CD (apps + flag CRs)
+
+After Flux is running and CRDs are installed, apply the Argo CD bootstrap:
+
+```bash
+kubectl apply -f gitops/providers/argocd/argocd-bootstrap.yml
+```
+
+This installs Argo CD and creates the Applications for `tombstone-apps` and
+`tombstone-flags`. Verify sync status:
+
+```bash
+argocd app list
+```
+
+### Applying a Provider Overlay
+
+To switch the active provider mode (or apply it to a fresh cluster):
+
+```bash
+# Replace <mode> with: flux | argocd | both
+kubectl apply -k gitops/providers/<mode>/
+```
+
+> **Warning:** Never run `argocd` and `flux` reconciling the same app resources
+> simultaneously without suspending one first — they will conflict on `rolloutPct`.
+
+---
+
 See `infra/helm/flagmind/COMPATIBILITY.md` for version requirements and upgrade safety notes.
 
 ---
