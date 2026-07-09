@@ -28,13 +28,24 @@ FNV_OFFSET = 2166136261
 FNV_PRIME = 16777619
 
 
-def _fnv1a_32_bucket(key: str) -> int:
-    """FNV-1a 32-bit hash → bucket [0, 100). Mirrors TypeScript hashVersion=2 implementation."""
+def _fnv1a_raw(s: str) -> int:
+    """FNV-1a 32-bit hash, returns raw 32-bit unsigned int. Single pass."""
     h = FNV_OFFSET
-    for c in key.encode("utf-8"):
+    for c in s.encode("utf-8"):
         h ^= c
         h = (h * FNV_PRIME) & 0xFFFFFFFF
-    return h % 100
+    return h & 0xFFFFFFFF
+
+
+def _is_in_rollout_fnv(flag_key: str, user_id: str, rollout_pct: float) -> bool:
+    """Double-pass FNV-1a rollout check — exact TypeScript hashVersion=2 equivalent.
+
+    TypeScript: (fnv(String(fnv(flagKey + userId))) % 10000) / 10000 < rolloutPct / 100
+    Resolution: 0.01% (10000 buckets), not 1% (100 buckets).
+    """
+    h1 = _fnv1a_raw(flag_key + user_id)
+    h2 = _fnv1a_raw(str(h1))
+    return (h2 % 10000) / 10000 < rollout_pct / 100
 
 
 def _check_prerequisites(
@@ -192,10 +203,10 @@ def evaluate(
         )
 
     if flag_state.hash_version == 2:
-        bucket = _fnv1a_32_bucket(flag_key + context.user_id)
+        in_rollout = _is_in_rollout_fnv(flag_key, context.user_id, flag_state.rollout_pct)
     else:
         bucket = mmh3.hash(flag_key + context.user_id, seed=0, signed=False) % 100
-    in_rollout = bucket < flag_state.rollout_pct
+        in_rollout = bucket < flag_state.rollout_pct
 
     return EvaluationResult(
         value=True if in_rollout else default_value,
