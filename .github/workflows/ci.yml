@@ -158,8 +158,11 @@ jobs:
           distribution: temurin
           java-version: "21"
       # Physical directory still named flagmind-java (package renamed to io.tombstone)
-      # Use 'gradle test' directly — gradlew wrapper not committed to repo
-      - uses: gradle/actions/setup-gradle@ac638b010cf58a27ee5dbc5361aa626b2af2916f # v4
+      # Install Gradle directly — gradlew wrapper not committed, gradle/actions SHA unresolvable
+      - name: Install Gradle
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gradle
       - run: cd packages/sdks/flagmind-java && gradle test
 
   terraform-provider:
