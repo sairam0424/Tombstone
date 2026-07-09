@@ -130,6 +130,8 @@ class TombstoneClient:
                     environment=payload.get("environment", self._environment),
                     targeting_rules=targeting_rules,
                     prerequisites=raw.get("prerequisites", []),
+                    hash_version=raw.get("hash_version", 1),
+                    target_list=raw.get("target_list", []),
                 )
             except Exception as exc:
                 logger.warning("Tombstone: failed to deserialize flag '%s': %s", flag_key, exc)
@@ -172,6 +174,8 @@ class TombstoneClient:
                 rollout_pct=float(event.get("rollout_pct", 0)),
                 safe_default=event.get("safe_default", False),
                 environment=event.get("environment", self._environment),
+                hash_version=event.get("hash_version", 1),
+                target_list=event.get("target_list", []),
             )
             with self._lock:
                 new_cache = dict(self._cache)
