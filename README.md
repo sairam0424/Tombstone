@@ -42,7 +42,7 @@ The dashboard opens at **http://localhost:3000**.
 | **gateway** | http://localhost:8080 | SSE streaming to SDKs, real-time flag updates |
 | **evaluator** | http://localhost:8082 | Blast-radius scoring, circuit-breaker auto-rollback, SLO tracking |
 | **intelligence** | http://localhost:8083 | Anomaly detection, stale flag cleanup, rollout recommendations |
-| **gitops-sync** | http://localhost:8084 | YAML-as-code flag sync from Git |
+| **gitops-sync** | http://localhost:8084 | YAML-as-code flag sync from Git (**DEPRECATED** — replaced by tombstone-operator) |
 | **ast-rewriter** | http://localhost:8085 | Dead-code scanner for stale flag cleanup |
 | **marketplace** | http://localhost:8086 | Integrations: Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear |
 | **PostgreSQL** | localhost:5433 | Primary store + pgvector |
@@ -217,6 +217,28 @@ Cloud deployment (Kubernetes, Fly.io) guides are in infra/. See CHANGELOG.md for
 **New to feature flags?** Start with the [User Guide](docs/USER_GUIDE.md).
 **Just ran `make dev`?** Go to [Getting Started](docs/GETTING_STARTED.md).
 **Something broken?** Check [Troubleshooting](#troubleshooting) below or open a [GitHub Issue](https://github.com/sairam0424/Tombstone/issues/new?template=bug_report.md).
+
+---
+
+## GitOps
+
+Tombstone ships a production-ready GitOps configuration under `gitops/`. Flux CD v2.3+ is the default controller; Argo CD is supported as an optional or co-primary provider.
+
+### Provider Modes
+
+| Mode | Ownership | Use Case |
+|------|-----------|----------|
+| `flux` | Flux manages infrastructure, apps, and flag CRs | Default — Flux-only clusters |
+| `argocd` | Flux manages infrastructure; Argo CD manages apps + flag CRs | Org already runs Argo CD |
+| `both` | Same split as `argocd` + Argo Rollouts canary blast-radius analysis | Production with automated canary gating |
+
+Apply the overlay for your chosen mode:
+
+```bash
+kubectl apply -k gitops/providers/<mode>/
+```
+
+See [gitops/README.md](gitops/README.md) for bootstrap order, operational commands, and known caveats.
 
 ---
 
