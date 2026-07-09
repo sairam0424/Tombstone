@@ -99,7 +99,7 @@ async def test_bedrock_embedding_model_embed_multiple_texts():
 
 def test_create_embedding_model_returns_bedrock():
     with patch("app.search.embedding_model_bedrock.BedrockEmbeddingModel") as MockBedrock:
-        model = create_embedding_model(
+        _model = create_embedding_model(
             "bedrock",
             access_key_id="k",
             secret_access_key="s",
