@@ -1,0 +1,13 @@
+# gitops/clusters/production/argocd/core/argocd-notifications-cm-delete-patch.yaml
+# The vendored install manifest (argocd-install-v2.11.0.yaml) ships an empty stub
+# ConfigMap/argocd-notifications-cm (no `data`, no namespace). The real one — with the
+# Tombstone marketplace Slack webhook config — lives in ../notifications/notifications.yaml
+# and is composed as a sibling base by the parent kustomization.yaml. Without this delete,
+# both land in the same build stream as duplicate same-GVK+name resources. Deleting the
+# stub here (inside core/, scoped to core/'s own resources) keeps argocd-install-v2.11.0.yaml
+# a byte-identical vendor drop -- future version bumps stay a simple file swap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+$patch: delete
