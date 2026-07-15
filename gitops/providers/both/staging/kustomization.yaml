@@ -1,0 +1,14 @@
+# gitops/providers/both/staging/kustomization.yaml
+# Dual-controller, staging cluster: Flux owns infrastructure + image automation.
+#                                   Argo CD owns flagmind chart + flag definitions
+#                                   + Rollouts. No Notifications on staging — the
+#                                   marketplace Slack sync-failed webhook is
+#                                   production-only (see clusters/staging/argocd/
+#                                   kustomization.yaml, which has no notifications/ base).
+# Active when GITOPS_PROVIDER=both, CLUSTER=staging.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../clusters/staging/argocd/core
+  - ../../../clusters/staging/argocd/app-of-apps
+  - ../../../clusters/staging/argocd/rollouts

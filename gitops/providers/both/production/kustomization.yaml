@@ -1,0 +1,12 @@
+# gitops/providers/both/production/kustomization.yaml
+# Dual-controller, production cluster: Flux owns infrastructure + image automation.
+#                                      Argo CD owns flagmind chart + flag definitions
+#                                      + Rollouts + Notifications.
+# Active when GITOPS_PROVIDER=both, CLUSTER=production (recommended for full capability).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../clusters/production/argocd/core
+  - ../../../clusters/production/argocd/app-of-apps
+  - ../../../clusters/production/argocd/rollouts
+  - ../../../clusters/production/argocd/notifications

@@ -1,0 +1,6 @@
+# gitops/clusters/staging/argocd/app-of-apps/kustomization.yaml
+# App-of-Apps Application manifests (tombstone-app, tombstone-flags) targeting develop.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - apps.yaml
