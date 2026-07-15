@@ -243,3 +243,50 @@ def test_circular_prerequisite_does_not_recurse_infinitely():
     # Should not raise RecursionError
     result = evaluate(a, EvaluationContext(user_id="u"), False, "a", all_flags=all_flags)
     assert result.reason in ("PREREQUISITE_FAILED", "FALLTHROUGH", "ERROR")
+
+
+# ── V-8: Soft prerequisite (gate=False) ─────────────────────────────────────
+
+def test_soft_prerequisite_unmet_does_not_block_evaluation():
+    # parent is disabled -> dep_result False != required True, but gate=False
+    # means this must NOT block evaluation of the child flag.
+    parent = _flag("parent", enabled=False)
+    child = _flag(
+        "child",
+        rollout_pct=100.0,
+        prerequisites=[{"flag_key": "parent", "required_value": True, "gate": False}],
+    )
+    all_flags = {"parent": parent, "child": child}
+    result = evaluate(child, EvaluationContext(user_id="u"), False, "child", all_flags=all_flags)
+    assert result.reason != "PREREQUISITE_FAILED"
+    assert result.reason == "FALLTHROUGH"
+    assert result.value is True
+
+
+def test_hard_prerequisite_gate_true_unmet_blocks_evaluation():
+    # Explicit gate=True must retain today's hard-blocking behavior.
+    parent = _flag("parent", enabled=False)
+    child = _flag(
+        "child",
+        rollout_pct=100.0,
+        prerequisites=[{"flag_key": "parent", "required_value": True, "gate": True}],
+    )
+    all_flags = {"parent": parent, "child": child}
+    result = evaluate(child, EvaluationContext(user_id="u"), False, "child", all_flags=all_flags)
+    assert result.reason == "PREREQUISITE_FAILED"
+    assert result.value is False
+
+
+def test_default_prerequisite_gate_omitted_unmet_blocks_evaluation():
+    # Regression guard: omitting "gate" entirely must preserve legacy
+    # unconditional-block behavior (default gate=True).
+    parent = _flag("parent", enabled=False)
+    child = _flag(
+        "child",
+        rollout_pct=100.0,
+        prerequisites=[{"flag_key": "parent", "required_value": True}],
+    )
+    all_flags = {"parent": parent, "child": child}
+    result = evaluate(child, EvaluationContext(user_id="u"), False, "child", all_flags=all_flags)
+    assert result.reason == "PREREQUISITE_FAILED"
+    assert result.value is False
