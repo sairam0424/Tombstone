@@ -51,7 +51,7 @@ jobs:
           CLUSTER: ${{ inputs.cluster }}
           PROVIDER: ${{ inputs.provider }}
         run: |
-          kubectl apply -k "gitops/providers/${PROVIDER}/"
+          kubectl apply -k "gitops/providers/${PROVIDER}/${CLUSTER}/"
 
       - name: Wait for Argo CD to be ready
         run: |

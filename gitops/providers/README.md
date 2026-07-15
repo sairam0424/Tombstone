@@ -12,16 +12,20 @@ Tombstone supports three GitOps provider configurations, selected via Kustomize 
 
 ## Selecting a provider
 
-Apply the provider overlay on top of the cluster bootstrap:
+Apply the provider overlay on top of the cluster bootstrap. `argocd` and `both` are
+cluster-aware — pick the `production/` or `staging/` subdirectory matching the target
+cluster (each resolves to that cluster's own `targetRevision`/`path` Applications):
 
 ```bash
 # Flux only (default — already active via flux-bootstrap.yml)
 flux bootstrap github --path=gitops/clusters/production ...
 
 # Argo CD or both (apply after flux bootstrap installs the operator)
-kubectl apply -k gitops/providers/argocd/
+kubectl apply -k gitops/providers/argocd/production/
+kubectl apply -k gitops/providers/argocd/staging/
 # or
-kubectl apply -k gitops/providers/both/
+kubectl apply -k gitops/providers/both/production/
+kubectl apply -k gitops/providers/both/staging/
 ```
 
 ## Split-ownership boundary
