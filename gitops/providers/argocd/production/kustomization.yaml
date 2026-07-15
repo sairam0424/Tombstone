@@ -1,0 +1,9 @@
+# gitops/providers/argocd/production/kustomization.yaml
+# Argo CD provider, production cluster: Argo CD owns apps/flags; Flux retains infrastructure.
+# Active when GITOPS_PROVIDER=argocd, CLUSTER=production. No Rollouts, no Notifications
+# (see gitops/providers/both/production/ for the full-capability mode).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../clusters/production/argocd/core
+  - ../../../clusters/production/argocd/app-of-apps
