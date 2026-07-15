@@ -1,8 +1,0 @@
-# gitops/providers/argocd/kustomization.yaml
-# Argo CD provider: Argo CD owns apps/flags; Flux retains infrastructure.
-# Active when GITOPS_PROVIDER=argocd.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - ../../clusters/production/argocd/install.yaml
-  - ../../clusters/production/argocd/apps.yaml

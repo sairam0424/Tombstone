@@ -1,0 +1,6 @@
+# gitops/clusters/production/argocd/notifications/kustomization.yaml
+# Argo CD Notifications -> Tombstone marketplace Slack webhook.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - notifications.yaml

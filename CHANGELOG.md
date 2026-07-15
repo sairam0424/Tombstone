@@ -11,6 +11,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.4.3] - 2026-07-15
+
+### Fixed
+- **Python SDK**: added the `gate` soft-prerequisite field to `_check_prerequisites`, matching TypeScript's semantics — `gate: false` on an unmet prerequisite now skips and continues evaluation instead of always blocking. Removed the dead duplicate `flagmind/` package (never published in any `tombstone-sdk` wheel).
+- **Java SDK**: fixed the `io.flagmind`/`io.tombstone` package-directory mismatch that had silently excluded `src/main` from git since the initial commit (`.gitignore`'s `packages/**/main` rule matched it). Renamed `FlagMindClient.java` to `TombstoneClient.java` to match its public class name, and corrected an `okhttp3` import (`com.squareup.okhttp3.*` is OkHttp's Maven groupId, not its Java package — the real package is `okhttp3.*`). The Java SDK now actually compiles and passes its test suite in CI for the first time; `continue-on-error` removed from the `ci.yml` job.
+- **GitOps**: fixed `gitops/providers/argocd/` and `gitops/providers/both/` referencing a Kustomize resource file (`install.yaml`) that never existed — every `argocd-bootstrap.yml` run to date had failed before reaching cluster connectivity. Restructured `gitops/clusters/{production,staging}/argocd/` into composable `core/`/`app-of-apps/`/`rollouts/`/`notifications/` sub-bases (Kustomize's security model blocks single-file cross-directory references but allows directory-base references), which also closed a gap where `providers/both/` was missing the Argo Rollouts CRD installer and Lua health-check ConfigMap patches. Restored a second, unrelated pre-existing bug: `gitops/clusters/staging/argocd/argo-rollouts-install-v1.7.0.yaml` had been lost during an earlier history rewrite.
+- **GitOps**: `argocd-bootstrap.yml`'s `cluster` input (`staging`|`production`) was set as an env var but never used in the apply path — every run applied production's Argo CD Applications regardless of the selected cluster. Added cluster-aware `production/`/`staging/` subdirectories under both provider overlays and fixed the apply step to use `${CLUSTER}`.
+
+### Added
+- `docs/SDK_CONTRACT.md`: a feature-parity matrix across all 5 SDKs, built by reading each language's actual evaluation source. Corrects an inflated "full parity" claim in `docs/SDK_INTEGRATION_GUIDE.md` — only TypeScript and Python implement the full 5-step evaluation pipeline; Java, Ruby, and .NET implement only steps 1 and 5 (their `TARGET_MATCH`/`RULE_MATCH`/`PREREQUISITE_FAILED` enum members are declared but unreachable).
+
+---
+
 ## [1.4.2] - 2026-07-09
 
 ### Added

@@ -69,6 +69,7 @@ def _check_prerequisites(
     for prereq in flag_state.prerequisites:
         dep_key = prereq.get("flag_key", "")
         required = prereq.get("required_value", True)
+        gate = prereq.get("gate", True)
 
         if dep_key in evaluation_cache:
             dep_result = evaluation_cache[dep_key]
@@ -95,6 +96,9 @@ def _check_prerequisites(
                 evaluation_cache[dep_key] = dep_result
 
         if dep_result != required:
+            if not gate:
+                # Soft prerequisite — unmet, but non-blocking. Skip and continue.
+                continue
             return False
 
     return True

@@ -117,7 +117,7 @@ enabled = client.is_enabled("checkout-v2", {
 variant = client.get_variation("checkout-layout", "control", {"user_id": "user-123"})
 ```
 
-**Python SDK parity with TypeScript**: As of v0.2.0, the Python SDK implements the full 5-step evaluation pipeline including prerequisites and full targeting rule matching. See `docs/SDK_CONTRACT.md` for the feature parity matrix.
+**Python SDK parity with TypeScript**: As of v0.2.0+, the Python SDK implements the full 5-step evaluation pipeline (prerequisites with `gate` soft/hard semantics, target list, priority-sorted targeting rules, fallthrough rollout with both `hash_version` 1 and 2) matching TypeScript step-for-step. One known divergence: the `CONTAINS`/`PREFIX`/`SUFFIX` string operators are case-insensitive in Python but case-sensitive in TypeScript. Java, Ruby, and .NET SDKs currently implement only steps 1 and 5 (preliminary + fallthrough) — no prerequisites, no target list, no rule matching, and `hash_version` 1 (MurmurHash3) only. See [`docs/SDK_CONTRACT.md`](./SDK_CONTRACT.md) for the full per-SDK feature parity matrix.
 
 ---
 
@@ -210,7 +210,7 @@ Never share the same `sdkKey` across production and staging. Each environment ha
 
 ### Python SDK feature parity
 
-The Python SDK (v0.2.0+) implements the full 5-step evaluation pipeline with parity to the TypeScript SDK: prerequisites, targeting rules (all operators), and fallthrough rollout.
+The Python SDK (v0.2.0+) implements the full 5-step evaluation pipeline with parity to the TypeScript SDK: prerequisites (incl. `gate` soft/hard semantics), target list, targeting rules (all operators), and fallthrough rollout (`hash_version` 1 and 2). Java, Ruby, and .NET SDKs only implement steps 1 and 5 (preliminary + fallthrough) as of this writing — see [`docs/SDK_CONTRACT.md`](./SDK_CONTRACT.md) for the full matrix before relying on prerequisites, target lists, or rule matching in those SDKs.
 
 ### Edge SDK requires Cloudflare KV binding
 
