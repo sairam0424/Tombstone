@@ -11,6 +11,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.4.4] - 2026-07-16
+
+### Fixed
+- **GitOps**: the vendored Argo CD install manifest (`argocd-install-v2.11.0.yaml`) ships empty stub `ConfigMap/argocd-notifications-cm` and `Secret/argocd-notifications-secret` objects. Kustomize doesn't dedupe same-name resources contributed by independent sub-bases, so every production build (`gitops/clusters/production/argocd/` and `gitops/providers/both/production/`) emitted two copies of each — the real Tombstone marketplace Slack webhook config and the empty vendor stub — with the stub landing last in the build stream. Added a `$patch: delete` inside `core/`'s own kustomization to remove the vendored stub before the parent-level merge, without hand-editing the vendor file itself.
+
+---
+
 ## [1.4.3] - 2026-07-15
 
 ### Fixed
