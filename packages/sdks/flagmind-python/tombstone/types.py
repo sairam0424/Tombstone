@@ -46,7 +46,10 @@ class FlagEnvironmentState:
     environment: str
     targeting_rules: list[TargetingRule] = field(default_factory=list)
     prerequisites: list[dict] = field(default_factory=list)
-    # prerequisites schema: [{"flag_key": str, "required_value": bool}]
+    # prerequisites schema: [{"flag_key": str, "required_value": bool, "gate": bool}]
+    # "gate" defaults to True (hard-blocking) when omitted, preserving legacy behavior.
+    # gate=False marks a soft prerequisite: an unmet dependency is skipped rather
+    # than failing the whole evaluation.
     hash_version: int = 1
     target_list: list = field(default_factory=list)
 
