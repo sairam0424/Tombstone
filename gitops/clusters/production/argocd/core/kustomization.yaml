@@ -18,3 +18,11 @@ patches:
     target:
       kind: ConfigMap
       name: argocd-cmd-params-cm
+  - path: argocd-notifications-cm-delete-patch.yaml
+    target:
+      kind: ConfigMap
+      name: argocd-notifications-cm
+  - path: argocd-notifications-secret-delete-patch.yaml
+    target:
+      kind: Secret
+      name: argocd-notifications-secret
