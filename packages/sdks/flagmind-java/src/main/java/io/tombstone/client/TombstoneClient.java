@@ -1,7 +1,7 @@
 package io.tombstone.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.squareup.okhttp3.*;
+import okhttp3.*;
 import io.tombstone.evaluation.EvaluationEngine;
 import io.tombstone.types.*;
 import java.io.*;
