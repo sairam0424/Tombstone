@@ -1,21 +1,13 @@
 # gitops/clusters/production/argocd/kustomization.yaml
-# NOTE: argocd-cm-patch.yaml and argocd-cmd-params-cm-patch.yaml are intentional
-# copies of gitops/clusters/staging/argocd/ — kustomize security model prevents
-# cross-directory patch file references (../staging/argocd/*.yaml is rejected).
-# Keep these in sync manually when updating Lua health checks or operator config.
+# Composes the four sub-bases below. Split into core/app-of-apps/rollouts/notifications
+# so gitops/providers/argocd/ and gitops/providers/both/ can each select a subset via
+# directory-base cross-references (Kustomize's security model blocks referencing
+# individual loose files outside a kustomization's own directory tree — referencing a
+# directory that itself has a kustomization.yaml is fine).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - argocd-install-v2.11.0.yaml
-  - argo-rollouts-install-v1.7.0.yaml
-  - rollouts.yaml
-  - notifications.yaml
-patches:
-  - path: argocd-cm-patch.yaml
-    target:
-      kind: ConfigMap
-      name: argocd-cm
-  - path: argocd-cmd-params-cm-patch.yaml
-    target:
-      kind: ConfigMap
-      name: argocd-cmd-params-cm
+  - core
+  - app-of-apps
+  - rollouts
+  - notifications

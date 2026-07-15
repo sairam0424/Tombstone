@@ -1,0 +1,9 @@
+# gitops/clusters/production/argocd/rollouts/kustomization.yaml
+# Argo Rollouts CRD/controller installer + blast-radius AnalysisTemplate.
+# rollouts.yaml alone only creates the AnalysisTemplate CR — it needs the CRDs from
+# argo-rollouts-install-v1.7.0.yaml to already exist, so the two are bundled together.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - argo-rollouts-install-v1.7.0.yaml
+  - rollouts.yaml
