@@ -1,7 +1,10 @@
 import asyncio
 import logging
 import os
-from collections import deque
+import time
+import math
+import httpx
+from collections import deque, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -448,6 +451,140 @@ async def get_dependency_subgraph(
         "environment": environment,
         "nodes": nodes,
         "edges": edges,
+    }
+
+
+BLAST_RADIUS_MULTIPLIER = {"BLOCKED": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+@app.get("/api/v1/graph/critical-flags")
+async def get_critical_flags(
+    limit: int = 20,
+    environment: str = "production",
+    request: Request = None,
+):
+    """
+    Return top-N most critical flags ranked by dependency health score.
+
+    Score formula: (in_degree + out_degree) * avg_edge_weight * blast_radius_multiplier.
+    blast_radius_multiplier: BLOCKED=4, HIGH=3, MEDIUM=2, LOW=1.
+
+    Fetches blast-radius tier from evaluator service; falls back to LOW if unreachable.
+    """
+    redis_client = request.app.state.redis
+    builder: DependencyGraphBuilder = request.app.state.graph_builder
+
+    # 1. Gather all edges from Redis sorted sets
+    # (In production this would scan all tombstone:depgraph:* keys — for MVP we rely
+    # on the existing rebuild_all() having populated Redis with a full graph; a future
+    # optimization would be a dedicated "list all edges" Redis Lua script or a cached
+    # in-memory adjacency list built during startup.)
+    #
+    # For this implementation, we'll use the DB as source-of-truth for the full graph,
+    # since Redis sorted sets are per-flag (no global edge list). The existing
+    # DependencyGraphBuilder.build() method already does this DB scan — we reuse it.
+
+    pool = await builder._get_pool()
+    to_unix = int(time.time())
+    from_unix = to_unix - (90 * 86400)  # 90-day window matching rebuild_all
+
+    rows = await pool.fetch(
+        """
+        SELECT flag_key,
+               EXTRACT(EPOCH FROM created_at)::bigint AS ts
+        FROM audit_log
+        WHERE created_at >= to_timestamp($1)
+          AND created_at <= to_timestamp($2)
+          AND flag_key IS NOT NULL
+          AND event_type IN ('flag_environment_updated','kill_switch_activated','flag_created')
+        ORDER BY created_at ASC
+        """,
+        float(from_unix),
+        float(to_unix),
+    )
+
+    if not rows:
+        return {"flags": [], "generated_at": to_unix}
+
+    # 2. Rebuild edge map (same logic as builder.build())
+    edge_map = {}
+    events = [(r["flag_key"], int(r["ts"])) for r in rows]
+    COUPLING_WINDOW_SECONDS = 300
+    LAMBDA = 0.1
+
+    for i, (flag_a, ts_a) in enumerate(events):
+        for j in range(i + 1, len(events)):
+            flag_b, ts_b = events[j]
+            if flag_b == flag_a:
+                continue
+            delta = ts_b - ts_a
+            if delta > COUPLING_WINDOW_SECONDS:
+                break
+            weight = math.exp(-LAMBDA * (delta / 60.0))
+            key = (flag_a, flag_b)
+            if key in edge_map:
+                edge_map[key]["weight"] = max(edge_map[key]["weight"], weight)
+                edge_map[key]["count"] += 1
+            else:
+                edge_map[key] = {"weight": round(weight, 4), "count": 1}
+
+    # 3. Compute in/out degree and avg edge weight per flag
+    in_weights = defaultdict(list)
+    out_weights = defaultdict(list)
+
+    for (source, target), data in edge_map.items():
+        w = data["weight"]
+        out_weights[source].append(w)
+        in_weights[target].append(w)
+
+    all_flags = set(in_weights.keys()) | set(out_weights.keys())
+    flag_data = []
+
+    for flag_key in all_flags:
+        in_w = in_weights.get(flag_key, [])
+        out_w = out_weights.get(flag_key, [])
+        all_w = in_w + out_w
+        in_degree = len(in_w)
+        out_degree = len(out_w)
+        avg_weight = sum(all_w) / len(all_w) if all_w else 0.0
+
+        flag_data.append({
+            "key": flag_key,
+            "in_degree": in_degree,
+            "out_degree": out_degree,
+            "avg_edge_weight": avg_weight,
+        })
+
+    # 4. Fetch blast-radius tier from evaluator service for each flag
+    evaluator_url = os.environ.get("EVALUATOR_URL", "http://localhost:8082")
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for flag in flag_data:
+            try:
+                # Call evaluator with rollout_pct=100 (worst-case blast radius)
+                resp = await client.get(
+                    f"{evaluator_url}/api/v1/blast-radius",
+                    params={"flag_key": flag["key"], "environment": environment, "rollout_pct": 100},
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    tier = result.get("result", {}).get("risk_score", "LOW")
+                else:
+                    tier = "LOW"
+            except Exception:
+                tier = "LOW"  # fail-open
+
+            flag["blast_radius_tier"] = tier
+            mult = BLAST_RADIUS_MULTIPLIER[tier]
+            score = (flag["in_degree"] + flag["out_degree"]) * flag["avg_edge_weight"] * mult
+            flag["score"] = round(score, 2)
+
+    # 5. Sort descending by score, limit to top-N
+    flag_data.sort(key=lambda f: -f["score"])
+    top_n = flag_data[:limit]
+
+    return {
+        "flags": top_n,
+        "generated_at": to_unix,
     }
 
 
