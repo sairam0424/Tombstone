@@ -53,8 +53,9 @@ not touch:
 | Missing-attribute signaling | Silent `false` | Raises `InconclusiveMatchError` |
 
 New SDKs (Java/Ruby/.NET) follow the Canonical Model above, which resolves each of these
-in one direction — they do not match either TS or Python exactly on every point. See the
-full design rationale in `docs/superpowers/specs/2026-08-04-v1.5.0-sdk-parity-and-dependency-viz-design.md`.
+in one direction — they do not match either TS or Python exactly on every point. The full
+design rationale and decision matrix are documented in the v1.5.0 design specification
+(available on branch `docs/v1.5.0-upgrade-design`).
 
 ## Parity Matrix (updated after v1.5.0)
 
