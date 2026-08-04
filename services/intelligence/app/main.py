@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -361,6 +362,93 @@ async def get_flag_impact(flag_key: str, request: Request, environment: str = "p
         logger.info("dep graph Redis miss for %s — falling back to DB", flag_key)
 
     return await builder.get_impact(flag_key, environment, days)
+
+
+@app.get("/api/v1/graph/dependencies")
+async def get_dependency_subgraph(
+    flag_key: str,
+    depth: int = 1,
+    environment: str = "production",
+    request: Request = None,
+):
+    """
+    Return a dependency subgraph centered on `flag_key`, traversing to `depth` hops.
+
+    Uses Redis sorted-set O(log n) lookup when Redis is available and keys are warm.
+    Falls back to the original O(n²) DB scan per flag on Redis cold-start.
+    Returns nodes (flags in the subgraph) and edges (weighted connections).
+    """
+    if depth < 1:
+        depth = 1
+    if depth > 5:
+        depth = 5  # cap at 5 hops to prevent runaway traversal
+
+    redis_client = request.app.state.redis
+    builder: DependencyGraphBuilder = request.app.state.graph_builder
+
+    visited: set[str] = set()
+    edges: list[dict] = []
+    queue: deque[tuple[str, int]] = deque([(flag_key, 0)])
+    visited.add(flag_key)
+
+    while queue:
+        current_key, current_depth = queue.popleft()
+        if current_depth >= depth:
+            continue
+
+        # Fetch neighbors
+        neighbors = None
+        if redis_client is not None:
+            neighbors = await builder.get_impact_fast(current_key, redis_client)
+            if neighbors is None:
+                # Redis miss — fall back to DB
+                logger.info("dep graph Redis miss for %s — falling back to DB", current_key)
+                db_result = await builder.get_impact(current_key, environment, days=30)
+                co_changed = db_result.get("co_changed_with", [])
+                # DB fallback returns {"flag_key": str, "co_change_count": int, "avg_seconds_apart": float}
+                # Infer weight from co_change_count: higher count → higher coupling
+                neighbors = [
+                    {"flag_key": item["flag_key"], "weight": min(1.0, item["co_change_count"] / 10.0)}
+                    for item in co_changed
+                ]
+
+        if not neighbors:
+            continue
+
+        for neighbor in neighbors:
+            neighbor_key = neighbor["flag_key"]
+            weight = neighbor["weight"]
+            edges.append({"source": current_key, "target": neighbor_key, "weight": weight})
+            if neighbor_key not in visited:
+                visited.add(neighbor_key)
+                queue.append((neighbor_key, current_depth + 1))
+
+    # Fetch node metadata from flags table for all visited keys
+    nodes = []
+    if visited:
+        pool = await builder._get_pool()
+        rows = await pool.fetch(
+            """
+            SELECT f.key, fe.enabled, fe.rollout_pct
+            FROM flags f
+            LEFT JOIN flag_environments fe ON fe.flag_id = f.id AND fe.environment = $1
+            WHERE f.key = ANY($2::text[])
+            """,
+            environment,
+            list(visited),
+        )
+        nodes = [
+            {"key": r["key"], "enabled": bool(r["enabled"] or False), "rollout_pct": int(r["rollout_pct"] or 0)}
+            for r in rows
+        ]
+
+    return {
+        "flag_key": flag_key,
+        "depth": depth,
+        "environment": environment,
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
 @app.post("/api/v1/correlate")
