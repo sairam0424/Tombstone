@@ -17,6 +17,7 @@ import {
   handleSearchFlags,
   handleGenerateCleanupPR,
   handleOpenFeatureSetup,
+  handleGetDependencyGraph,
 } from "./tools/flags.js";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -97,6 +98,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
 
       case "tombstone_openfeature_setup":
         result = handleOpenFeatureSetup(args as Record<string, unknown>);
+        break;
+
+      case "tombstone_get_dependency_graph":
+        result = await handleGetDependencyGraph(args as Record<string, unknown>, apiUrl, apiToken);
         break;
 
       default:

@@ -361,6 +361,33 @@ export const openFeatureSetupTool: Tool = {
   },
 };
 
+export const getDependencyGraphTool: Tool = {
+  name: "tombstone_get_dependency_graph",
+  description:
+    "Get the dependency graph (nodes + weighted edges) for a feature flag, traversing up to `depth` hops. Use this to visualize flag coupling, identify high-risk dependencies, and understand blast radius before making changes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      flag_key: {
+        type: "string",
+        description: "Dot-notation flag key (e.g. payments.checkout.v2)",
+      },
+      depth: {
+        type: "number",
+        description: "Number of hops to traverse (default 1, max 5)",
+        minimum: 1,
+        maximum: 5,
+      },
+      environment: {
+        type: "string",
+        description: "Environment (default 'production')",
+      },
+    },
+    required: ["flag_key"],
+    additionalProperties: false,
+  },
+};
+
 // ─── OpenFeature setup handler ────────────────────────────────────────────────
 
 export function handleOpenFeatureSetup(
@@ -470,6 +497,27 @@ enabled = of_client.get_boolean_value("payments.new-flow", False, of_ctx)
   throw new Error(`Unsupported language: ${language}. Must be "typescript" or "python".`);
 }
 
+export async function handleGetDependencyGraph(
+  args: Record<string, unknown>,
+  apiUrl: string,
+  apiToken: string
+): Promise<unknown> {
+  const flag_key = args.flag_key as string;
+  const depth = (args.depth as number | undefined) ?? 1;
+  const environment = (args.environment as string | undefined) ?? "production";
+
+  const params = new URLSearchParams({
+    flag_key,
+    depth: String(depth),
+    environment,
+  });
+
+  // Intelligence service runs on port 8083 (flag-api is 8081)
+  const intelUrl = apiUrl.replace(":8081", ":8083").replace("8081", "8083");
+  const url = `${intelUrl}/api/v1/graph/dependencies?${params.toString()}`;
+  return apiFetch(url, apiToken);
+}
+
 // ─── All tools array (for ListTools response) ────────────────────────────────
 
 export const allTools: Tool[] = [
@@ -481,4 +529,5 @@ export const allTools: Tool[] = [
   searchFlagsTool,
   generateCleanupPRTool,
   openFeatureSetupTool,
+  getDependencyGraphTool,
 ];
