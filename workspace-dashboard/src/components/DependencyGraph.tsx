@@ -37,7 +37,7 @@ export function DependencyGraph({
   disableSimulation = false,
 }: DependencyGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  const [hoveredEdge, setHoveredEdge] = useState<{ source: string; target: string; weight: number } | null>(null);
 
   useEffect(() => {
     if (!canvasRef.current || nodes.length === 0) return;
@@ -90,11 +90,71 @@ export function DependencyGraph({
           context.textAlign = 'center';
           context.fillText(node.key, node.x!, node.y! + 20);
         });
+
+        // Draw hovered edge weight tooltip
+        if (hoveredEdge) {
+          const source = nodesCopy.find(n => n.key === hoveredEdge.source);
+          const target = nodesCopy.find(n => n.key === hoveredEdge.target);
+          if (source && target) {
+            const midX = ((source.x || 0) + (target.x || 0)) / 2;
+            const midY = ((source.y || 0) + (target.y || 0)) / 2;
+
+            const label = `weight: ${hoveredEdge.weight.toFixed(2)}`;
+            context.fillStyle = '#1a1a1a';
+            context.font = 'bold 12px sans-serif';
+            context.textAlign = 'center';
+
+            // Draw background
+            const metrics = context.measureText(label);
+            const labelHeight = 16;
+            const labelWidth = metrics.width + 8;
+            context.fillStyle = '#fff9c4';
+            context.fillRect(midX - labelWidth / 2, midY - labelHeight / 2, labelWidth, labelHeight);
+
+            // Draw text
+            context.fillStyle = '#1a1a1a';
+            context.fillText(label, midX, midY + 4);
+          }
+        }
       });
 
     if (disableSimulation) {
       simulation.stop();
     }
+
+    // Hover handler to detect edge weights
+    const handleMouseMove = (event: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      // Find hovered edge (within 5px of line)
+      let found: { source: string; target: string; weight: number } | null = null;
+      edgesCopy.forEach(edge => {
+        const source = edge.source as Node;
+        const target = edge.target as Node;
+        const x1 = source.x || 0;
+        const y1 = source.y || 0;
+        const x2 = target.x || 0;
+        const y2 = target.y || 0;
+
+        // Distance from point to line segment
+        const dist = Math.abs(
+          ((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) /
+          Math.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2)
+        );
+
+        if (dist < 5) {
+          found = {
+            source: source.key,
+            target: target.key,
+            weight: edge.weight,
+          };
+        }
+      });
+
+      setHoveredEdge(found);
+    };
 
     // Click handler
     const handleClick = (event: MouseEvent) => {
@@ -115,10 +175,12 @@ export function DependencyGraph({
     };
 
     canvas.addEventListener('click', handleClick);
+    canvas.addEventListener('mousemove', handleMouseMove);
 
     return () => {
       simulation.stop();
       canvas.removeEventListener('click', handleClick);
+      canvas.removeEventListener('mousemove', handleMouseMove);
     };
   }, [nodes, edges, width, height, highlightedSubgraph, disableSimulation, onNodeClick]);
 
