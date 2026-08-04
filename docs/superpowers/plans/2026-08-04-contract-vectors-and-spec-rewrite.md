@@ -575,14 +575,19 @@ def build_prerequisite_vectors() -> list[dict]:
         "note": "Soft gate (gate=false), dependency unmet -> non-blocking, parent proceeds",
     })
 
-    # Multivariate variation match
-    all_flags = {"plan-tier": {"enabled": True, "variation": "enterprise"}}
-    prereq = {"flag_key": "plan-tier", "required_variation": "enterprise", "gate": True}
+    # Comparison mechanism is string-based (forward-compatible with multivariate
+    # flags), but this release's FlagEnvironmentState has no variation/value field —
+    # only enabled (bool). So "variation" here is always the stringified boolean
+    # outcome ("true"/"false"), never an arbitrary string. This vector confirms the
+    # comparison mechanism works correctly even though only boolean outcomes are
+    # reachable via any Java/Ruby/.NET flag state constructible in this release.
+    all_flags = {"plan-tier": {"enabled": True, "variation": "true"}}
+    prereq = {"flag_key": "plan-tier", "required_variation": "true", "gate": True}
     vectors.append({
-        "id": "prereq-multivariate-match",
+        "id": "prereq-string-comparison-mechanism",
         "prerequisite": prereq, "all_flags": all_flags,
         "expected_satisfied": check_prerequisite(prereq, all_flags, {}, set()),
-        "note": "Non-boolean prerequisite variation match (multivariate-capable canonical model)",
+        "note": "String-compare mechanism (forward-compatible with future multivariate prerequisites) applied to a boolean outcome — the only variation type constructible from this release's FlagEnvironmentState",
     })
 
     # Cycle detection
