@@ -182,3 +182,222 @@ def match_rules(rules: list, attrs: dict, flag_key: str):
             return ("RULE_MATCH", rule["variation"])
         # matched conditions but outside this rule's own rollout — try next rule
     return None
+
+
+def build_prerequisite_vectors() -> list[dict]:
+    vectors = []
+
+    # Hard gate, unmet -> blocked
+    v = {
+        "id": "prereq-hard-unmet",
+        "prerequisite": {"flag_key": "base-flag", "required_variation": "true", "gate": True},
+        "all_flags": {"base-flag": {"enabled": True, "variation": "false"}},
+        "expected_satisfied": check_prerequisite(
+            {"flag_key": "base-flag", "required_variation": "true", "gate": True},
+            {"base-flag": {"enabled": True, "variation": "false"}}, {}, set()),
+        "note": "Hard gate (gate=true), dependency unmet -> parent flag blocked",
+    }
+    vectors.append(v)
+
+    # Hard gate, met -> passes
+    all_flags = {"base-flag": {"enabled": True, "variation": "true"}}
+    prereq = {"flag_key": "base-flag", "required_variation": "true", "gate": True}
+    vectors.append({
+        "id": "prereq-hard-met",
+        "prerequisite": prereq, "all_flags": all_flags,
+        "expected_satisfied": check_prerequisite(prereq, all_flags, {}, set()),
+        "note": "Hard gate, dependency met -> parent flag proceeds",
+    })
+
+    # Soft gate, unmet -> still passes
+    all_flags = {"base-flag": {"enabled": True, "variation": "false"}}
+    prereq = {"flag_key": "base-flag", "required_variation": "true", "gate": False}
+    vectors.append({
+        "id": "prereq-soft-unmet",
+        "prerequisite": prereq, "all_flags": all_flags,
+        "expected_satisfied": check_prerequisite(prereq, all_flags, {}, set()),
+        "note": "Soft gate (gate=false), dependency unmet -> non-blocking, parent proceeds",
+    })
+
+    # Comparison mechanism is string-based (forward-compatible with multivariate
+    # flags), but this release's FlagEnvironmentState has no variation/value field —
+    # only enabled (bool). So "variation" here is always the stringified boolean
+    # outcome ("true"/"false"), never an arbitrary string. This vector confirms the
+    # comparison mechanism works correctly even though only boolean outcomes are
+    # reachable via any Java/Ruby/.NET flag state constructible in this release.
+    all_flags = {"plan-tier": {"enabled": True, "variation": "true"}}
+    prereq = {"flag_key": "plan-tier", "required_variation": "true", "gate": True}
+    vectors.append({
+        "id": "prereq-string-comparison-mechanism",
+        "prerequisite": prereq, "all_flags": all_flags,
+        "expected_satisfied": check_prerequisite(prereq, all_flags, {}, set()),
+        "note": "String-compare mechanism (forward-compatible with future multivariate prerequisites) applied to a boolean outcome — the only variation type constructible from this release's FlagEnvironmentState",
+    })
+
+    # Cycle detection
+    prereq = {"flag_key": "self-ref", "required_variation": "true", "gate": True}
+    vectors.append({
+        "id": "prereq-cycle-fails-open",
+        "prerequisite": prereq, "all_flags": {"self-ref": {"enabled": True, "variation": "true"}},
+        "seen_keys": ["self-ref"],
+        "expected_satisfied": check_prerequisite(prereq, {"self-ref": {"enabled": True, "variation": "true"}}, {}, {"self-ref"}),
+        "note": "Cycle detected via seen-set -> fails open, treated as satisfied",
+    })
+
+    # Missing dependency, hard gate
+    prereq = {"flag_key": "nonexistent", "required_variation": "true", "gate": True}
+    vectors.append({
+        "id": "prereq-missing-dep-hard-gate",
+        "prerequisite": prereq, "all_flags": {},
+        "expected_satisfied": check_prerequisite(prereq, {}, {}, set()),
+        "note": "Missing prerequisite flag with hard gate -> blocked",
+    })
+
+    # Missing dependency, soft gate
+    prereq = {"flag_key": "nonexistent", "required_variation": "true", "gate": False}
+    vectors.append({
+        "id": "prereq-missing-dep-soft-gate",
+        "prerequisite": prereq, "all_flags": {},
+        "expected_satisfied": check_prerequisite(prereq, {}, {}, set()),
+        "note": "Missing prerequisite flag with soft gate -> non-blocking",
+    })
+
+    return vectors
+
+
+def build_target_list_vectors() -> list[dict]:
+    return [
+        {"id": "target-list-match", "target_list": ["user-1", "user-2"], "user_id": "user-1",
+         "expected_target_match": "user-1" in ["user-1", "user-2"], "note": "User in target list"},
+        {"id": "target-list-no-match", "target_list": ["user-1", "user-2"], "user_id": "user-9",
+         "expected_target_match": "user-9" in ["user-1", "user-2"], "note": "User not in target list"},
+        {"id": "target-list-empty", "target_list": [], "user_id": "user-1",
+         "expected_target_match": False, "note": "Empty target list never matches"},
+        {"id": "target-list-empty-user-id", "target_list": ["user-1"], "user_id": "",
+         "expected_target_match": "" in ["user-1"], "note": "Empty user_id against non-empty list"},
+    ]
+
+
+def build_rule_vectors() -> list[dict]:
+    vectors = []
+
+    def add(id_, rules_raw, attrs, note):
+        rules = [{"id": r["id"], "priority": r["priority"], "rollout_pct": r["rollout_pct"],
+                  "variation": r["variation"], "conditions": r["conditions"]} for r in rules_raw]
+        result = match_rules(rules, attrs, "test-flag")
+        vectors.append({
+            "id": id_,
+            "rules": [{"id": r["id"], "priority": r["priority"], "rollout_pct": r["rollout_pct"],
+                       "variation": r["variation"],
+                       "conditions": [{"attribute": c.attribute, "operator": c.operator,
+                                        "values": c.values, "negate": c.negate} for c in r["conditions"]]}
+                      for r in rules_raw],
+            "attrs": attrs,
+            "expected_result": {"reason": result[0], "variation": result[1]} if result else None,
+            "note": note,
+        })
+
+    add("rule-eq-match", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("plan", "eq", ["pro"])]}], {"plan": "pro", "user_id": "u1"}, "eq operator match")
+
+    add("rule-neq-in-nin", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("plan", "nin", ["free", "trial"])]}], {"plan": "pro", "user_id": "u1"}, "nin operator, not in excluded list")
+
+    add("rule-string-contains-case-insensitive", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("email", "contains", ["ACME"])]}], {"email": "user@acme.com", "user_id": "u1"},
+        "contains, case-insensitive (canonical: matches Python's shipped behavior)")
+
+    add("rule-numeric-gte", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("age", "gte", ["18"])]}], {"age": "18", "user_id": "u1"}, "gte boundary")
+
+    add("rule-numeric-non-numeric-inconclusive-falls-through", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "skip",
+        "conditions": [Condition("age", "gt", ["18"])]}], {"age": "not-a-number", "user_id": "u1"},
+        "non-numeric input is inconclusive, no rule matches, result is null")
+
+    add("rule-semver-gte-prerelease-ordering", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("app_version", "semver_gte", ["1.0.0"])]}], {"app_version": "1.0.0-beta", "user_id": "u1"},
+        "1.0.0-beta < 1.0.0, so semver_gte(1.0.0-beta, 1.0.0) is false -> no match")
+
+    add("rule-semver-numeric-segment-ordering", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("app_version", "semver_gte", ["1.9.0"])]}], {"app_version": "1.10.0", "user_id": "u1"},
+        "1.10.0 >= 1.9.0 (numeric padding prevents lexical-string bug) -> match")
+
+    add("rule-date-before", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("signup_date", "date_before", ["2026-01-01T00:00:00Z"])]}],
+        {"signup_date": "2025-06-01T00:00:00Z", "user_id": "u1"}, "date_before match")
+
+    add("rule-date-malformed-inconclusive", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "skip",
+        "conditions": [Condition("signup_date", "date_before", ["2026-01-01T00:00:00Z"])]}],
+        {"signup_date": "not-a-date", "user_id": "u1"}, "malformed date is inconclusive, no rule matches")
+
+    add("rule-geo-country-case-insensitive", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "yes",
+        "conditions": [Condition("geo.country", "in", ["US", "CA"])]}], {"geo.country": "us", "user_id": "u1"},
+        "GEO operator via dot-notation resolution, case-insensitive")
+
+    add("rule-multi-condition-and-both-match", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "match",
+        "conditions": [Condition("plan", "eq", ["pro"]), Condition("region", "eq", ["us"])]}],
+        {"plan": "pro", "region": "us", "user_id": "u1"}, "multi-condition AND, both match")
+
+    add("rule-multi-condition-and-one-fails", [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "match",
+        "conditions": [Condition("plan", "eq", ["pro"]), Condition("region", "eq", ["us"])]}],
+        {"plan": "pro", "region": "eu", "user_id": "u1"}, "multi-condition AND, one fails -> no match")
+
+    add("rule-priority-first-match-wins", [
+        {"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "high-priority",
+         "conditions": [Condition("plan", "eq", ["pro"])]},
+        {"id": "r2", "priority": 1, "rollout_pct": 100, "variation": "low-priority",
+         "conditions": [Condition("plan", "eq", ["pro"])]},
+    ], {"plan": "pro", "user_id": "u1"}, "priority 0 evaluated before priority 1, first match wins")
+
+    add("rule-per-rule-rollout-sub-bucketing", [
+        {"id": "r1", "priority": 0, "rollout_pct": 0, "variation": "never",
+         "conditions": [Condition("plan", "eq", ["pro"])]},
+        {"id": "r2", "priority": 1, "rollout_pct": 100, "variation": "fallback",
+         "conditions": [Condition("plan", "eq", ["pro"])]},
+    ], {"plan": "pro", "user_id": "u1"},
+        "rule 1 conditions match but rollout_pct=0 excludes everyone -> falls to rule 2, not Step 5 fallthrough")
+
+    return vectors
+
+
+def build_missing_attribute_vectors() -> list[dict]:
+    vectors = []
+    result = match_rules([{
+        "id": "r1", "priority": 0, "rollout_pct": 100, "variation": "skipped",
+        "conditions": [Condition("missing_attr", "eq", ["x"])],
+    }], {"user_id": "u1"}, "test-flag")
+    vectors.append({
+        "id": "missing-attribute-skips-rule",
+        "rules": [{"id": "r1", "priority": 0, "rollout_pct": 100, "variation": "skipped",
+                   "conditions": [{"attribute": "missing_attr", "operator": "eq", "values": ["x"], "negate": False}]}],
+        "attrs": {"user_id": "u1"},
+        "expected_result": {"reason": result[0], "variation": result[1]} if result else None,
+        "note": "Attribute absent from context -> inconclusive, not false; rule skipped, no match (result null since no other rule)",
+    })
+    return vectors
+
+
+def main():
+    with open("vectors.json") as f:
+        existing = json.load(f)
+
+    existing["version"] = "1.2"
+    existing["prerequisite_vectors"] = build_prerequisite_vectors()
+    existing["target_list_vectors"] = build_target_list_vectors()
+    existing["rule_vectors"] = build_rule_vectors()
+    existing["missing_attribute_vectors"] = build_missing_attribute_vectors()
+
+    with open("vectors.json", "w") as f:
+        json.dump(existing, f, indent=2)
+        f.write("\n")
+
+    print(f"Wrote vectors.json version {existing['version']}: "
+          f"{len(existing['vectors'])} hash vectors, "
+          f"{len(existing['prerequisite_vectors'])} prerequisite, "
+          f"{len(existing['target_list_vectors'])} target_list, "
+          f"{len(existing['rule_vectors'])} rule, "
+          f"{len(existing['missing_attribute_vectors'])} missing_attribute.")
+
+
+if __name__ == "__main__":
+    main()
