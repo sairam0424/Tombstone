@@ -139,3 +139,46 @@ def evaluate_condition(condition: Condition, attrs: dict):
     if result == "inconclusive":
         return result
     return (not result) if condition.negate else result
+
+
+def check_prerequisite(prereq: dict, all_flags: dict, cache: dict, seen: set) -> bool:
+    """Canonical model: string variation match (TS's approach), explicit cycle
+    detection via seen-set (Python's approach), memoized via cache dict."""
+    dep_key = prereq["flag_key"]
+    required_variation = prereq["required_variation"]
+    gate = prereq.get("gate", True)
+
+    if dep_key in cache:
+        dep_variation = cache[dep_key]
+    elif dep_key in seen:
+        return True  # cycle detected — fail open, skip this prereq
+    else:
+        dep_flag = all_flags.get(dep_key)
+        if dep_flag is None:
+            dep_variation = None
+        else:
+            dep_variation = dep_flag.get("variation") if dep_flag.get("enabled") else "false"
+        cache[dep_key] = dep_variation
+
+    if str(dep_variation) != required_variation:
+        if not gate:
+            return True  # soft — unmet but non-blocking
+        return False
+    return True
+
+
+def match_rules(rules: list, attrs: dict, flag_key: str):
+    """Canonical model: multi-condition AND per rule (Python's), per-rule rollout
+    sub-bucketing (Python's), priority-ascending order, dot-notation resolution (TS's)."""
+    sorted_rules = sorted(rules, key=lambda r: r["priority"])
+    for rule in sorted_rules:
+        results = [evaluate_condition(c, attrs) for c in rule["conditions"]]
+        if any(r == "inconclusive" for r in results):
+            continue  # rule inconclusive — try next rule
+        if not all(results):
+            continue  # conditions didn't match — try next rule
+        bucket = murmur3_v1_bucket(flag_key, attrs.get("user_id", ""))
+        if bucket < rule["rollout_pct"]:
+            return ("RULE_MATCH", rule["variation"])
+        # matched conditions but outside this rule's own rollout — try next rule
+    return None
