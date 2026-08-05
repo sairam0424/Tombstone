@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { DependencyGraph } from './DependencyGraph.js';
+import { CriticalFlagsPanel } from './CriticalFlagsPanel.js';
 
 interface Node {
   key: string;
@@ -110,6 +111,10 @@ export function DependenciesTab({ flagKey, apiUrl, token }: DependenciesTabProps
         highlightedSubgraph={highlightedSubgraph}
         disableSimulation={disableSimulation}
       />
+
+      <div className="mt-6">
+        <CriticalFlagsPanel apiUrl={intelUrl} token={token} limit={10} />
+      </div>
     </div>
   );
 }
