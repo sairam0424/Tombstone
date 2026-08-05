@@ -644,10 +644,15 @@
         }
       ],
       "attrs": {
-        "geo.country": "us",
+        "geo": {
+          "country": "us"
+        },
         "user_id": "u1"
       },
-      "expected_result": null,
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
       "note": "GEO operator via dot-notation resolution, case-insensitive"
     },
     {
