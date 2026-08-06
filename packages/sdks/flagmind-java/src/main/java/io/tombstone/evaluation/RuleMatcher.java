@@ -1,11 +1,16 @@
 package io.tombstone.evaluation;
 
+import com.google.common.hash.Hashing;
 import io.tombstone.types.EvaluationContext;
 import io.tombstone.types.PropertyCondition;
+import io.tombstone.types.TargetingRule;
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import java.util.Comparator;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 public class RuleMatcher {
@@ -151,5 +156,39 @@ public class RuleMatcher {
 
     private static String normalizeIso8601(String s) {
         return s.replace("Z", "+00:00");
+    }
+
+    /** Canonical model: priority-ascending sort (0 = highest), multi-condition AND
+     *  per rule, per-rule rollout sub-bucketing (matched conditions but bucket
+     *  outside this rule's own rolloutPct falls to the NEXT rule, not Step 5). */
+    public static Optional<String> matchRules(List<TargetingRule> rules, EvaluationContext context, String flagKey) {
+        var sorted = rules.stream()
+            .sorted(Comparator.comparingInt(TargetingRule::priority))
+            .toList();
+
+        for (TargetingRule rule : sorted) {
+            boolean allMatch;
+            try {
+                allMatch = rule.conditions().stream().allMatch(c -> evaluateCondition(c, context));
+            } catch (InconclusiveMatchException e) {
+                continue; // rule inconclusive — try next rule
+            }
+            if (!allMatch) {
+                continue;
+            }
+            int bucket = murmur3Bucket(flagKey, context.userId());
+            if (bucket < rule.rolloutPct()) {
+                return Optional.of(rule.variation());
+            }
+            // conditions matched but outside this rule's own rollout — try next rule
+        }
+        return Optional.empty();
+    }
+
+    private static int murmur3Bucket(String flagKey, String userId) {
+        int hash = Hashing.murmur3_32_fixed()
+            .hashString(flagKey + userId, StandardCharsets.UTF_8)
+            .asInt();
+        return Integer.remainderUnsigned(hash, 100);
     }
 }

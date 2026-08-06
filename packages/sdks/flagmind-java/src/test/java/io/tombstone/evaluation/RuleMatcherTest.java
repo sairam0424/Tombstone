@@ -98,4 +98,52 @@ public class RuleMatcherTest {
         assertThrows(InconclusiveMatchException.class,
             () -> RuleMatcher.evaluateCondition(condition, context));
     }
+
+    @Test void testMatchRulesFirstPriorityWins() {
+        var cond = new PropertyCondition("plan", "eq", List.of("pro"), false);
+        var r1 = new TargetingRule("r1", List.of(cond), 100.0, "variant-a", 0);
+        var r2 = new TargetingRule("r2", List.of(cond), 100.0, "variant-b", 1);
+        var result = RuleMatcher.matchRules(List.of(r2, r1), ctx(Map.of("plan", "pro")), "test-flag");
+        assertEquals(Optional.of("variant-a"), result);
+    }
+
+    @Test void testMatchRulesMultiConditionAndBothMatch() {
+        var c1 = new PropertyCondition("plan", "eq", List.of("pro"), false);
+        var c2 = new PropertyCondition("region", "eq", List.of("us"), false);
+        var rule = new TargetingRule("r1", List.of(c1, c2), 100.0, "match", 0);
+        var result = RuleMatcher.matchRules(List.of(rule), ctx(Map.of("plan", "pro", "region", "us")), "test-flag");
+        assertEquals(Optional.of("match"), result);
+    }
+
+    @Test void testMatchRulesMultiConditionAndOneFails() {
+        var c1 = new PropertyCondition("plan", "eq", List.of("pro"), false);
+        var c2 = new PropertyCondition("region", "eq", List.of("us"), false);
+        var rule = new TargetingRule("r1", List.of(c1, c2), 100.0, "match", 0);
+        var result = RuleMatcher.matchRules(List.of(rule), ctx(Map.of("plan", "pro", "region", "eu")), "test-flag");
+        assertEquals(Optional.empty(), result);
+    }
+
+    @Test void testMatchRulesNoMatchFallsThrough() {
+        var cond = new PropertyCondition("plan", "eq", List.of("enterprise"), false);
+        var rule = new TargetingRule("r1", List.of(cond), 100.0, "match", 0);
+        var result = RuleMatcher.matchRules(List.of(rule), ctx(Map.of("plan", "free")), "test-flag");
+        assertEquals(Optional.empty(), result);
+    }
+
+    @Test void testMatchRulesInconclusiveConditionSkipsToNextRule() {
+        var missingCond = new PropertyCondition("missing_attr", "eq", List.of("x"), false);
+        var proCond = new PropertyCondition("plan", "eq", List.of("pro"), false);
+        var r1 = new TargetingRule("r1", List.of(missingCond), 100.0, "skipped", 0);
+        var r2 = new TargetingRule("r2", List.of(proCond), 100.0, "fallback-match", 1);
+        var result = RuleMatcher.matchRules(List.of(r1, r2), ctx(Map.of("plan", "pro")), "test-flag");
+        assertEquals(Optional.of("fallback-match"), result);
+    }
+
+    @Test void testMatchRulesPerRuleRolloutSubBucketingFallsToNextRule() {
+        var cond = new PropertyCondition("plan", "eq", List.of("pro"), false);
+        var r1 = new TargetingRule("r1", List.of(cond), 0.0, "never", 0);
+        var r2 = new TargetingRule("r2", List.of(cond), 100.0, "fallback", 1);
+        var result = RuleMatcher.matchRules(List.of(r1, r2), ctx(Map.of("plan", "pro")), "test-flag");
+        assertEquals(Optional.of("fallback"), result);
+    }
 }
