@@ -2,12 +2,17 @@ package io.tombstone.evaluation;
 
 import io.tombstone.types.EvaluationContext;
 import io.tombstone.types.PropertyCondition;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 public class RuleMatcher {
 
     private static final Set<String> GEO_ATTRIBUTES = Set.of("geo.country", "geo.region");
+    private static final Pattern LEADING_V_OR_BUILD_METADATA = Pattern.compile("(^v|\\+.*$)");
+    private static final Pattern PURE_DIGITS = Pattern.compile("^\\d+$");
 
     /** Canonical model: dot-notation attribute resolution over a flat attrs map
      *  (this release's EvaluationContext.attrs is Map<String,String>, so multi-
@@ -43,6 +48,10 @@ public class RuleMatcher {
             case "startswith" -> result = anyStartsWithIgnoreCase(values, attrVal);
             case "endswith" -> result = anyEndsWithIgnoreCase(values, attrVal);
             case "gt", "gte", "lt", "lte" -> result = evaluateNumeric(op, attrVal, values, condition.attribute());
+            case "semver_gt", "semver_gte", "semver_lt", "semver_lte", "semver_eq" ->
+                result = evaluateSemver(op, attrVal, values, condition.attribute());
+            case "date_before", "date_after" ->
+                result = evaluateDate(op, attrVal, values, condition.attribute());
             default -> throw new InconclusiveMatchException("Unknown operator: '" + op + "'");
         }
         return condition.negate() ? !result : result;
@@ -94,5 +103,53 @@ public class RuleMatcher {
             case "lte" -> nAttr <= nVal;
             default -> false;
         };
+    }
+
+    /** Ported byte-for-byte from flagmind-python's matching.py:27-39 (GrowthBook pattern). */
+    static String paddedVersion(String v) {
+        v = LEADING_V_OR_BUILD_METADATA.matcher(v).replaceAll("");
+        String[] parts = v.split("[-.]");
+        var padded = new ArrayList<String>();
+        for (String p : parts) {
+            padded.add(PURE_DIGITS.matcher(p).matches() ? String.format("%5s", p) : p);
+        }
+        if (padded.size() == 3) {
+            padded.add("~");
+        }
+        return String.join(".", padded);
+    }
+
+    private static boolean evaluateSemver(String op, String attrVal, List<String> values, String attribute) {
+        if (values.isEmpty()) {
+            throw new InconclusiveMatchException(
+                "semver operator requires at least one value for '" + attribute + "'");
+        }
+        String a = paddedVersion(attrVal);
+        String b = paddedVersion(values.get(0));
+        int cmp = a.compareTo(b);
+        return switch (op) {
+            case "semver_gt" -> cmp > 0;
+            case "semver_gte" -> cmp >= 0;
+            case "semver_lt" -> cmp < 0;
+            case "semver_lte" -> cmp <= 0;
+            case "semver_eq" -> cmp == 0;
+            default -> false;
+        };
+    }
+
+    private static boolean evaluateDate(String op, String attrVal, List<String> values, String attribute) {
+        OffsetDateTime dtAttr, dtVal;
+        try {
+            dtAttr = OffsetDateTime.parse(normalizeIso8601(attrVal));
+            dtVal = OffsetDateTime.parse(normalizeIso8601(values.get(0)));
+        } catch (DateTimeParseException | IndexOutOfBoundsException e) {
+            throw new InconclusiveMatchException(
+                "Date parse failed for '" + attribute + "': " + e.getMessage());
+        }
+        return "date_before".equals(op) ? dtAttr.isBefore(dtVal) : dtAttr.isAfter(dtVal);
+    }
+
+    private static String normalizeIso8601(String s) {
+        return s.replace("Z", "+00:00");
     }
 }

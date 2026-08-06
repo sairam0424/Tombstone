@@ -61,4 +61,41 @@ public class RuleMatcherTest {
         var condition = new PropertyCondition("geo.country", "in", List.of("US", "CA"), false);
         assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "us"))));
     }
+
+    @Test void testPaddedVersionOrdersNumericSegmentsCorrectly() {
+        assertTrue(RuleMatcher.paddedVersion("1.9.0").compareTo(RuleMatcher.paddedVersion("1.10.0")) < 0);
+    }
+
+    @Test void testPaddedVersionPrereleaseSortsBelowRelease() {
+        assertTrue(RuleMatcher.paddedVersion("1.0.0-beta").compareTo(RuleMatcher.paddedVersion("1.0.0")) < 0);
+    }
+
+    @Test void testPaddedVersionStripsVPrefixAndBuildMetadata() {
+        assertEquals(RuleMatcher.paddedVersion("1.2.3"), RuleMatcher.paddedVersion("v1.2.3+build.5"));
+    }
+
+    @Test void testEvaluateConditionSemverGte() {
+        var condition = new PropertyCondition("app_version", "semver_gte", List.of("1.9.0"), false);
+        var context = ctx(Map.of("app_version", "1.10.0"));
+        assertTrue(RuleMatcher.evaluateCondition(condition, context));
+    }
+
+    @Test void testEvaluateConditionSemverPrereleaseOrdering() {
+        var condition = new PropertyCondition("app_version", "semver_gte", List.of("1.0.0"), false);
+        var context = ctx(Map.of("app_version", "1.0.0-beta"));
+        assertFalse(RuleMatcher.evaluateCondition(condition, context));
+    }
+
+    @Test void testEvaluateConditionDateBefore() {
+        var condition = new PropertyCondition("signup_date", "date_before", List.of("2026-01-01T00:00:00Z"), false);
+        var context = ctx(Map.of("signup_date", "2025-06-01T00:00:00Z"));
+        assertTrue(RuleMatcher.evaluateCondition(condition, context));
+    }
+
+    @Test void testEvaluateConditionDateMalformedThrows() {
+        var condition = new PropertyCondition("signup_date", "date_before", List.of("2026-01-01T00:00:00Z"), false);
+        var context = ctx(Map.of("signup_date", "not-a-date"));
+        assertThrows(InconclusiveMatchException.class,
+            () -> RuleMatcher.evaluateCondition(condition, context));
+    }
 }
