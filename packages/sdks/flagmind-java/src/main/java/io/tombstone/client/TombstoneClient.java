@@ -45,7 +45,7 @@ public class TombstoneClient implements Closeable {
     public <T> EvaluationResult<T> evaluate(String flagKey, EvaluationContext context) {
         Optional<FlagEnvironmentState> state = cache.get(flagKey);
         T def = (T) defaults.getOrDefault(flagKey, Boolean.FALSE);
-        return engine.evaluate(state.orElse(null), Collections.emptyList(), context, def, flagKey);
+        return engine.evaluate(state.orElse(null), context, def, flagKey);
     }
 
     public boolean isEnabled(String flagKey, EvaluationContext context) {
