@@ -3,6 +3,7 @@ package io.tombstone.evaluation;
 import io.tombstone.types.EvaluationContext;
 import io.tombstone.types.PropertyCondition;
 import java.util.*;
+import java.util.Locale;
 
 public class RuleMatcher {
 
@@ -48,7 +49,7 @@ public class RuleMatcher {
     }
 
     private static String normalizeOperator(String operator) {
-        String op = operator.toLowerCase();
+        String op = operator.toLowerCase(Locale.ROOT);
         return switch (op) {
             case "not_in" -> "nin";
             case "prefix" -> "startswith";
@@ -58,23 +59,23 @@ public class RuleMatcher {
     }
 
     private static boolean containsIgnoreCase(List<String> values, String attrVal) {
-        String upper = attrVal.toUpperCase();
-        return values.stream().anyMatch(v -> v.toUpperCase().equals(upper));
+        String upper = attrVal.toUpperCase(Locale.ROOT);
+        return values.stream().anyMatch(v -> v.toUpperCase(Locale.ROOT).equals(upper));
     }
 
     private static boolean anyContainsIgnoreCase(List<String> values, String attrVal) {
-        String upperAttr = attrVal.toUpperCase();
-        return values.stream().anyMatch(v -> upperAttr.contains(v.toUpperCase()));
+        String upperAttr = attrVal.toUpperCase(Locale.ROOT);
+        return values.stream().anyMatch(v -> upperAttr.contains(v.toUpperCase(Locale.ROOT)));
     }
 
     private static boolean anyStartsWithIgnoreCase(List<String> values, String attrVal) {
-        String upperAttr = attrVal.toUpperCase();
-        return values.stream().anyMatch(v -> upperAttr.startsWith(v.toUpperCase()));
+        String upperAttr = attrVal.toUpperCase(Locale.ROOT);
+        return values.stream().anyMatch(v -> upperAttr.startsWith(v.toUpperCase(Locale.ROOT)));
     }
 
     private static boolean anyEndsWithIgnoreCase(List<String> values, String attrVal) {
-        String upperAttr = attrVal.toUpperCase();
-        return values.stream().anyMatch(v -> upperAttr.endsWith(v.toUpperCase()));
+        String upperAttr = attrVal.toUpperCase(Locale.ROOT);
+        return values.stream().anyMatch(v -> upperAttr.endsWith(v.toUpperCase(Locale.ROOT)));
     }
 
     private static boolean evaluateNumeric(String op, String attrVal, List<String> values, String attribute) {
