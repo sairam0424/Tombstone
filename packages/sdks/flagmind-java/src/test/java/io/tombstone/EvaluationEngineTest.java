@@ -11,7 +11,7 @@ public class EvaluationEngineTest {
     private final EvaluationContext ctx = EvaluationContext.of("user-abc-123");
 
     private FlagEnvironmentState flag(boolean enabled, int pct) {
-        return new FlagEnvironmentState("id-1", "test-flag", "test", enabled, pct, "false", 0L);
+        return FlagEnvironmentState.simple("id-1", "test-flag", "test", enabled, pct, "false", 0L);
     }
 
     @Test void testDisabledReturnsOff() {

@@ -69,7 +69,7 @@ public class TombstoneClient implements Closeable {
             List<FlagEnvironmentState> states = new ArrayList<>();
             for (Object f : flags) {
                 Map<?, ?> fm = (Map<?, ?>) f;
-                states.add(new FlagEnvironmentState(
+                states.add(FlagEnvironmentState.simple(
                     str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
                     Boolean.TRUE.equals(fm.get("enabled")),
                     fm.get("rollout_pct") instanceof Number n ? n.intValue() : 0,

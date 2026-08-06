@@ -21,7 +21,7 @@ public class FlagCache {
         Map<String, FlagEnvironmentState> current = cache.get();
         FlagEnvironmentState existing = current.get(flagKey);
         if (existing == null) return;
-        FlagEnvironmentState updated = new FlagEnvironmentState(
+        FlagEnvironmentState updated = FlagEnvironmentState.simple(
             existing.flagId(), existing.flagKey(), existing.environment(),
             enabled, rolloutPct, existing.safeDefault(), ts
         );
