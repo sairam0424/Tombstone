@@ -50,6 +50,10 @@ module Tombstone
         any_ends_with_ignore_case(values, attr_val)
       when "gt", "gte", "lt", "lte"
         evaluate_numeric(op, attr_val, values, condition.attribute)
+      when "semver_gt", "semver_gte", "semver_lt", "semver_lte", "semver_eq"
+        evaluate_semver(op, attr_val, values, condition.attribute)
+      when "date_before", "date_after"
+        evaluate_date(op, attr_val, values, condition.attribute)
       else
         raise InconclusiveMatchError, "Unknown operator: '#{op}'"
       end
@@ -102,6 +106,48 @@ module Tombstone
       when "lte" then n_attr <= n_val
       else false
       end
+    end
+
+    # Ported byte-for-byte from flagmind-python's matching.py:27-39 (GrowthBook pattern).
+    def self.padded_version(v)
+      v = v.gsub(/^v/, "").gsub(/\+.*$/, "")
+      parts = v.split(/[-.]/)
+      padded = parts.map { |p| p.match?(/^\d+$/) ? p.rjust(5, " ") : p }
+      padded << "~" if padded.size == 3
+      padded.join(".")
+    end
+
+    def self.evaluate_semver(op, attr_val, values, attribute)
+      raise InconclusiveMatchError, "semver operator requires at least one value for '#{attribute}'" if values.empty?
+
+      a = padded_version(attr_val)
+      b = padded_version(values[0])
+      cmp = a <=> b
+
+      case op
+      when "semver_gt" then cmp > 0
+      when "semver_gte" then cmp >= 0
+      when "semver_lt" then cmp < 0
+      when "semver_lte" then cmp <= 0
+      when "semver_eq" then cmp == 0
+      else false
+      end
+    end
+
+    def self.evaluate_date(op, attr_val, values, attribute)
+      require "time"
+      begin
+        dt_attr = Time.iso8601(normalize_iso8601(attr_val))
+        dt_val = Time.iso8601(normalize_iso8601(values[0]))
+      rescue ArgumentError, IndexError
+        raise InconclusiveMatchError, "Date parse failed for '#{attribute}'"
+      end
+
+      op == "date_before" ? dt_attr < dt_val : dt_attr > dt_val
+    end
+
+    def self.normalize_iso8601(s)
+      s.gsub("Z", "+00:00")
     end
   end
 end

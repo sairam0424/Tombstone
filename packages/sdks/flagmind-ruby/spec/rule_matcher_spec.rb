@@ -69,4 +69,46 @@ RSpec.describe Tombstone::RuleMatcher do
       expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("geo" => { "country" => "us" }))).to be true
     end
   end
+
+  describe ".padded_version" do
+    it "orders numeric segments correctly" do
+      expect(Tombstone::RuleMatcher.padded_version("1.9.0")).to be < Tombstone::RuleMatcher.padded_version("1.10.0")
+    end
+
+    it "prerelease sorts below release" do
+      expect(Tombstone::RuleMatcher.padded_version("1.0.0-beta")).to be < Tombstone::RuleMatcher.padded_version("1.0.0")
+    end
+
+    it "strips v prefix and build metadata" do
+      expect(Tombstone::RuleMatcher.padded_version("1.2.3")).to eq(Tombstone::RuleMatcher.padded_version("v1.2.3+build.5"))
+    end
+  end
+
+  describe ".evaluate_condition semver/date" do
+    it "semver_gte" do
+      cond = Tombstone::PropertyCondition.new(attribute: "app_version", operator: "semver_gte", values: ["1.9.0"], negate: false)
+      context = ctx("app_version" => "1.10.0")
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, context)).to be true
+    end
+
+    it "semver prerelease ordering" do
+      cond = Tombstone::PropertyCondition.new(attribute: "app_version", operator: "semver_gte", values: ["1.0.0"], negate: false)
+      context = ctx("app_version" => "1.0.0-beta")
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, context)).to be false
+    end
+
+    it "date_before" do
+      cond = Tombstone::PropertyCondition.new(attribute: "signup_date", operator: "date_before", values: ["2026-01-01T00:00:00Z"], negate: false)
+      context = ctx("signup_date" => "2025-06-01T00:00:00Z")
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, context)).to be true
+    end
+
+    it "date malformed raises InconclusiveMatchError" do
+      cond = Tombstone::PropertyCondition.new(attribute: "signup_date", operator: "date_before", values: ["2026-01-01T00:00:00Z"], negate: false)
+      context = ctx("signup_date" => "not-a-date")
+      expect {
+        Tombstone::RuleMatcher.evaluate_condition(cond, context)
+      }.to raise_error(Tombstone::InconclusiveMatchError)
+    end
+  end
 end
