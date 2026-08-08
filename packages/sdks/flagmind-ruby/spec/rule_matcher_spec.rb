@@ -110,5 +110,21 @@ RSpec.describe Tombstone::RuleMatcher do
         Tombstone::RuleMatcher.evaluate_condition(cond, context)
       }.to raise_error(Tombstone::InconclusiveMatchError)
     end
+
+    it "date empty values raises InconclusiveMatchError" do
+      cond = Tombstone::PropertyCondition.new(attribute: "signup_date", operator: "date_before", values: [], negate: false)
+      context = ctx("signup_date" => "2025-06-01T00:00:00Z")
+      expect {
+        Tombstone::RuleMatcher.evaluate_condition(cond, context)
+      }.to raise_error(Tombstone::InconclusiveMatchError)
+    end
+
+    it "semver empty values raises InconclusiveMatchError" do
+      cond = Tombstone::PropertyCondition.new(attribute: "app_version", operator: "semver_gte", values: [], negate: false)
+      context = ctx("app_version" => "1.0.0")
+      expect {
+        Tombstone::RuleMatcher.evaluate_condition(cond, context)
+      }.to raise_error(Tombstone::InconclusiveMatchError)
+    end
   end
 end

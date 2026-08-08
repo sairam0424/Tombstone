@@ -136,6 +136,8 @@ module Tombstone
 
     def self.evaluate_date(op, attr_val, values, attribute)
       require "time"
+      raise InconclusiveMatchError, "date operator requires at least one value for '#{attribute}'" if values.empty?
+
       begin
         dt_attr = Time.iso8601(normalize_iso8601(attr_val))
         dt_val = Time.iso8601(normalize_iso8601(values[0]))
