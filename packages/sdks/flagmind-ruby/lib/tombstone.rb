@@ -1,5 +1,7 @@
 # Tombstone Ruby SDK entrypoint
 require_relative "flagmind/types"
+require_relative "flagmind/errors"
+require_relative "flagmind/rule_matcher"
 require_relative "flagmind/evaluation_engine"
 require_relative "flagmind/flag_cache"
 require_relative "flagmind/client"
