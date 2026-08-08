@@ -111,4 +111,54 @@ RSpec.describe Tombstone::RuleMatcher do
       }.to raise_error(Tombstone::InconclusiveMatchError)
     end
   end
+
+  describe ".match_rules" do
+    it "first priority wins" do
+      cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      r1 = Tombstone::TargetingRule.new(id: "r1", conditions: [cond], rollout_pct: 100, variation: "variant-a", priority: 0)
+      r2 = Tombstone::TargetingRule.new(id: "r2", conditions: [cond], rollout_pct: 100, variation: "variant-b", priority: 1)
+      result = Tombstone::RuleMatcher.match_rules([r2, r1], ctx("plan" => "pro"), "test-flag")
+      expect(result).to eq("variant-a")
+    end
+
+    it "multi-condition AND both match" do
+      c1 = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      c2 = Tombstone::PropertyCondition.new(attribute: "region", operator: "eq", values: ["us"], negate: false)
+      rule = Tombstone::TargetingRule.new(id: "r1", conditions: [c1, c2], rollout_pct: 100, variation: "match", priority: 0)
+      result = Tombstone::RuleMatcher.match_rules([rule], ctx("plan" => "pro", "region" => "us"), "test-flag")
+      expect(result).to eq("match")
+    end
+
+    it "multi-condition AND one fails" do
+      c1 = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      c2 = Tombstone::PropertyCondition.new(attribute: "region", operator: "eq", values: ["us"], negate: false)
+      rule = Tombstone::TargetingRule.new(id: "r1", conditions: [c1, c2], rollout_pct: 100, variation: "match", priority: 0)
+      result = Tombstone::RuleMatcher.match_rules([rule], ctx("plan" => "pro", "region" => "eu"), "test-flag")
+      expect(result).to be_nil
+    end
+
+    it "no match falls through" do
+      cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["enterprise"], negate: false)
+      rule = Tombstone::TargetingRule.new(id: "r1", conditions: [cond], rollout_pct: 100, variation: "match", priority: 0)
+      result = Tombstone::RuleMatcher.match_rules([rule], ctx("plan" => "free"), "test-flag")
+      expect(result).to be_nil
+    end
+
+    it "inconclusive condition skips to next rule" do
+      missing_cond = Tombstone::PropertyCondition.new(attribute: "missing_attr", operator: "eq", values: ["x"], negate: false)
+      pro_cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      r1 = Tombstone::TargetingRule.new(id: "r1", conditions: [missing_cond], rollout_pct: 100, variation: "skipped", priority: 0)
+      r2 = Tombstone::TargetingRule.new(id: "r2", conditions: [pro_cond], rollout_pct: 100, variation: "fallback-match", priority: 1)
+      result = Tombstone::RuleMatcher.match_rules([r1, r2], ctx("plan" => "pro"), "test-flag")
+      expect(result).to eq("fallback-match")
+    end
+
+    it "per-rule rollout sub-bucketing falls to next rule" do
+      cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      r1 = Tombstone::TargetingRule.new(id: "r1", conditions: [cond], rollout_pct: 0, variation: "never", priority: 0)
+      r2 = Tombstone::TargetingRule.new(id: "r2", conditions: [cond], rollout_pct: 100, variation: "fallback", priority: 1)
+      result = Tombstone::RuleMatcher.match_rules([r1, r2], ctx("plan" => "pro"), "test-flag")
+      expect(result).to eq("fallback")
+    end
+  end
 end

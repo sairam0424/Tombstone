@@ -1,4 +1,5 @@
 require "set"
+require "murmurhash3"
 
 module Tombstone
   module RuleMatcher
@@ -148,6 +149,35 @@ module Tombstone
 
     def self.normalize_iso8601(s)
       s.gsub("Z", "+00:00")
+    end
+
+    # Canonical model: priority-ascending sort (0 = highest), multi-condition AND
+    # per rule, per-rule rollout sub-bucketing (matched conditions but bucket
+    # outside this rule's own rollout_pct falls to the NEXT rule, not Step 5).
+    def self.match_rules(rules, context, flag_key)
+      sorted = rules.sort_by(&:priority)
+
+      sorted.each do |rule|
+        all_match = begin
+          rule.conditions.all? { |c| evaluate_condition(c, context) }
+        rescue InconclusiveMatchError
+          next  # rule inconclusive — try next rule
+        end
+
+        next unless all_match
+
+        bucket = murmur3_bucket(flag_key, context.user_id)
+        return rule.variation if bucket < rule.rollout_pct
+
+        # conditions matched but outside this rule's own rollout — try next rule
+      end
+
+      nil
+    end
+
+    def self.murmur3_bucket(flag_key, user_id)
+      hash = MurmurHash3::V32.str_hash(flag_key + user_id, 0)
+      hash % 100
     end
   end
 end
