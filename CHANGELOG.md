@@ -11,6 +11,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.5.0] - 2026-08-09
+
+### Added
+- **SDK Parity**: Java, Ruby, and .NET SDKs brought to full 5-step evaluation pipeline parity with TypeScript/Python — prerequisites (recursive dependency evaluation with cycle detection + memoization, `gate` soft/hard semantics), individual target-list matching, priority-sorted rule matching (eq/neq/in/nin/contains/startswith/endswith/gt/gte/lt/lte/semver_*/date_* operators, case-insensitive geo attributes, per-rule rollout sub-bucketing), and `hashVersion=2` FNV-1a fallthrough hashing alongside the existing MurmurHash3 v1. `docs/SDK_CONTRACT.md` rewritten from an observational feature matrix into a normative canonical spec that all three SDKs implement. `packages/sdks/test-contract/vectors.json` expanded from v1.1 (24 hash-only vectors) to v1.2 (adds prerequisite, rule, and missing-attribute vectors) as the executable definition of parity (#94).
+- **Java SDK** (`packages/sdks/flagmind-java/`): added `FlagPrerequisite`, `TargetingRule`, `PropertyCondition` types, `hashVersion` field on `FlagEnvironmentState`, `PrerequisiteChecker`, `RuleMatcher`, `InconclusiveMatchException`. Maven `artifactId` standardized to `tombstone-java-sdk` (was `flagmind-java`). `ContractVectorsTest` harness verified locally: 89/89 tests pass (BUILD SUCCESSFUL), also green in CI (#97).
+- **Ruby SDK** (`packages/sdks/flagmind-ruby/`): same 5-step pipeline additions as Java. Gem name standardized to `tombstone-ruby-sdk` (was `flagmind-ruby`). `contract_vectors_spec.rb` harness: 60 examples, 0 failures — verified both locally and in CI (#98).
+- **.NET SDK** (`packages/sdks/flagmind-dotnet/`): same 5-step pipeline additions as Java/Ruby, implemented by hand — no `dotnet`/`csc`/`mono` toolchain was available in the authoring environment, so this SDK's `dotnet test` run has **not** been executed by any human or CI yet (no `.NET` job exists in `.github/workflows/ci.yml`). Reviewed line-by-line against the canonical spec and the existing codebase's conventions; a `dotnet test` run on a machine with the .NET 8 SDK is required before this SDK's parity claim is fully verified (#99).
+- **Dependency Visualization** (`services/intelligence/`): new REST endpoints `GET /api/v1/graph/dependencies` (wraps `DependencyGraphBuilder.get_impact_fast()`, Redis-backed with DB-scan fallback) and `GET /api/v1/graph/critical-flags` (Dependency Health Score ranking: `score = (in_degree + out_degree) * avg_edge_weight * blast_radius_multiplier`, multiplier 4/3/2/1 for BLOCKED/HIGH/MEDIUM/LOW). New MCP tool `tombstone_get_dependency_graph` (`workspace-mcp/src/tools/flags.ts`). Dashboard gains a "Dependencies" tab (`DependenciesTab.tsx`) with a force-directed graph (`DependencyGraph.tsx`, d3-force) and a `CriticalFlagsPanel.tsx` sorted list linking into flag detail pages. Python and Vitest test suites added for both endpoints and both new components (#95).
+
+### Fixed
+- **Ruby SDK P0**: removed the broken `lib/flagmind.rb` entrypoint, which `require_relative`'d files that referenced a nonexistent `Flagmind` module — this SDK could not be `require`d at all before this fix. `lib/tombstone.rb` is now the correct, working entrypoint (#98).
+- **.NET SDK P0**: `tests/FlagMind.Tests/FlagMind.Tests.csproj`'s `ProjectReference` pointed at `src/Tombstone/Tombstone.csproj`, which does not exist — corrected to the real `src/FlagMind/FlagMind.csproj` path. This SDK's test project could not build at all before this fix (#99).
+- **CI**: pinned `ruff` to `0.15.9` in `.github/workflows/ci.yml`'s Python Intelligence Service job — an unpinned `pip install ruff` had silently resolved `0.16.1` mid-release, whose expanded default ruleset (import-sorting, blind-except, and others) flagged 88 pre-existing violations unrelated to any in-flight PR's diff (#96).
+
+---
+
 ## [1.4.4] - 2026-07-16
 
 ### Fixed

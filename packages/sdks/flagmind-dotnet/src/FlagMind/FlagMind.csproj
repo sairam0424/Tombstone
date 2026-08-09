@@ -4,7 +4,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <PackageId>Tombstone.Client</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>Tombstone</Authors>
     <Description>Tombstone .NET SDK — server-side feature flag evaluation</Description>
   </PropertyGroup>
