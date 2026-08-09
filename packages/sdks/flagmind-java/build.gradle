@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.tombstone"
-version = '0.1.1'
+version = '0.2.0'
 sourceCompatibility = '21'
 
 repositories {
@@ -28,7 +28,7 @@ publishing {
     publications {
         maven(MavenPublication) {
             from components.java
-            artifactId = 'flagmind-java'
+            artifactId = 'tombstone-java-sdk'
         }
     }
 }

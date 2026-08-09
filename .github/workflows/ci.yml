@@ -72,7 +72,7 @@ jobs:
 
       - name: ruff check
         run: |
-          pip install ruff
+          pip install ruff==0.15.9
           ruff check . --ignore F401
 
       - name: pytest with coverage
