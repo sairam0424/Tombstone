@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
 using System.Globalization;
+using Murmur;
+using System.Text;
 
 namespace Tombstone;
 
@@ -153,4 +155,43 @@ public static class RuleMatcher
     }
 
     private static string NormalizeIso8601(string s) => s.Replace("Z", "+00:00");
+
+    /// <summary>
+    /// Canonical model: priority-ascending sort (0 = highest), multi-condition AND
+    /// per rule, per-rule rollout sub-bucketing (matched conditions but bucket
+    /// outside this rule's own RolloutPct falls to the NEXT rule, not Step 5).
+    /// </summary>
+    public static string? MatchRules(List<TargetingRule> rules, EvaluationContext context, string flagKey)
+    {
+        var sorted = rules.OrderBy(r => r.Priority).ToList();
+
+        foreach (var rule in sorted)
+        {
+            bool allMatch;
+            try
+            {
+                allMatch = rule.Conditions.All(c => EvaluateCondition(c, context));
+            }
+            catch (InconclusiveMatchException)
+            {
+                continue; // rule inconclusive — try next rule
+            }
+
+            if (!allMatch) continue;
+
+            var bucket = Murmur3Bucket(flagKey, context.UserId);
+            if (bucket < rule.RolloutPct) return rule.Variation;
+
+            // conditions matched but outside this rule's own rollout — try next rule
+        }
+        return null;
+    }
+
+    private static uint Murmur3Bucket(string flagKey, string userId)
+    {
+        var hasher = MurmurHash.Create32(seed: 0, managed: true);
+        var bytes = Encoding.UTF8.GetBytes(flagKey + userId);
+        var hash = hasher.ComputeHash(bytes);
+        return BitConverter.ToUInt32(hash, 0) % 100;
+    }
 }

@@ -93,4 +93,52 @@ public class RuleMatcherTests
         var context = Ctx(new() { ["signup_date"] = "not-a-date" });
         Assert.Throws<InconclusiveMatchException>(() => RuleMatcher.EvaluateCondition(condition, context));
     }
+
+    [Fact] public void MatchRules_FirstPriorityWins() {
+        var cond = new PropertyCondition("plan", "eq", new List<string> { "pro" }, false);
+        var r1 = new TargetingRule("r1", new List<PropertyCondition> { cond }, 100.0, "variant-a", 0);
+        var r2 = new TargetingRule("r2", new List<PropertyCondition> { cond }, 100.0, "variant-b", 1);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { r2, r1 }, Ctx(new() { ["plan"] = "pro" }), "test-flag");
+        Assert.Equal("variant-a", result);
+    }
+
+    [Fact] public void MatchRules_MultiConditionAndBothMatch() {
+        var c1 = new PropertyCondition("plan", "eq", new List<string> { "pro" }, false);
+        var c2 = new PropertyCondition("region", "eq", new List<string> { "us" }, false);
+        var rule = new TargetingRule("r1", new List<PropertyCondition> { c1, c2 }, 100.0, "match", 0);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { rule }, Ctx(new() { ["plan"] = "pro", ["region"] = "us" }), "test-flag");
+        Assert.Equal("match", result);
+    }
+
+    [Fact] public void MatchRules_MultiConditionAndOneFails() {
+        var c1 = new PropertyCondition("plan", "eq", new List<string> { "pro" }, false);
+        var c2 = new PropertyCondition("region", "eq", new List<string> { "us" }, false);
+        var rule = new TargetingRule("r1", new List<PropertyCondition> { c1, c2 }, 100.0, "match", 0);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { rule }, Ctx(new() { ["plan"] = "pro", ["region"] = "eu" }), "test-flag");
+        Assert.Null(result);
+    }
+
+    [Fact] public void MatchRules_NoMatchFallsThrough() {
+        var cond = new PropertyCondition("plan", "eq", new List<string> { "enterprise" }, false);
+        var rule = new TargetingRule("r1", new List<PropertyCondition> { cond }, 100.0, "match", 0);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { rule }, Ctx(new() { ["plan"] = "free" }), "test-flag");
+        Assert.Null(result);
+    }
+
+    [Fact] public void MatchRules_InconclusiveConditionSkipsToNextRule() {
+        var missingCond = new PropertyCondition("missing_attr", "eq", new List<string> { "x" }, false);
+        var proCond = new PropertyCondition("plan", "eq", new List<string> { "pro" }, false);
+        var r1 = new TargetingRule("r1", new List<PropertyCondition> { missingCond }, 100.0, "skipped", 0);
+        var r2 = new TargetingRule("r2", new List<PropertyCondition> { proCond }, 100.0, "fallback-match", 1);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { r1, r2 }, Ctx(new() { ["plan"] = "pro" }), "test-flag");
+        Assert.Equal("fallback-match", result);
+    }
+
+    [Fact] public void MatchRules_PerRuleRolloutSubBucketingFallsToNextRule() {
+        var cond = new PropertyCondition("plan", "eq", new List<string> { "pro" }, false);
+        var r1 = new TargetingRule("r1", new List<PropertyCondition> { cond }, 0.0, "never", 0);
+        var r2 = new TargetingRule("r2", new List<PropertyCondition> { cond }, 100.0, "fallback", 1);
+        var result = RuleMatcher.MatchRules(new List<TargetingRule> { r1, r2 }, Ctx(new() { ["plan"] = "pro" }), "test-flag");
+        Assert.Equal("fallback", result);
+    }
 }
