@@ -13,7 +13,7 @@ public class ContractVectorsTests
 
     private static JsonElement LoadVectors()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "test-contract", "vectors.json");
+        var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "test-contract", "vectors.json");
         var json = File.ReadAllText(path);
         return JsonDocument.Parse(json).RootElement;
     }
