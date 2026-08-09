@@ -1,3 +1,6 @@
+using System.Text.RegularExpressions;
+using System.Globalization;
+
 namespace Tombstone;
 
 public static class RuleMatcher
@@ -38,6 +41,10 @@ public static class RuleMatcher
             "startswith" => AnyStartsWithIgnoreCase(values, attrVal),
             "endswith" => AnyEndsWithIgnoreCase(values, attrVal),
             "gt" or "gte" or "lt" or "lte" => EvaluateNumeric(op, attrVal, values, condition.Attribute),
+            "semver_gt" or "semver_gte" or "semver_lt" or "semver_lte" or "semver_eq"
+                => EvaluateSemver(op, attrVal, values, condition.Attribute),
+            "date_before" or "date_after"
+                => EvaluateDate(op, attrVal, values, condition.Attribute),
             _ => throw new InconclusiveMatchException($"Unknown operator: '{op}'"),
         };
 
@@ -101,4 +108,49 @@ public static class RuleMatcher
             _ => false,
         };
     }
+
+    private static readonly Regex LeadingVOrBuildMetadata = new(@"(^v|\+.*$)", RegexOptions.Compiled);
+    private static readonly Regex PureDigits = new(@"^\d+$", RegexOptions.Compiled);
+
+    /// <summary>Ported byte-for-byte from flagmind-python's matching.py:27-39 (GrowthBook pattern).</summary>
+    public static string PaddedVersion(string v)
+    {
+        v = LeadingVOrBuildMetadata.Replace(v, "");
+        var parts = v.Split('-', '.');
+        var padded = parts.Select(p => PureDigits.IsMatch(p) ? p.PadLeft(5, ' ') : p).ToList();
+        if (padded.Count == 3) padded.Add("~");
+        return string.Join(".", padded);
+    }
+
+    private static bool EvaluateSemver(string op, string attrVal, List<string> values, string attribute)
+    {
+        if (values.Count == 0)
+            throw new InconclusiveMatchException($"semver operator requires at least one value for '{attribute}'");
+
+        var a = PaddedVersion(attrVal);
+        var b = PaddedVersion(values[0]);
+        var cmp = string.CompareOrdinal(a, b);
+
+        return op switch
+        {
+            "semver_gt" => cmp > 0,
+            "semver_gte" => cmp >= 0,
+            "semver_lt" => cmp < 0,
+            "semver_lte" => cmp <= 0,
+            "semver_eq" => cmp == 0,
+            _ => false,
+        };
+    }
+
+    private static bool EvaluateDate(string op, string attrVal, List<string> values, string attribute)
+    {
+        if (values.Count == 0
+            || !DateTimeOffset.TryParse(NormalizeIso8601(attrVal), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dtAttr)
+            || !DateTimeOffset.TryParse(NormalizeIso8601(values[0]), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dtVal))
+            throw new InconclusiveMatchException($"Date parse failed for '{attribute}'");
+
+        return op == "date_before" ? dtAttr < dtVal : dtAttr > dtVal;
+    }
+
+    private static string NormalizeIso8601(string s) => s.Replace("Z", "+00:00");
 }
