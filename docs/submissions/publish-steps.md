@@ -46,7 +46,7 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=tombstone"
 ## 3. PyPI — flagmind Python SDK
 
 ```bash
-cd packages/sdks/flagmind-python
+cd packages/sdks/tombstone-python-sdk
 
 # Install build tools
 pip install build twine
@@ -143,7 +143,7 @@ helm push tombstone-0.1.0.tgz oci://ghcr.io/sairam0424/helm-charts
 ## 8. NuGet — .NET SDK
 
 ```bash
-cd packages/sdks/flagmind-dotnet/src/FlagMind
+cd packages/sdks/tombstone-dotnet-sdk/src/FlagMind
 
 # Build
 dotnet pack --configuration Release
@@ -159,7 +159,7 @@ dotnet nuget push Tombstone.Client.0.1.0.nupkg \
 ## 9. RubyGems — Ruby SDK
 
 ```bash
-cd packages/sdks/flagmind-ruby
+cd packages/sdks/tombstone-ruby-sdk
 
 # Build gem (name is now flagmind-ruby — tombstone was taken)
 gem build flagmind.gemspec

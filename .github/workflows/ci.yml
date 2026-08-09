@@ -116,8 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        # Physical directory still named flagmind-python (package renamed to tombstone)
-        working-directory: packages/sdks/flagmind-python
+        working-directory: packages/sdks/tombstone-python-sdk
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -144,9 +143,8 @@ jobs:
         with:
           ruby-version: "3.3"
           bundler-cache: true
-          # Physical directory still named flagmind-ruby (gem renamed to tombstone)
-          working-directory: packages/sdks/flagmind-ruby
-      - run: cd packages/sdks/flagmind-ruby && bundle exec rspec
+          working-directory: packages/sdks/tombstone-ruby-sdk
+      - run: cd packages/sdks/tombstone-ruby-sdk && bundle exec rspec
 
   java-sdk:
     name: Java SDK
@@ -157,14 +155,24 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      # Physical directory still named flagmind-java (package renamed to io.tombstone)
       - name: Install Gradle 8.7
         run: |
           wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /opt/gradle
           echo "/opt/gradle/gradle-8.7/bin" >> $GITHUB_PATH
       - name: Run Java SDK tests
-        run: cd packages/sdks/flagmind-java && gradle test
+        run: cd packages/sdks/tombstone-java-sdk && gradle test
+
+  dotnet-sdk:
+    name: .NET SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Run .NET SDK tests
+        run: cd packages/sdks/tombstone-dotnet-sdk && dotnet test tests/FlagMind.Tests/FlagMind.Tests.csproj
 
   terraform-provider:
     name: Terraform Provider

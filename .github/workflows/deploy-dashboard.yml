@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'workspace-dashboard/**'
+      - 'package-lock.json'
       - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
 
@@ -20,8 +21,7 @@ jobs:
           node-version: '22'
 
       - name: Install dashboard deps
-        working-directory: workspace-dashboard
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build dashboard
         working-directory: workspace-dashboard

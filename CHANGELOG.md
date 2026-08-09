@@ -9,6 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **.NET SDK**: added a `.NET SDK` CI job (`.github/workflows/ci.yml`) — none existed before, so this SDK's v1.5.0 parity work had never actually compiled or run its test suite. First real run surfaced and fixed 4 genuine bugs: `FlagMind.sln` was missing a required solution-file section, causing `dotnet test` to silently restore/run zero projects; `FlagMind.csproj` referenced a nonexistent NuGet package ID (`Murmur`, corrected to the real `murmurhash` package); a throw-only test lambda was ambiguous between xunit's `Assert.Throws<T>(Action)` and its `[Obsolete]`-marked `Func<Task>` overload (fixed by explicitly typing the lambda as `Action`); and `ContractVectorsTests.cs`'s `vectors.json` path traversal was off by one directory level. Full suite now passes: 94/94 tests, 0 failed (verified via real CI execution).
+
 ---
 
 ## [1.5.0] - 2026-08-09
