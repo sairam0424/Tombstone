@@ -175,7 +175,7 @@ jobs:
         with:
           dotnet-version: "8.0.x"
       - name: Run .NET SDK tests
-        run: cd packages/sdks/flagmind-dotnet && dotnet test
+        run: cd packages/sdks/flagmind-dotnet && dotnet test tests/FlagMind.Tests/FlagMind.Tests.csproj
 
   terraform-provider:
     name: Terraform Provider
