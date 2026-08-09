@@ -54,4 +54,67 @@ RSpec.describe Tombstone::EvaluationEngine do
       end
     end
   end
+
+  describe "full 5-step pipeline" do
+    it "prerequisite hard gate blocks evaluation" do
+      base_flag = flag(enabled: false, pct: 0)
+      prereq = Tombstone::FlagPrerequisite.new(flag_key: "base-flag", required_variation: "true", gate: true)
+      parent_flag = Tombstone::FlagEnvironmentState.new(
+        flag_id: "id-1", flag_key: "parent-flag", environment: "test",
+        enabled: true, rollout_pct: 100, safe_default: "false", updated_at: 0,
+        prerequisites: [prereq], targeting_rules: [], target_list: [], hash_version: 1
+      )
+      lookup = ->(key) { key == "base-flag" ? base_flag : nil }
+
+      result = engine.evaluate(parent_flag, ctx, false, "parent-flag", flag_lookup: lookup, prerequisite_cache: {}, seen_keys: Set.new)
+
+      expect(result.reason).to eq(Tombstone::EvaluationReason::PREREQUISITE_FAILED)
+      expect(result.value).to be false
+    end
+
+    it "target list match returns true" do
+      target_flag = Tombstone::FlagEnvironmentState.new(
+        flag_id: "id-1", flag_key: "test-flag", environment: "test",
+        enabled: true, rollout_pct: 0, safe_default: "false", updated_at: 0,
+        prerequisites: [], targeting_rules: [], target_list: ["user-abc-123"], hash_version: 1
+      )
+
+      result = engine.evaluate(target_flag, ctx, false, "test-flag")
+
+      expect(result.reason).to eq(Tombstone::EvaluationReason::TARGET_MATCH)
+      expect(result.value).to be true
+    end
+
+    it "rule match returns rule variation" do
+      condition = Tombstone::PropertyCondition.new(attribute: "plan", operator: "eq", values: ["pro"], negate: false)
+      rule = Tombstone::TargetingRule.new(id: "r1", conditions: [condition], rollout_pct: 100, variation: "matched-variation", priority: 0)
+      rule_flag = Tombstone::FlagEnvironmentState.new(
+        flag_id: "id-1", flag_key: "test-flag", environment: "test",
+        enabled: true, rollout_pct: 0, safe_default: "false", updated_at: 0,
+        prerequisites: [], targeting_rules: [rule], target_list: [], hash_version: 1
+      )
+      pro_context = Tombstone::EvaluationContext.new(user_id: "u1", org_id: "", attrs: { "plan" => "pro" })
+
+      result = engine.evaluate(rule_flag, pro_context, "default-value", "test-flag")
+
+      expect(result.reason).to eq(Tombstone::EvaluationReason::RULE_MATCH)
+      expect(result.value).to eq("matched-variation")
+    end
+
+    it "hash version 2 uses FNV-1a" do
+      # Vector from test-contract/vectors.json: checkout-v2/user-abc-123, v2, expected_bucket=0.343.
+      # rollout_pct=30 -> bucket 0.343 >= 0.30 -> NOT in cohort -> default returned.
+      v2_flag = Tombstone::FlagEnvironmentState.new(
+        flag_id: "id-1", flag_key: "checkout-v2", environment: "test",
+        enabled: true, rollout_pct: 30, safe_default: "false", updated_at: 0,
+        prerequisites: [], targeting_rules: [], target_list: [], hash_version: 2
+      )
+      v2_context = Tombstone::EvaluationContext.of("user-abc-123")
+
+      result = engine.evaluate(v2_flag, v2_context, false, "checkout-v2")
+
+      expect(result.value).to be false
+      expect(result.reason).to eq(Tombstone::EvaluationReason::FALLTHROUGH)
+    end
+  end
 end

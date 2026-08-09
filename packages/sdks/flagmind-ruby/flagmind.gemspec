@@ -1,5 +1,5 @@
 Gem::Specification.new do |s|
-  s.name        = "flagmind-ruby"
+  s.name        = "tombstone-ruby-sdk"
   s.version     = "0.1.0"
   s.summary     = "Tombstone Ruby SDK — server-side feature flag evaluation"
   s.description = "Ruby SDK for Tombstone, the self-hosted production intelligence layer for feature flags."

@@ -1,5 +1,5 @@
 {
-  "version": "1.1",
+  "version": "1.2",
   "description": "Cross-language parity vectors for Tombstone SDKs. hashVersion 1 = MurmurHash3 (legacy). hashVersion 2 = double-FNV32a, 10,000-bucket (parallel-experiment bias fix).",
   "v1": {
     "hash_algorithm": "MurmurHash3 unsigned 32-bit, seed=0",
@@ -12,29 +12,843 @@
     "input_format": "inner = fnv32a(concat(flag_key, user_id)); outer = fnv32a(decimal_string(inner)); bucket = (outer % 10000) / 10000"
   },
   "vectors": [
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 100, "expected_in_cohort": true, "note": "100% always true"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 0, "expected_in_cohort": false, "note": "0% always false"},
-    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": false, "note": "bucket > 50"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 67, "expected_in_cohort": true, "note": "bucket 66 < 67 — confirmed via MurmurHash3"},
-    {"flag_key": "payment-gateway-fee-display", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": true},
-    {"flag_key": "max-cart-items", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 75, "expected_in_cohort": true},
-    {"flag_key": "max-cart-items", "user_id": "user-xyz-789", "hash_version": 1, "rollout_pct": 25, "expected_in_cohort": false},
-    {"flag_key": "a", "user_id": "b", "hash_version": 1, "rollout_pct": 92, "expected_in_cohort": true, "note": "minimal key and user_id — bucket 91 < 92, hash stability check"},
-    {"flag_key": "checkout-v2", "user_id": "", "hash_version": 1, "rollout_pct": 50, "expected_in_cohort": false, "note": "empty user_id — must not panic, hash input is flag_key only"},
-    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 1, "expected_in_cohort": false, "note": "deep dot-notation key with long path"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 99, "expected_in_cohort": true, "note": "bucket < 99 — confirms sub-100 boundary"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 1, "rollout_pct": 1, "expected_in_cohort": false, "note": "rollout_pct=1 — nearly everyone excluded"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 100, "expected_bucket": 0.343, "expected_in_cohort": true, "note": "100% always true — v2 bucket=0.343"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 0, "expected_bucket": 0.343, "expected_in_cohort": false, "note": "0% always false"},
-    {"flag_key": "checkout-v2", "user_id": "user-xyz-789", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.2433, "expected_in_cohort": true, "note": "bucket 0.2433 < 0.50 — in cohort"},
-    {"flag_key": "checkout-v2", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 30, "expected_bucket": 0.343, "expected_in_cohort": false, "note": "bucket 0.343 >= 0.30 — out of cohort"},
-    {"flag_key": "experiment.new-checkout", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.7994, "expected_in_cohort": false, "note": "bucket 0.7994 >= 0.50 — parallel experiment, different assignment than checkout-v2"},
-    {"flag_key": "experiment.new-checkout", "user_id": "user-xyz-789", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.4766, "expected_in_cohort": true, "note": "bucket 0.4766 < 0.50 — parallel experiment in cohort"},
-    {"flag_key": "checkout-v2", "user_id": "", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.9683, "expected_in_cohort": false, "note": "empty userId — must not panic, hash input is flag_key only"},
-    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 1, "expected_bucket": 0.0136, "expected_in_cohort": false, "note": "dot-notation key — bucket 0.0136 >= 0.01"},
-    {"flag_key": "payments.checkout.new-flow.v2-beta", "user_id": "user-abc-123", "hash_version": 2, "rollout_pct": 2, "expected_bucket": 0.0136, "expected_in_cohort": true, "note": "dot-notation key — bucket 0.0136 < 0.02"},
-    {"flag_key": "a", "user_id": "b", "hash_version": 2, "rollout_pct": 50, "expected_bucket": 0.6912, "expected_in_cohort": false, "note": "minimal key/userId — bucket 0.6912 >= 0.50"},
-    {"flag_key": "feature-flag-1", "user_id": "user-stable-1", "hash_version": 2, "rollout_pct": 25, "expected_bucket": 0.2896, "expected_in_cohort": false, "note": "bucket 0.2896 >= 0.25 — out of cohort"},
-    {"flag_key": "feature-flag-1", "user_id": "user-stable-2", "hash_version": 2, "rollout_pct": 75, "expected_bucket": 0.5784, "expected_in_cohort": true, "note": "bucket 0.5784 < 0.75 — in cohort"}
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 100,
+      "expected_in_cohort": true,
+      "note": "100% always true"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 0,
+      "expected_in_cohort": false,
+      "note": "0% always false"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-xyz-789",
+      "hash_version": 1,
+      "rollout_pct": 50,
+      "expected_in_cohort": false,
+      "note": "bucket > 50"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 67,
+      "expected_in_cohort": true,
+      "note": "bucket 66 < 67 \u2014 confirmed via MurmurHash3"
+    },
+    {
+      "flag_key": "payment-gateway-fee-display",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 50,
+      "expected_in_cohort": true
+    },
+    {
+      "flag_key": "max-cart-items",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 75,
+      "expected_in_cohort": true
+    },
+    {
+      "flag_key": "max-cart-items",
+      "user_id": "user-xyz-789",
+      "hash_version": 1,
+      "rollout_pct": 25,
+      "expected_in_cohort": false
+    },
+    {
+      "flag_key": "a",
+      "user_id": "b",
+      "hash_version": 1,
+      "rollout_pct": 92,
+      "expected_in_cohort": true,
+      "note": "minimal key and user_id \u2014 bucket 91 < 92, hash stability check"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "",
+      "hash_version": 1,
+      "rollout_pct": 50,
+      "expected_in_cohort": false,
+      "note": "empty user_id \u2014 must not panic, hash input is flag_key only"
+    },
+    {
+      "flag_key": "payments.checkout.new-flow.v2-beta",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 1,
+      "expected_in_cohort": false,
+      "note": "deep dot-notation key with long path"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 99,
+      "expected_in_cohort": true,
+      "note": "bucket < 99 \u2014 confirms sub-100 boundary"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 1,
+      "rollout_pct": 1,
+      "expected_in_cohort": false,
+      "note": "rollout_pct=1 \u2014 nearly everyone excluded"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 100,
+      "expected_bucket": 0.343,
+      "expected_in_cohort": true,
+      "note": "100% always true \u2014 v2 bucket=0.343"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 0,
+      "expected_bucket": 0.343,
+      "expected_in_cohort": false,
+      "note": "0% always false"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-xyz-789",
+      "hash_version": 2,
+      "rollout_pct": 50,
+      "expected_bucket": 0.2433,
+      "expected_in_cohort": true,
+      "note": "bucket 0.2433 < 0.50 \u2014 in cohort"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 30,
+      "expected_bucket": 0.343,
+      "expected_in_cohort": false,
+      "note": "bucket 0.343 >= 0.30 \u2014 out of cohort"
+    },
+    {
+      "flag_key": "experiment.new-checkout",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 50,
+      "expected_bucket": 0.7994,
+      "expected_in_cohort": false,
+      "note": "bucket 0.7994 >= 0.50 \u2014 parallel experiment, different assignment than checkout-v2"
+    },
+    {
+      "flag_key": "experiment.new-checkout",
+      "user_id": "user-xyz-789",
+      "hash_version": 2,
+      "rollout_pct": 50,
+      "expected_bucket": 0.4766,
+      "expected_in_cohort": true,
+      "note": "bucket 0.4766 < 0.50 \u2014 parallel experiment in cohort"
+    },
+    {
+      "flag_key": "checkout-v2",
+      "user_id": "",
+      "hash_version": 2,
+      "rollout_pct": 50,
+      "expected_bucket": 0.9683,
+      "expected_in_cohort": false,
+      "note": "empty userId \u2014 must not panic, hash input is flag_key only"
+    },
+    {
+      "flag_key": "payments.checkout.new-flow.v2-beta",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 1,
+      "expected_bucket": 0.0136,
+      "expected_in_cohort": false,
+      "note": "dot-notation key \u2014 bucket 0.0136 >= 0.01"
+    },
+    {
+      "flag_key": "payments.checkout.new-flow.v2-beta",
+      "user_id": "user-abc-123",
+      "hash_version": 2,
+      "rollout_pct": 2,
+      "expected_bucket": 0.0136,
+      "expected_in_cohort": true,
+      "note": "dot-notation key \u2014 bucket 0.0136 < 0.02"
+    },
+    {
+      "flag_key": "a",
+      "user_id": "b",
+      "hash_version": 2,
+      "rollout_pct": 50,
+      "expected_bucket": 0.6912,
+      "expected_in_cohort": false,
+      "note": "minimal key/userId \u2014 bucket 0.6912 >= 0.50"
+    },
+    {
+      "flag_key": "feature-flag-1",
+      "user_id": "user-stable-1",
+      "hash_version": 2,
+      "rollout_pct": 25,
+      "expected_bucket": 0.2896,
+      "expected_in_cohort": false,
+      "note": "bucket 0.2896 >= 0.25 \u2014 out of cohort"
+    },
+    {
+      "flag_key": "feature-flag-1",
+      "user_id": "user-stable-2",
+      "hash_version": 2,
+      "rollout_pct": 75,
+      "expected_bucket": 0.5784,
+      "expected_in_cohort": true,
+      "note": "bucket 0.5784 < 0.75 \u2014 in cohort"
+    }
+  ],
+  "prerequisite_vectors": [
+    {
+      "id": "prereq-hard-unmet",
+      "prerequisite": {
+        "flag_key": "base-flag",
+        "required_variation": "true",
+        "gate": true
+      },
+      "all_flags": {
+        "base-flag": {
+          "enabled": true,
+          "variation": "false"
+        }
+      },
+      "expected_satisfied": false,
+      "note": "Hard gate (gate=true), dependency unmet -> parent flag blocked"
+    },
+    {
+      "id": "prereq-hard-met",
+      "prerequisite": {
+        "flag_key": "base-flag",
+        "required_variation": "true",
+        "gate": true
+      },
+      "all_flags": {
+        "base-flag": {
+          "enabled": true,
+          "variation": "true"
+        }
+      },
+      "expected_satisfied": true,
+      "note": "Hard gate, dependency met -> parent flag proceeds"
+    },
+    {
+      "id": "prereq-soft-unmet",
+      "prerequisite": {
+        "flag_key": "base-flag",
+        "required_variation": "true",
+        "gate": false
+      },
+      "all_flags": {
+        "base-flag": {
+          "enabled": true,
+          "variation": "false"
+        }
+      },
+      "expected_satisfied": true,
+      "note": "Soft gate (gate=false), dependency unmet -> non-blocking, parent proceeds"
+    },
+    {
+      "id": "prereq-string-comparison-mechanism",
+      "prerequisite": {
+        "flag_key": "plan-tier",
+        "required_variation": "true",
+        "gate": true
+      },
+      "all_flags": {
+        "plan-tier": {
+          "enabled": true,
+          "variation": "true"
+        }
+      },
+      "expected_satisfied": true,
+      "note": "String-compare mechanism (forward-compatible with future multivariate prerequisites) applied to a boolean outcome \u2014 the only variation type constructible from this release's FlagEnvironmentState"
+    },
+    {
+      "id": "prereq-cycle-fails-open",
+      "prerequisite": {
+        "flag_key": "self-ref",
+        "required_variation": "true",
+        "gate": true
+      },
+      "all_flags": {
+        "self-ref": {
+          "enabled": true,
+          "variation": "true"
+        }
+      },
+      "seen_keys": [
+        "self-ref"
+      ],
+      "expected_satisfied": true,
+      "note": "Cycle detected via seen-set -> fails open, treated as satisfied"
+    },
+    {
+      "id": "prereq-missing-dep-hard-gate",
+      "prerequisite": {
+        "flag_key": "nonexistent",
+        "required_variation": "true",
+        "gate": true
+      },
+      "all_flags": {},
+      "expected_satisfied": false,
+      "note": "Missing prerequisite flag with hard gate -> blocked"
+    },
+    {
+      "id": "prereq-missing-dep-soft-gate",
+      "prerequisite": {
+        "flag_key": "nonexistent",
+        "required_variation": "true",
+        "gate": false
+      },
+      "all_flags": {},
+      "expected_satisfied": true,
+      "note": "Missing prerequisite flag with soft gate -> non-blocking"
+    }
+  ],
+  "target_list_vectors": [
+    {
+      "id": "target-list-match",
+      "target_list": [
+        "user-1",
+        "user-2"
+      ],
+      "user_id": "user-1",
+      "expected_target_match": true,
+      "note": "User in target list"
+    },
+    {
+      "id": "target-list-no-match",
+      "target_list": [
+        "user-1",
+        "user-2"
+      ],
+      "user_id": "user-9",
+      "expected_target_match": false,
+      "note": "User not in target list"
+    },
+    {
+      "id": "target-list-empty",
+      "target_list": [],
+      "user_id": "user-1",
+      "expected_target_match": false,
+      "note": "Empty target list never matches"
+    },
+    {
+      "id": "target-list-empty-user-id",
+      "target_list": [
+        "user-1"
+      ],
+      "user_id": "",
+      "expected_target_match": false,
+      "note": "Empty user_id against non-empty list"
+    }
+  ],
+  "rule_vectors": [
+    {
+      "id": "rule-eq-match",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "eq operator match"
+    },
+    {
+      "id": "rule-neq-in-nin",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "nin",
+              "values": [
+                "free",
+                "trial"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "nin operator, not in excluded list"
+    },
+    {
+      "id": "rule-string-contains-case-insensitive",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "email",
+              "operator": "contains",
+              "values": [
+                "ACME"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "email": "user@acme.com",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "contains, case-insensitive (canonical: matches Python's shipped behavior)"
+    },
+    {
+      "id": "rule-numeric-gte",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "age",
+              "operator": "gte",
+              "values": [
+                "18"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "age": "18",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "gte boundary"
+    },
+    {
+      "id": "rule-numeric-non-numeric-inconclusive-falls-through",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "skip",
+          "conditions": [
+            {
+              "attribute": "age",
+              "operator": "gt",
+              "values": [
+                "18"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "age": "not-a-number",
+        "user_id": "u1"
+      },
+      "expected_result": null,
+      "note": "non-numeric input is inconclusive, no rule matches, result is null"
+    },
+    {
+      "id": "rule-semver-gte-prerelease-ordering",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "app_version",
+              "operator": "semver_gte",
+              "values": [
+                "1.0.0"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "app_version": "1.0.0-beta",
+        "user_id": "u1"
+      },
+      "expected_result": null,
+      "note": "1.0.0-beta < 1.0.0, so semver_gte(1.0.0-beta, 1.0.0) is false -> no match"
+    },
+    {
+      "id": "rule-semver-numeric-segment-ordering",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "app_version",
+              "operator": "semver_gte",
+              "values": [
+                "1.9.0"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "app_version": "1.10.0",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "1.10.0 >= 1.9.0 (numeric padding prevents lexical-string bug) -> match"
+    },
+    {
+      "id": "rule-date-before",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "signup_date",
+              "operator": "date_before",
+              "values": [
+                "2026-01-01T00:00:00Z"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "signup_date": "2025-06-01T00:00:00Z",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "date_before match"
+    },
+    {
+      "id": "rule-date-malformed-inconclusive",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "skip",
+          "conditions": [
+            {
+              "attribute": "signup_date",
+              "operator": "date_before",
+              "values": [
+                "2026-01-01T00:00:00Z"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "signup_date": "not-a-date",
+        "user_id": "u1"
+      },
+      "expected_result": null,
+      "note": "malformed date is inconclusive, no rule matches"
+    },
+    {
+      "id": "rule-geo-country-case-insensitive",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "yes",
+          "conditions": [
+            {
+              "attribute": "geo.country",
+              "operator": "in",
+              "values": [
+                "US",
+                "CA"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "geo": {
+          "country": "us"
+        },
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "yes"
+      },
+      "note": "GEO operator via dot-notation resolution, case-insensitive"
+    },
+    {
+      "id": "rule-multi-condition-and-both-match",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "match",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            },
+            {
+              "attribute": "region",
+              "operator": "eq",
+              "values": [
+                "us"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "region": "us",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "match"
+      },
+      "note": "multi-condition AND, both match"
+    },
+    {
+      "id": "rule-multi-condition-and-one-fails",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "match",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            },
+            {
+              "attribute": "region",
+              "operator": "eq",
+              "values": [
+                "us"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "region": "eu",
+        "user_id": "u1"
+      },
+      "expected_result": null,
+      "note": "multi-condition AND, one fails -> no match"
+    },
+    {
+      "id": "rule-priority-first-match-wins",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "high-priority",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            }
+          ]
+        },
+        {
+          "id": "r2",
+          "priority": 1,
+          "rollout_pct": 100,
+          "variation": "low-priority",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "high-priority"
+      },
+      "note": "priority 0 evaluated before priority 1, first match wins"
+    },
+    {
+      "id": "rule-per-rule-rollout-sub-bucketing",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 0,
+          "variation": "never",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            }
+          ]
+        },
+        {
+          "id": "r2",
+          "priority": 1,
+          "rollout_pct": 100,
+          "variation": "fallback",
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "eq",
+              "values": [
+                "pro"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "plan": "pro",
+        "user_id": "u1"
+      },
+      "expected_result": {
+        "reason": "RULE_MATCH",
+        "variation": "fallback"
+      },
+      "note": "rule 1 conditions match but rollout_pct=0 excludes everyone -> falls to rule 2, not Step 5 fallthrough"
+    }
+  ],
+  "missing_attribute_vectors": [
+    {
+      "id": "missing-attribute-skips-rule",
+      "rules": [
+        {
+          "id": "r1",
+          "priority": 0,
+          "rollout_pct": 100,
+          "variation": "skipped",
+          "conditions": [
+            {
+              "attribute": "missing_attr",
+              "operator": "eq",
+              "values": [
+                "x"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "attrs": {
+        "user_id": "u1"
+      },
+      "expected_result": null,
+      "note": "Attribute absent from context -> inconclusive, not false; rule skipped, no match (result null since no other rule)"
+    }
   ]
 }

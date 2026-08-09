@@ -1,79 +1,77 @@
-# SDK Feature-Parity Matrix
+# SDK Contract — Canonical Evaluation Spec
 
-Verified by reading each SDK's evaluation source directly (not assumed). TypeScript
-(`@tomb-stone/core`, dir `@flagmind/core`) is the reference implementation.
+This is the normative specification for the 5-step evaluation pipeline that Java, Ruby,
+and .NET SDKs must implement (as of v1.5.0). It resolves every divergence found between
+the two reference implementations (TypeScript, Python) into one target model — TypeScript
+and Python remain on their existing shipped behavior; this document does not change them,
+and their mutual divergence is documented in the "Known Pre-Existing Divergence" section
+below.
 
-Sources checked:
-- TypeScript: `packages/sdks/@flagmind/core/src/evaluation.ts`, `types.ts`
-- Python: `packages/sdks/flagmind-python/tombstone/{evaluation,matching,types}.py`
-- Java: `packages/sdks/flagmind-java/src/main/java/io/tombstone/{evaluation/EvaluationEngine,types/*}.java`
-- Ruby: `packages/sdks/flagmind-ruby/lib/flagmind/{evaluation_engine,types}.rb`
-- .NET: `packages/sdks/flagmind-dotnet/src/FlagMind/{EvaluationEngine,Types}.cs`
+Executable contract vectors live in `packages/sdks/test-contract/vectors.json` (v1.2+) —
+every SDK's test suite must load and assert against this file. It is the objective
+definition of "parity."
 
-## 5-Step Evaluation Pipeline
+## Canonical Model (Java/Ruby/.NET target)
 
-| Step | TypeScript | Python | Java | Ruby | .NET |
-|---|---|---|---|---|---|
-| 1. Preliminary (missing → ERROR, disabled → OFF) | Yes | Yes | Yes | Yes | Yes |
-| 2. Prerequisites (recursive, cycle-safe) | Yes | Yes | No | No | No |
-| 2a. `gate` soft/hard semantics | Yes — `gate: boolean` on `FlagPrerequisite`; `gate:false` unmet → skip/continue, `gate:true`/default → `PREREQUISITE_FAILED` | Yes — `prereq.get("gate", True)`; same soft/hard split, default `True` | N/A — no prerequisite field on `FlagEnvironmentState`, no prereq check in `EvaluationEngine.evaluate` | N/A — no prerequisite field on `FlagEnvironmentState`; `EvaluationReason::PREREQUISITE_FAILED` enum value exists but is never returned | N/A — no prerequisite field on `FlagEnvironmentState`; `EvaluationReason.PrerequisiteFailed` enum value exists but is never returned |
-| 3. Individual target list → `TARGET_MATCH` | Yes — `flagState.targetList` | Yes — `flag_state.target_list` | No — no `targetList`/`TargetMatch` branch in `EvaluationEngine`; enum value unused | No — no `target_list` field; enum value unused | No — no `TargetList` field; enum value unused |
-| 4. Priority-sorted rule matching → `RULE_MATCH` | Yes — merges `flagState.targetingRules` + passed-in `rules`, sorts ascending by `priority` (0 = highest) | Yes — `flag_state.targeting_rules` sorted ascending by `priority`; per-rule rollout bucket also applied on match | No — `evaluate()` takes a `rules` param but never reads it; no rule-matching code path | No — no rule/condition types exist at all | No — no rule/condition types exist at all |
-| 5. Fallthrough rollout | Yes | Yes | Yes | Yes | Yes |
+| Step | Behavior |
+|---|---|
+| 1. Preliminary | Missing flag -> `ERROR`, caller's default. Disabled -> `OFF`, parses `flag_state.safe_default` into the target type (falls back to caller's default on parse failure). |
+| 2. Prerequisites | For each prerequisite: evaluate the dependency (memoized per top-level call via a cache keyed by dependency flag key), compare `String(dependency_result.variation)` against `required_variation`. Mismatch + `gate=true` -> `PREREQUISITE_FAILED`, caller's default. Mismatch + `gate=false` -> skip, continue. Missing dependency + `gate=true` -> `PREREQUISITE_FAILED`. Cycle detected (dependency already in the current evaluation chain) -> fails open, skip that one prerequisite edge only. |
+| 3. Target list | If `context.user_id` is in `flag_state.target_list` -> `TARGET_MATCH`, value `true`. |
+| 4. Rule matching | Sort `flag_state.targeting_rules` ascending by `priority` (0 = highest). For each rule: evaluate ALL conditions with AND semantics; any condition raising "inconclusive" (see below) skips the whole rule, continue to next. If all conditions match, compute `bucket = murmur3_v1(flag_key + user_id) % 100`; if `bucket < rule.rollout_pct` -> `RULE_MATCH`, rule's variation. Otherwise continue to next rule (NOT step 5). |
+| 5. Fallthrough | `rollout_pct >= 100` -> `true`. `rollout_pct <= 0` -> caller's default. Else hash-compare via `hash_version` (1 = MurmurHash3, 2 = FNV-1a); in cohort -> `true`, else caller's default. |
 
-**Net result:** TypeScript and Python implement the full 5-step pipeline. Java, Ruby,
-and .NET implement only **steps 1 and 5** — every flag in those three SDKs behaves as
-if it has no prerequisites, no target list, and no targeting rules, falling straight
-from the enabled/disabled check to the rollout-percentage check. Their `EvaluationReason`
-enums declare `TARGET_MATCH`, `RULE_MATCH`, and `PREREQUISITE_FAILED` values, but no code
-path in any of the three ever returns them — dead enum members.
+## Operator Surface (Step 4 conditions)
 
-## Rollout Hashing
+- **Equality**: `eq`, `neq`, `in`, `nin` — exact string comparison/membership.
+- **String**: `contains`, `startswith` (alias `prefix`), `endswith` (alias `suffix`) — **case-insensitive**, both sides uppercased, multi-value ANY semantics.
+- **Numeric**: `gt`, `gte`, `lt`, `lte` — cast both sides to float; cast failure -> inconclusive.
+- **Semver**: `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte`, `semver_eq` — compared via `_padded_version()` string padding (strip `v` prefix and build metadata, left-pad numeric segments to 5 chars, append `~` to 3-part releases so prereleases sort below their release).
+- **Date**: `date_before`, `date_after` — ISO-8601 parse (`Z` normalized to `+00:00`); parse failure -> inconclusive.
+- **Geo**: `in`/`nin` against `geo.country` / `geo.region` attribute paths — case-insensitive, resolved via dot-notation.
+- **Regex**: declared but **not implemented** in this release (matches current TS behavior — always returns `false`, not inconclusive). Future work.
+- **Attribute resolution**: dot-notation nested paths on the context's attribute map, with a flat single-segment fallback. Missing attribute -> inconclusive (a raised/thrown exception in every language, caught by the rule-matching loop, which treats it as "this rule did not match" and continues to the next rule).
+- **`negate`**: a boolean on every condition; inverts the final boolean result after evaluation (does not apply to inconclusive outcomes — inconclusive stays inconclusive regardless of `negate`).
+
+## Hashing
+
+- **v1 (MurmurHash3)**: unsigned 32-bit, seed=0, `concat(flag_key, user_id)` as UTF-8 bytes, mod 100.
+- **v2 (FNV-1a)**: double-pass — `inner = fnv1a(concat(flag_key, user_id))`, `outer = fnv1a(decimal_string(inner))`, `bucket = (outer % 10000) / 10000`, compared against `rollout_pct / 100`. MUST iterate over UTF-8 bytes (not UTF-16 code units) for portability across Java/Ruby/.NET string encodings.
+
+## Known Pre-Existing Divergence (TypeScript vs Python — NOT fixed by this spec)
+
+TypeScript and Python are each other's oldest SDKs and diverge in ways this release does
+not touch:
+
+| Aspect | TypeScript | Python |
+|---|---|---|
+| OFF-path default | Parses `safeDefault` | Raw caller default |
+| Prerequisite comparison | String variation match | Boolean-only match |
+| String op case sensitivity | Case-sensitive | Case-insensitive |
+| GEO operators | Implemented | Not implemented |
+| Semver/date operators | Declared, not implemented | Implemented |
+| Missing-attribute signaling | Silent `false` | Raises `InconclusiveMatchError` |
+
+New SDKs (Java/Ruby/.NET) follow the Canonical Model above, which resolves each of these
+in one direction — they do not match either TS or Python exactly on every point. The full
+design rationale and decision matrix are documented in the v1.5.0 design specification
+(available on branch `docs/v1.5.0-upgrade-design`).
+
+## Parity Matrix (updated after v1.5.0)
 
 | Capability | TypeScript | Python | Java | Ruby | .NET |
 |---|---|---|---|---|---|
-| `hash_version` field read at all | Yes — `flagState.hashVersion ?? 1` | Yes — `flag_state.hash_version` (default `1`) | No — `FlagEnvironmentState` has no hash-version field | No — `FlagEnvironmentState` has no hash-version field | No — `FlagEnvironmentState` has no hash-version field |
-| `hash_version: 1` — MurmurHash3, 32-bit unsigned, seed 0, mod 100 | Yes — `murmurhash.v3(flagKey+userId) >>> 0 % 100` | Yes — `mmh3.hash(flag_key+user_id, seed=0, signed=False) % 100` | Yes (only mode) — Guava `Hashing.murmur3_32_fixed()` | Yes (only mode) — `MurmurHash3::V32.str_hash` | Yes (only mode) — `Murmur.MurmurHash.Create32(seed:0)` |
-| `hash_version: 2` — double-pass FNV-1a, 10,000-bucket | Yes — `fnv(String(fnv(flagKey+userId))) % 10000 / 10000 < pct/100` | Yes — `_is_in_rollout_fnv`, bit-identical algorithm | No | No | No |
-| Cross-language v1 parity | Verified against `test-contract/vectors.json` | Verified against same vectors | Verified against same vectors (v1 only) | Verified against same vectors (v1 only) | Verified against same vectors (v1 only) |
-| Cross-language v2 parity | Verified against `test-contract/vectors.json` | Verified against same vectors | Not applicable — v2 not implemented | Not applicable — v2 not implemented | Not applicable — v2 not implemented |
+| Steps 1+5 (preliminary + fallthrough) | Yes | Yes | Yes | Yes | Yes |
+| Step 2 (prerequisites) | Yes (string variation) | Yes (boolean-only) | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| Step 3 (target list) | Yes | Yes | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| Step 4 (rule matching) | Yes (single condition) | Yes (multi-condition) | Yes (canonical, multi-condition) | Yes (canonical, multi-condition) | Yes (canonical, multi-condition) |
+| Hash v1 (MurmurHash3) | Yes | Yes | Yes | Yes | Yes |
+| Hash v2 (FNV-1a) | Yes | Yes | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| Semver/date operators | No | Yes | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| GEO operators | Yes | No | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| Regex operator | No | No | No | No | No |
+| Cross-language contract vectors | Hash-only | Hash-only | Full (v1.2 vectors) | Full (v1.2 vectors) | Full (v1.2 vectors) |
 
-Java/Ruby/.NET always compute rollout with the v1 (MurmurHash3) algorithm — there is no
-branch to select v2, because there is no `hash_version` field to branch on.
-
-## `target_list` Support
-
-| SDK | Field present | Checked in evaluation | Notes |
-|---|---|---|---|
-| TypeScript | Yes — `FlagEnvironmentState.targetList?: string[]` | Yes — Step 3 | `context.userId` membership check before rule matching |
-| Python | Yes — `FlagEnvironmentState.target_list: list` | Yes — Step 3 | `context.user_id in flag_state.target_list` |
-| Java | No | No | — |
-| Ruby | No | No | — |
-| .NET | No | No | — |
-
-## Operator Case-Normalization
-
-| Operator family | TypeScript | Python |
-|---|---|---|
-| `IN` / `NOT_IN` / `EQ` / `NEQ` (eq/neq/in/nin) | Exact `String(value)` comparison — case-sensitive, no normalization | Exact membership/equality on raw string — case-sensitive, no normalization |
-| `CONTAINS` / `PREFIX` / `SUFFIX` (contains/startswith/endswith) | Case-sensitive — plain `String.prototype.includes/startsWith/endsWith` | Case-**insensitive** — both attribute and rule values upper-cased via `.upper()` before comparison |
-| `GEO_COUNTRY` / `GEO_REGION` | Case-**insensitive** — both context value and rule values upper-cased via `.toUpperCase()` | Not implemented — Python has no GEO operator or `geo` context field at all |
-| Numeric (`LT`/`LTE`/`GT`/`GTE` vs `gt`/`gte`/`lt`/`lte`) | N/A (numeric, not string) | N/A (numeric, not string) |
-
-TypeScript and Python disagree on case sensitivity for `CONTAINS`/`PREFIX`/`SUFFIX`:
-TypeScript is case-sensitive, Python is case-insensitive. This is a real behavioral
-divergence, not a documentation gap — a rule using `CONTAINS` with mixed-case input
-can match in one SDK and not the other.
-
-Java, Ruby, and .NET have no operator/rule-matching code at all (see pipeline table
-above), so there is no operator behavior to compare for those three.
-
-## Summary
-
-| SDK | Pipeline completeness | Hash versions | `target_list` | Rule operators |
-|---|---|---|---|---|
-| TypeScript (`@tomb-stone/core`) | Full 5-step (reference) | v1 + v2 | Yes | Full set, case rules as above |
-| Python (`tombstone-sdk`) | Full 5-step | v1 + v2 | Yes | Full set, case rules as above (diverges from TS on string ops) |
-| Java (`tombstone-java-sdk`) | Steps 1 + 5 only | v1 only | No | None |
-| Ruby (`tombstone-ruby`) | Steps 1 + 5 only | v1 only | No | None |
-| .NET (`Tombstone.SDK`) | Steps 1 + 5 only | v1 only | No | None |
+*(This table is illustrative of the target end-state after Phases 2-4 of the v1.5.0 plan
+complete — update the Java/Ruby/.NET "Yes (canonical)" cells to reflect actual merged state
+as each SDK's PR lands, per this project's read-the-actual-code verification discipline.)*
