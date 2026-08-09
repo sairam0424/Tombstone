@@ -166,6 +166,17 @@ jobs:
       - name: Run Java SDK tests
         run: cd packages/sdks/flagmind-java && gradle test
 
+  dotnet-sdk:
+    name: .NET SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Run .NET SDK tests
+        run: cd packages/sdks/flagmind-dotnet && dotnet test tests/FlagMind.Tests/FlagMind.Tests.csproj
+
   terraform-provider:
     name: Terraform Provider
     runs-on: ubuntu-latest
