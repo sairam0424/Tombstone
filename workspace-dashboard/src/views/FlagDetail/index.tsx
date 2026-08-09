@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { FlagHealthBadge } from '../../components/FlagHealthBadge.js';
 import { CircuitBreakerStatus } from '../../components/CircuitBreakerStatus.js';
 import { AutonomousRolloutToggle } from '../../components/AutonomousRolloutToggle.js';
+import { DependenciesTab } from '../../components/DependenciesTab.js';
 
 
 interface FlagEnvState {
@@ -53,6 +54,7 @@ export default function FlagDetail() {
   const [envStates, setEnvStates] = useState<Record<string, FlagEnvState>>({});
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [activeEnv, setActiveEnv] = useState<Env>('production');
+  const [activeTab, setActiveTab] = useState<'overview' | 'dependencies'>('overview');
   const [loading, setLoading] = useState(true);
   const [killing, setKilling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +146,25 @@ export default function FlagDetail() {
         </div>
       </div>
 
+      {/* Main tab navigation */}
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => setActiveTab('overview')}
+          className={`px-4 py-2 rounded ${activeTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300'}`}
+        >
+          Overview
+        </button>
+        <button
+          onClick={() => setActiveTab('dependencies')}
+          className={`px-4 py-2 rounded ${activeTab === 'dependencies' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300'}`}
+        >
+          Dependencies
+        </button>
+      </div>
+
+      {/* Overview tab content */}
+      {activeTab === 'overview' && (
+        <div>
       {/* Environment tabs */}
       <div className="flex gap-2 mb-4">
         {ENVS.map(env => (
@@ -250,6 +271,13 @@ export default function FlagDetail() {
           </div>
         )}
       </div>
+        </div>
+      )}
+
+      {/* Dependencies tab content */}
+      {activeTab === 'dependencies' && key && (
+        <DependenciesTab flagKey={key} apiUrl={apiUrl} token={tok} />
+      )}
     </div>
   );
 }

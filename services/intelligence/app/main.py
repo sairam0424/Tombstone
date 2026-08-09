@@ -1,6 +1,10 @@
 import asyncio
 import logging
 import os
+import time
+import math
+import httpx
+from collections import deque, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -32,6 +36,7 @@ async def _try_redis_connect(url: str):
     """Create a redis.asyncio client; return None if unavailable (fails open)."""
     try:
         import redis.asyncio as aioredis
+
         client = aioredis.from_url(url, decode_responses=False)
         await client.ping()
         return client
@@ -60,6 +65,7 @@ async def _depgraph_rebuild_background(
         _now_ts = asyncio.get_running_loop().time()
         import time as _t
         import datetime as _dt
+
         now = _dt.datetime.utcnow()
         # Next 02:00 UTC
         next_2am = now.replace(hour=2, minute=0, second=0, microsecond=0)
@@ -119,11 +125,13 @@ async def lifespan(app: FastAPI):
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     try:
         import redis.asyncio as aioredis
+
         redis_client = aioredis.from_url(redis_url, decode_responses=False)
         await app.state.linucb_bandit.load_from_redis(redis_client)
         await redis_client.aclose()
     except Exception:
         import logging as _logging
+
         _logging.getLogger(__name__).warning(
             "LinUCB Redis restore skipped (Redis unavailable) — starting fresh"
         )
@@ -167,7 +175,9 @@ async def lifespan(app: FastAPI):
             "redis",
             redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"),
             anomaly_detector=app.state.anomaly,
-            environments=os.environ.get("TOMBSTONE_ENVIRONMENTS", "production").split(","),
+            environments=os.environ.get("TOMBSTONE_ENVIRONMENTS", "production").split(
+                ","
+            ),
             embedding_sync=app.state.embedding_sync,
             graph_builder=app.state.graph_builder if app.state.redis else None,
         )
@@ -240,9 +250,11 @@ async def _daily_retrain(app: FastAPI) -> None:
         now = datetime.now(timezone.utc)
         # Seconds until next 02:00 UTC
         target_hour = 2
-        seconds_until = ((target_hour - now.hour - 1) * 3600
-                         + (60 - now.minute - 1) * 60
-                         + (60 - now.second)) % 86400
+        seconds_until = (
+            (target_hour - now.hour - 1) * 3600
+            + (60 - now.minute - 1) * 60
+            + (60 - now.second)
+        ) % 86400
         if seconds_until == 0:
             seconds_until = 86400
         await asyncio.sleep(seconds_until)
@@ -311,8 +323,14 @@ async def get_stale_flags(project_id: str = "00000000-0000-0000-0000-00000000000
 
 
 @app.post("/api/v1/dependency-graph")
-async def build_dependency_graph(request: Request, environment: str = "production", from_unix: int = 0, to_unix: int = 0):
+async def build_dependency_graph(
+    request: Request,
+    environment: str = "production",
+    from_unix: int = 0,
+    to_unix: int = 0,
+):
     import time as t
+
     if to_unix == 0:
         to_unix = int(t.time())
     if from_unix == 0:
@@ -330,16 +348,38 @@ async def build_dependency_graph(request: Request, environment: str = "productio
         )
 
     async with request.app.state.background_job_lock:
-        graph = await request.app.state.graph_builder.build(environment, from_unix, to_unix)
+        graph = await request.app.state.graph_builder.build(
+            environment, from_unix, to_unix
+        )
     return {
-        "nodes": [{"flag_key": n.flag_key, "enabled": n.enabled, "rollout_pct": n.rollout_pct, "state": n.state, "owner_id": n.owner_id} for n in graph.nodes],
-        "edges": [{"source": e.source, "target": e.target, "weight": e.weight, "co_change_count": e.co_change_count} for e in graph.edges],
-        "generated_at": graph.generated_at, "event_count": graph.event_count,
+        "nodes": [
+            {
+                "flag_key": n.flag_key,
+                "enabled": n.enabled,
+                "rollout_pct": n.rollout_pct,
+                "state": n.state,
+                "owner_id": n.owner_id,
+            }
+            for n in graph.nodes
+        ],
+        "edges": [
+            {
+                "source": e.source,
+                "target": e.target,
+                "weight": e.weight,
+                "co_change_count": e.co_change_count,
+            }
+            for e in graph.edges
+        ],
+        "generated_at": graph.generated_at,
+        "event_count": graph.event_count,
     }
 
 
 @app.get("/api/v1/dependency-graph/impact/{flag_key}")
-async def get_flag_impact(flag_key: str, request: Request, environment: str = "production", days: int = 30):
+async def get_flag_impact(
+    flag_key: str, request: Request, environment: str = "production", days: int = 30
+):
     """Return co-changed flags for flag_key.
 
     Uses Redis sorted-set O(log n) lookup when Redis is available and the key
@@ -363,8 +403,251 @@ async def get_flag_impact(flag_key: str, request: Request, environment: str = "p
     return await builder.get_impact(flag_key, environment, days)
 
 
+@app.get("/api/v1/graph/dependencies")
+async def get_dependency_subgraph(
+    flag_key: str,
+    depth: int = 1,
+    environment: str = "production",
+    request: Request = None,
+):
+    """
+    Return a dependency subgraph centered on `flag_key`, traversing to `depth` hops.
+
+    Uses Redis sorted-set O(log n) lookup when Redis is available and keys are warm.
+    Falls back to the original O(n²) DB scan per flag on Redis cold-start.
+    Returns nodes (flags in the subgraph) and edges (weighted connections).
+    """
+    if depth < 1:
+        depth = 1
+    if depth > 5:
+        depth = 5  # cap at 5 hops to prevent runaway traversal
+
+    redis_client = request.app.state.redis
+    builder: DependencyGraphBuilder = request.app.state.graph_builder
+
+    visited: set[str] = set()
+    edges: list[dict] = []
+    queue: deque[tuple[str, int]] = deque([(flag_key, 0)])
+    visited.add(flag_key)
+
+    while queue:
+        current_key, current_depth = queue.popleft()
+        if current_depth >= depth:
+            continue
+
+        # Fetch neighbors
+        neighbors = None
+        if redis_client is not None:
+            neighbors = await builder.get_impact_fast(current_key, redis_client)
+            if neighbors is None:
+                # Redis miss — fall back to DB
+                logger.info(
+                    "dep graph Redis miss for %s — falling back to DB", current_key
+                )
+                db_result = await builder.get_impact(current_key, environment, days=30)
+                co_changed = db_result.get("co_changed_with", [])
+                # DB fallback returns {"flag_key": str, "co_change_count": int, "avg_seconds_apart": float}
+                # Infer weight from co_change_count: higher count → higher coupling
+                neighbors = [
+                    {
+                        "flag_key": item["flag_key"],
+                        "weight": min(1.0, item["co_change_count"] / 10.0),
+                    }
+                    for item in co_changed
+                ]
+
+        if not neighbors:
+            continue
+
+        for neighbor in neighbors:
+            neighbor_key = neighbor["flag_key"]
+            weight = neighbor["weight"]
+            edges.append(
+                {"source": current_key, "target": neighbor_key, "weight": weight}
+            )
+            if neighbor_key not in visited:
+                visited.add(neighbor_key)
+                queue.append((neighbor_key, current_depth + 1))
+
+    # Fetch node metadata from flags table for all visited keys
+    nodes = []
+    if visited:
+        pool = await builder._get_pool()
+        rows = await pool.fetch(
+            """
+            SELECT f.key, fe.enabled, fe.rollout_pct
+            FROM flags f
+            LEFT JOIN flag_environments fe ON fe.flag_id = f.id AND fe.environment = $1
+            WHERE f.key = ANY($2::text[])
+            """,
+            environment,
+            list(visited),
+        )
+        nodes = [
+            {
+                "key": r["key"],
+                "enabled": bool(r["enabled"] or False),
+                "rollout_pct": int(r["rollout_pct"] or 0),
+            }
+            for r in rows
+        ]
+
+    return {
+        "flag_key": flag_key,
+        "depth": depth,
+        "environment": environment,
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+BLAST_RADIUS_MULTIPLIER = {"BLOCKED": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+@app.get("/api/v1/graph/critical-flags")
+async def get_critical_flags(
+    limit: int = 20,
+    environment: str = "production",
+    request: Request = None,
+):
+    """
+    Return top-N most critical flags ranked by dependency health score.
+
+    Score formula: (in_degree + out_degree) * avg_edge_weight * blast_radius_multiplier.
+    blast_radius_multiplier: BLOCKED=4, HIGH=3, MEDIUM=2, LOW=1.
+
+    Fetches blast-radius tier from evaluator service; falls back to LOW if unreachable.
+    """
+    builder: DependencyGraphBuilder = request.app.state.graph_builder
+
+    # 1. Gather all edges from Redis sorted sets
+    # (In production this would scan all tombstone:depgraph:* keys — for MVP we rely
+    # on the existing rebuild_all() having populated Redis with a full graph; a future
+    # optimization would be a dedicated "list all edges" Redis Lua script or a cached
+    # in-memory adjacency list built during startup.)
+    #
+    # For this implementation, we'll use the DB as source-of-truth for the full graph,
+    # since Redis sorted sets are per-flag (no global edge list). The existing
+    # DependencyGraphBuilder.build() method already does this DB scan — we reuse it.
+
+    pool = await builder._get_pool()
+    to_unix = int(time.time())
+    from_unix = to_unix - (90 * 86400)  # 90-day window matching rebuild_all
+
+    rows = await pool.fetch(
+        """
+        SELECT flag_key,
+               EXTRACT(EPOCH FROM created_at)::bigint AS ts
+        FROM audit_log
+        WHERE created_at >= to_timestamp($1)
+          AND created_at <= to_timestamp($2)
+          AND flag_key IS NOT NULL
+          AND event_type IN ('flag_environment_updated','kill_switch_activated','flag_created')
+        ORDER BY created_at ASC
+        """,
+        float(from_unix),
+        float(to_unix),
+    )
+
+    if not rows:
+        return {"flags": [], "generated_at": to_unix}
+
+    # 2. Rebuild edge map (same logic as builder.build())
+    edge_map = {}
+    events = [(r["flag_key"], int(r["ts"])) for r in rows]
+    COUPLING_WINDOW_SECONDS = 300
+    LAMBDA = 0.1
+
+    for i, (flag_a, ts_a) in enumerate(events):
+        for j in range(i + 1, len(events)):
+            flag_b, ts_b = events[j]
+            if flag_b == flag_a:
+                continue
+            delta = ts_b - ts_a
+            if delta > COUPLING_WINDOW_SECONDS:
+                break
+            weight = math.exp(-LAMBDA * (delta / 60.0))
+            key = (flag_a, flag_b)
+            if key in edge_map:
+                edge_map[key]["weight"] = max(edge_map[key]["weight"], weight)
+                edge_map[key]["count"] += 1
+            else:
+                edge_map[key] = {"weight": round(weight, 4), "count": 1}
+
+    # 3. Compute in/out degree and avg edge weight per flag
+    in_weights = defaultdict(list)
+    out_weights = defaultdict(list)
+
+    for (source, target), data in edge_map.items():
+        w = data["weight"]
+        out_weights[source].append(w)
+        in_weights[target].append(w)
+
+    all_flags = set(in_weights.keys()) | set(out_weights.keys())
+    flag_data = []
+
+    for flag_key in all_flags:
+        in_w = in_weights.get(flag_key, [])
+        out_w = out_weights.get(flag_key, [])
+        all_w = in_w + out_w
+        in_degree = len(in_w)
+        out_degree = len(out_w)
+        avg_weight = sum(all_w) / len(all_w) if all_w else 0.0
+
+        flag_data.append(
+            {
+                "key": flag_key,
+                "in_degree": in_degree,
+                "out_degree": out_degree,
+                "avg_edge_weight": avg_weight,
+            }
+        )
+
+    # 4. Fetch blast-radius tier from evaluator service for each flag
+    evaluator_url = os.environ.get("EVALUATOR_URL", "http://localhost:8082")
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for flag in flag_data:
+            try:
+                # Call evaluator with rollout_pct=100 (worst-case blast radius)
+                resp = await client.get(
+                    f"{evaluator_url}/api/v1/blast-radius",
+                    params={
+                        "flag_key": flag["key"],
+                        "environment": environment,
+                        "rollout_pct": 100,
+                    },
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    tier = result.get("result", {}).get("risk_score", "LOW")
+                else:
+                    tier = "LOW"
+            except Exception:
+                tier = "LOW"  # fail-open
+
+            flag["blast_radius_tier"] = tier
+            mult = BLAST_RADIUS_MULTIPLIER[tier]
+            score = (
+                (flag["in_degree"] + flag["out_degree"])
+                * flag["avg_edge_weight"]
+                * mult
+            )
+            flag["score"] = round(score, 2)
+
+    # 5. Sort descending by score, limit to top-N
+    flag_data.sort(key=lambda f: -f["score"])
+    top_n = flag_data[:limit]
+
+    return {
+        "flags": top_n,
+        "generated_at": to_unix,
+    }
+
+
 @app.post("/api/v1/correlate")
-async def correlate_incident(incident_id: str, affected_service: str, incident_start_unix: int):
+async def correlate_incident(
+    incident_id: str, affected_service: str, incident_start_unix: int
+):
     """Correlate a PagerDuty incident with recent flag changes."""
     candidates = await app.state.correlator.correlate(
         incident_id=incident_id,
@@ -402,7 +685,9 @@ async def generate_anomaly_rule(flag_key: str, request: Request):
         )
 
     error_rates = list(metrics.error_rates)
-    signals_dir = "signals"  # relative to repo root; service runs from repo root in Docker
+    signals_dir = (
+        "signals"  # relative to repo root; service runs from repo root in Docker
+    )
 
     result = await generate_rule(flag_key, error_rates, signals_dir)
 
