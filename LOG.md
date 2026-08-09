@@ -32,7 +32,7 @@ awk '/^## 20/{p=/^## 2026-06/} p' LOG.md
 
 ## 2026-07-06 · v1.3.0 — Helm completion, Python SDK parity, Redoc explorer · #product #infra
 What: Closed 3 documented v1.3.0 gaps: Helm chart v0.2.0 with Deployment templates for all 5 services (evaluator+HPA, intelligence, marketplace), Python SDK v0.2.0 with 5-step evaluation parity (prerequisites, targeting rules, full operator surface — no new deps), Redoc API explorer embedded in flag-api at /api/v1/docs (no CDN).
-Refs: [CHANGELOG.md](CHANGELOG.md) (updated), [infra/helm/flagmind/](infra/helm/flagmind/) (updated), [packages/sdks/flagmind-python/](packages/sdks/flagmind-python/) (updated), [services/flag-api/internal/docs/](services/flag-api/internal/docs/) (new).
+Refs: [CHANGELOG.md](CHANGELOG.md) (updated), [infra/helm/flagmind/](infra/helm/flagmind/) (updated), [packages/sdks/tombstone-python-sdk/](packages/sdks/tombstone-python-sdk/) (updated), [services/flag-api/internal/docs/](services/flag-api/internal/docs/) (new).
 
 
 ## 2026-07-05 · OSS launch assets generated for v1.2.1 · #product

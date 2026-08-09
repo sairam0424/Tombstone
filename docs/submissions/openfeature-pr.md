@@ -73,7 +73,7 @@ export const Tombstone: Provider = {
     {
       technology: 'Python',
       vendorOfficial: true,
-      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/flagmind-python',
+      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/tombstone-python-sdk',
       category: ['Server'],
     },
   ],
@@ -94,7 +94,7 @@ This PR registers Tombstone as an OpenFeature provider.
 
 **Provider details:**
 - TypeScript SDK (Server + Client): packages/sdks/@flagmind/core/src/provider.ts
-- Python SDK: packages/sdks/flagmind-python/
+- Python SDK: packages/sdks/tombstone-python-sdk/
 - Vendor official: true
 
 **Compliance:**

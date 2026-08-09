@@ -255,7 +255,7 @@ export const Tombstone: Provider = {
     {
       technology: 'Python',
       vendorOfficial: true,
-      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/flagmind-python',
+      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/tombstone-python-sdk',
       category: ['Server'],
     },
   ],
@@ -372,11 +372,11 @@ Also click "Suggest an alternative" directly on the LaunchDarkly page at openalt
 
 **URL:** https://pypi.org/account/register/
 
-**BLOCKER TO RESOLVE FIRST:** The Python SDK at `packages/sdks/flagmind-python/pyproject.toml` currently has `name = "tombstone"` — this name is taken on PyPI by an unrelated debug tool. Before doing anything else for this step, rename it.
+**BLOCKER TO RESOLVE FIRST:** The Python SDK at `packages/sdks/tombstone-python-sdk/pyproject.toml` currently has `name = "tombstone"` — this name is taken on PyPI by an unrelated debug tool. Before doing anything else for this step, rename it.
 
 **Steps:**
 
-1. Edit `packages/sdks/flagmind-python/pyproject.toml`: change `name = "tombstone"` to `name = "flagmind"` (short, clean, not taken as of research date — verify at https://pypi.org/project/flagmind/ first).
+1. Edit `packages/sdks/tombstone-python-sdk/pyproject.toml`: change `name = "tombstone"` to `name = "flagmind"` (short, clean, not taken as of research date — verify at https://pypi.org/project/flagmind/ first).
 2. Update the description in pyproject.toml to add required fields:
 ```toml
 [project]
@@ -406,13 +406,13 @@ build-backend = "hatchling.build"
 3. Add a `LICENSE` file if missing in the SDK directory.
 4. Register at https://pypi.org/account/register/ — verify email, enable 2FA.
 5. Generate API token at pypi.org under Account Settings.
-6. Build: `cd packages/sdks/flagmind-python && python -m pip install build && python -m build`
+6. Build: `cd packages/sdks/tombstone-python-sdk && python -m pip install build && python -m build`
 7. Test upload: `python -m pip install twine && python -m twine upload --repository testpypi dist/*`
 8. Verify at https://test.pypi.org/project/flagmind/, then: `python -m twine upload dist/*`
 
 **Estimated time:** 2 hours (name decision + pyproject.toml edit + build + publish).
 
-**Blockers:** Verify the name `flagmind` is not taken before committing to it. The SDK at `packages/sdks/flagmind-python/` has a subdirectory named `tombstone/` internally — verify the import path after rename.
+**Blockers:** Verify the name `flagmind` is not taken before committing to it. The SDK at `packages/sdks/tombstone-python-sdk/` has a subdirectory named `tombstone/` internally — verify the import path after rename.
 
 ---
 
@@ -818,13 +818,13 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 
 **URL:** https://central.sonatype.com/register
 
-**Current state:** `packages/sdks/flagmind-java/build.gradle` has `group = "io.tombstone"` but no `artifactId` explicitly named.
+**Current state:** `packages/sdks/tombstone-java-sdk/build.gradle` has `group = "io.tombstone"` but no `artifactId` explicitly named.
 
 **Steps when ready:**
 1. Register at https://central.sonatype.com (new Central Portal, not deprecated OSSRH).
 2. Verify namespace `io.tombstone` via DNS TXT record on the `tombstone.io` domain, or via GitHub proof if switching to `io.github.sairam0424`.
 3. Generate and upload a GPG key to `keyserver.ubuntu.com`.
-4. Add `central-publishing-gradle-plugin` to `flagmind-java/build.gradle`.
+4. Add `central-publishing-gradle-plugin` to `tombstone-java-sdk/build.gradle`.
 5. Add explicit `artifactId`: `flagmind-java`.
 6. Run `./gradlew publishToCentralPortal`.
 
@@ -836,7 +836,7 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 
 **URL:** https://www.nuget.org/users/account/LogOn
 
-**Current state:** `packages/sdks/flagmind-dotnet/src/FlagMind/FlagMind.csproj` has `<PackageId>Tombstone.Client</PackageId>`.
+**Current state:** `packages/sdks/tombstone-dotnet-sdk/src/FlagMind/FlagMind.csproj` has `<PackageId>Tombstone.Client</PackageId>`.
 
 **Steps:**
 1. Register at nuget.org.
@@ -850,11 +850,11 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 
 ### 4.10 RubyGems (Ruby SDK)
 
-**BLOCKER:** `packages/sdks/flagmind-ruby/flagmind.gemspec` has `s.name = "tombstone"` — this name is taken on RubyGems. Rename to `flagmind-ruby` before publishing.
+**BLOCKER:** `packages/sdks/tombstone-ruby-sdk/flagmind.gemspec` has `s.name = "tombstone"` — this name is taken on RubyGems. Rename to `flagmind-ruby` before publishing.
 
 **Steps after renaming:**
 1. Register at https://rubygems.org/users/new.
-2. Build: `cd packages/sdks/flagmind-ruby && gem build flagmind.gemspec` → produces `flagmind-ruby-0.1.0.gem`
+2. Build: `cd packages/sdks/tombstone-ruby-sdk && gem build flagmind.gemspec` → produces `flagmind-ruby-0.1.0.gem`
 3. Push: `gem push flagmind-ruby-0.1.0.gem`
 
 **Estimated time:** 1 hour after the rename is done.
@@ -956,7 +956,7 @@ This section collects all naming conflicts identified in the repo files that mus
 
 | Registry | Current name in repo | Conflict? | Recommended name |
 |----------|---------------------|-----------|-----------------|
-| PyPI (SDK) | `tombstone` (`flagmind-python/pyproject.toml`) | YES — taken | `flagmind` |
+| PyPI (SDK) | `tombstone` (`tombstone-python-sdk/pyproject.toml`) | YES — taken | `flagmind` |
 | RubyGems | `tombstone` (`flagmind.gemspec`) | YES — taken | `flagmind-ruby` |
 | Go module | `github.com/tombstone/flag-api` | YES — mismatches GitHub path | `github.com/sairam0424/Tombstone/services/flag-api` or transfer repo to `tombstone` org |
 | npm | `@tombstone/*` | Unverified — check `npmjs.com/org/tombstone` | `@tombstone/*` if scope unclaimed |
