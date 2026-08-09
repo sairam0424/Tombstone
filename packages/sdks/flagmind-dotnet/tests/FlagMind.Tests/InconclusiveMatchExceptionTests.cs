@@ -10,9 +10,8 @@ public class InconclusiveMatchExceptionTests
     }
 
     [Fact] public void CanBeThrownAndCaught() {
-        var thrown = Assert.Throws<InconclusiveMatchException>(() => {
-            throw new InconclusiveMatchException("test message");
-        });
+        Action testCode = () => throw new InconclusiveMatchException("test message");
+        var thrown = Assert.Throws<InconclusiveMatchException>(testCode);
         Assert.Equal("test message", thrown.Message);
     }
 }
