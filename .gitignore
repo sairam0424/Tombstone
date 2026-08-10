@@ -16,16 +16,30 @@ services/**/main
 **/.venv/
 **/venv/
 **/*.egg-info/
+**/uv.lock
 
 # Node
 **/node_modules/
 **/dist/
 **/.turbo/
 
+# Ruby
+**/vendor/
+**/.bundle/
+**/Gemfile.lock
+
+# Java / Gradle
+**/build/
+**/.gradle/
+**/bin/
+
 # IDE
 .idea/
 .vscode/settings.json
 *.code-workspace
+**/.project
+**/.classpath
+**/.settings/
 
 # OS
 .DS_Store
