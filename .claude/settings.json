@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(GOWORK=off go build *)",
+      "Bash(GOWORK=off go test *)",
+      "Bash(GOWORK=off go vet *)",
+      "Bash(GOWORK=off go mod tidy)",
+      "Bash(npm run build)",
+      "Bash(npm test)",
+      "Bash(mkdir -p *)",
+      "Bash(curl -s *)",
+      "Bash(curl -sI *)",
+      "Bash(curl -sv *)",
+      "Bash(find . -iname *)",
+      "Bash(find . -name *)",
+      "Bash(sed -n *)",
+      "Bash(go doc *)"
+    ],
+    "additionalDirectories": [
+      "~/go/pkg/mod"
+    ]
+  }
+}
