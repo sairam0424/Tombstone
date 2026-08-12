@@ -18,7 +18,7 @@ from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
-from app.kafka.consumer import TelemetryConsumer, create_consumer
+from app.kafka.consumer import create_consumer
 from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
@@ -63,7 +63,6 @@ async def _depgraph_rebuild_background(
 
     while True:
         _now_ts = asyncio.get_running_loop().time()
-        import time as _t
         import datetime as _dt
 
         now = _dt.datetime.utcnow()

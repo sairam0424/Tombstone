@@ -73,7 +73,7 @@ jobs:
       - name: ruff check
         run: |
           pip install ruff==0.15.9
-          ruff check . --ignore F401
+          ruff check .
 
       - name: pytest with coverage
         run: |
@@ -110,6 +110,9 @@ jobs:
 
       - name: build @tombstone/core
         run: npm run build
+
+      - name: test @tombstone/core (evaluation + contract + streaming/lag)
+        run: npm test
 
   python-sdk:
     name: Python SDK
@@ -186,3 +189,25 @@ jobs:
         env:
           GOWORK: "off"
         run: cd infra/terraform/provider && go mod tidy && go build ./... && go vet ./...
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install workspace deps
+        # npm workspaces resolve against the root lockfile; --ignore-scripts
+        # skips husky/prepare (matches the dashboard deploy workflow).
+        run: npm ci --ignore-scripts
+      - name: Typecheck + build dashboard
+        # `npm run build` is `tsc -b tsconfig.app.json && vite build` — the tsc
+        # step is the typecheck gate; vite build is the production bundle.
+        working-directory: workspace-dashboard
+        run: npm run build
+      - name: Test dashboard
+        working-directory: workspace-dashboard
+        run: npm test

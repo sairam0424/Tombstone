@@ -40,7 +40,7 @@ class BigQueryConnector:
     def _get_client(self) -> Any:
         """Return an authenticated BigQuery client (lazy import)."""
         try:
-            from google.cloud import bigquery  # type: ignore[import]
+            from google.cloud import bigquery  # type: ignore[import]  # noqa: F401
         except ImportError as exc:
             raise RuntimeError(
                 "google-cloud-bigquery not installed. "
@@ -67,7 +67,7 @@ class BigQueryConnector:
     def _run_test(self) -> bool:
         """Synchronous connectivity check."""
         try:
-            from google.cloud import bigquery  # type: ignore[import]
+            from google.cloud import bigquery  # type: ignore[import]  # noqa: F401
         except ImportError:
             return False
         try:
