@@ -18,13 +18,13 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
+	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 	"github.com/tombstone/evaluator/internal/blast"
 	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
-	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 )
 
 func main() {
@@ -75,7 +75,7 @@ func main() {
 	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
 		db, _ = sql.Open("postgres", dbURL)
 		if db != nil {
-			db.SetMaxOpenConns(3)                  // Neon free tier — evaluator uses DB rarely
+			db.SetMaxOpenConns(3) // Neon free tier — evaluator uses DB rarely
 			db.SetMaxIdleConns(1)
 			db.SetConnMaxLifetime(5 * time.Minute) // recycle before Neon idle timeout
 			db.SetConnMaxIdleTime(2 * time.Minute)
@@ -161,12 +161,17 @@ func main() {
 		r.Get("/api/v1/blast-radius", blast.HandleBlastRadius(blastCalc))
 	}
 
-	// Circuit breaker state endpoint
+	// Circuit breaker state endpoint. Circuit state is environment-scoped, so the
+	// caller selects the environment via ?environment=; defaults to production.
 	r.Get("/api/v1/circuit/{flagKey}", func(w http.ResponseWriter, r *http.Request) {
 		flagKey := chi.URLParam(r, "flagKey")
-		state := breaker.GetState(r.Context(), flagKey)
+		env := r.URL.Query().Get("environment")
+		if env == "" {
+			env = "production"
+		}
+		state := breaker.GetState(r.Context(), flagKey, env)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
+		fmt.Fprintf(w, `{"flag_key":%q,"environment":%q,"state":%q}`, flagKey, env, state)
 	})
 
 	// Per-flag SLO dashboard endpoint

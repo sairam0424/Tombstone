@@ -1,8 +1,13 @@
 package circuit
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 // TestShouldTrip verifies the circuit breaker trip logic without Redis.
@@ -64,6 +69,35 @@ func TestErrorRate(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ErrorRate(%d/%d) = %f, want %f", tc.errors, tc.total, got, tc.want)
 		}
+	}
+}
+
+// TestGetSetStateIsEnvironmentScoped is the regression test for EVAL-1: circuit
+// state must be keyed per (flag, environment), so a trip in one environment never
+// contaminates another environment's state for the same flag key.
+func TestGetSetStateIsEnvironmentScoped(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	// Open the circuit for "checkout" in staging only.
+	b.SetState(ctx, "checkout", "staging", StateOpen, time.Minute)
+
+	// Production must be unaffected — before this fix both environments shared
+	// key "circuit:checkout:state", so this returned OPEN (the contamination bug).
+	if got := b.GetState(ctx, "checkout", "production"); got != StateClosed {
+		t.Errorf("production state = %q after a staging-only trip, want CLOSED (cross-env contamination)", got)
+	}
+	if got := b.GetState(ctx, "checkout", "staging"); got != StateOpen {
+		t.Errorf("staging state = %q, want OPEN", got)
+	}
+	if stateKey("checkout", "staging") == stateKey("checkout", "production") {
+		t.Error("stateKey must differ by environment")
 	}
 }
 

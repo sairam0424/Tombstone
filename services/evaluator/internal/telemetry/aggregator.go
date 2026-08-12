@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/redis/go-redis/v9"
+	"github.com/tombstone/evaluator/internal/circuit"
 	"go.uber.org/zap"
 )
 
@@ -79,9 +79,9 @@ func (a *Aggregator) Flush(ctx context.Context) {
 			TotalCount: w.total,
 		}
 
-		state := a.breaker.GetState(ctx, flagKey)
+		state := a.breaker.GetState(ctx, flagKey, env)
 		if state == circuit.StateClosed && a.breaker.ShouldTrip(win) {
-			a.breaker.SetState(ctx, flagKey, circuit.StateOpen, 10*time.Minute)
+			a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, 10*time.Minute)
 			if a.OnTrip != nil {
 				errorRate := a.breaker.ErrorRate(win)
 				a.logger.Warn("circuit breaker tripped",

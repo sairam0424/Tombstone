@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	defaultSLOThreshold  = 0.05  // 5% error rate = SLO breach
-	hoursPerDay          = 24
-	defaultWindowDays    = 7
-	maxWindowDays        = 90
-	historyHoursMax      = 168 // 7 days * 24 hours
+	defaultSLOThreshold = 0.05 // 5% error rate = SLO breach
+	hoursPerDay         = 24
+	defaultWindowDays   = 7
+	maxWindowDays       = 90
+	historyHoursMax     = 168 // 7 days * 24 hours
 )
 
 // SLOHistoryPoint is a single hourly data point for the SLO history.
@@ -79,7 +79,13 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	circuitState := h.breaker.GetState(ctx, flagKey)
+	// Circuit state is environment-scoped; select via ?environment= (default production).
+	env := r.URL.Query().Get("environment")
+	if env == "" {
+		env = "production"
+	}
+
+	circuitState := h.breaker.GetState(ctx, flagKey, env)
 	windowLabel := fmt.Sprintf("%dd", windowDays)
 	windowHours := windowDays * hoursPerDay
 
@@ -108,7 +114,7 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 	budgetRemaining = roundFloat(budgetRemaining, 4)
 
 	circuitTrips, _ := h.countCircuitTrips(ctx, flagKey, windowHours)
-	history := h.buildHistory(ctx, flagKey, windowHours)
+	history := h.buildHistory(ctx, flagKey, env, windowHours)
 
 	resp := SLOResponse{
 		FlagKey:            flagKey,
@@ -132,7 +138,8 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 // aggregate totals + estimated p99 latency.
 //
 // Redis key convention (written by the aggregator flush loop):
-//   telemetry:{flagKey}:hour:{unix_hour}        → JSON: {"total":N,"errors":E,"p99_ms":F}
+//
+//	telemetry:{flagKey}:hour:{unix_hour}        → JSON: {"total":N,"errors":E,"p99_ms":F}
 //
 // The aggregator does not yet write these keys — we read them with graceful
 // fallback so the endpoint returns zeroes rather than 500.
@@ -175,7 +182,8 @@ func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey string, hours 
 // countCircuitTrips reads circuit trip events recorded in Redis.
 //
 // Redis key convention:
-//   circuit:{flagKey}:trips:{unix_hour} → integer count of trips in that hour
+//
+//	circuit:{flagKey}:trips:{unix_hour} → integer count of trips in that hour
 func (h *Handler) countCircuitTrips(ctx context.Context, flagKey string, hours int) (int64, error) {
 	now := time.Now().UTC()
 	var total int64
@@ -199,7 +207,7 @@ func (h *Handler) countCircuitTrips(ctx context.Context, flagKey string, hours i
 
 // buildHistory returns at most historyHoursMax hourly data points (oldest first).
 // Hours with no Redis data are filled with zero error rate + current circuit state.
-func (h *Handler) buildHistory(ctx context.Context, flagKey string, hours int) []SLOHistoryPoint {
+func (h *Handler) buildHistory(ctx context.Context, flagKey, env string, hours int) []SLOHistoryPoint {
 	if hours > historyHoursMax {
 		hours = historyHoursMax
 	}
@@ -215,8 +223,8 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey string, hours int) [
 		telKey := fmt.Sprintf("telemetry:%s:hour:%d", flagKey, unixHour)
 		if val, err := h.rdb.Get(ctx, telKey).Result(); err == nil {
 			var bucket struct {
-				Total  int64   `json:"total"`
-				Errors int64   `json:"errors"`
+				Total  int64 `json:"total"`
+				Errors int64 `json:"errors"`
 			}
 			if json.Unmarshal([]byte(val), &bucket) == nil && bucket.Total > 0 {
 				errorRate = roundFloat(float64(bucket.Errors)/float64(bucket.Total), 6)
@@ -228,7 +236,7 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey string, hours int) [
 		cStateKey := fmt.Sprintf("circuit:%s:state:%d", flagKey, unixHour)
 		cStateVal, err := h.rdb.Get(ctx, cStateKey).Result()
 		if err != nil || cStateVal == "" {
-			cStateVal = string(h.breaker.GetState(ctx, flagKey))
+			cStateVal = string(h.breaker.GetState(ctx, flagKey, env))
 		}
 
 		points = append(points, SLOHistoryPoint{

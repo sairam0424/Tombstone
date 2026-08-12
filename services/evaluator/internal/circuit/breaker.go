@@ -39,20 +39,29 @@ func NewBreaker(rdb *redis.Client, logger *zap.Logger) *Breaker {
 	}
 }
 
-// GetState returns the current circuit state for a flag.
-func (b *Breaker) GetState(ctx context.Context, flagKey string) State {
-	val, err := b.rdb.Get(ctx, "circuit:"+flagKey+":state").Result()
+// stateKey builds the Redis key for a flag's live circuit state, scoped by
+// environment. Env scoping is a correctness requirement: without it a trip in
+// one environment (e.g. staging) overwrites another environment's state (e.g.
+// production) for the same flag key, so a staging failure could fail-open or
+// fail-closed production traffic — or mask a real production trip.
+func stateKey(flagKey, env string) string {
+	return "circuit:" + flagKey + ":" + env + ":state"
+}
+
+// GetState returns the current circuit state for a flag in an environment.
+func (b *Breaker) GetState(ctx context.Context, flagKey, env string) State {
+	val, err := b.rdb.Get(ctx, stateKey(flagKey, env)).Result()
 	if err != nil {
 		return StateClosed
 	}
 	return State(val)
 }
 
-// SetState updates the circuit state for a flag in Redis.
-func (b *Breaker) SetState(ctx context.Context, flagKey string, state State, ttl time.Duration) {
-	_ = b.rdb.Set(ctx, "circuit:"+flagKey+":state", string(state), ttl).Err()
+// SetState updates the circuit state for a flag in an environment in Redis.
+func (b *Breaker) SetState(ctx context.Context, flagKey, env string, state State, ttl time.Duration) {
+	_ = b.rdb.Set(ctx, stateKey(flagKey, env), string(state), ttl).Err()
 	b.logger.Info("circuit breaker state change",
-		zap.String("flag", flagKey), zap.String("state", string(state)))
+		zap.String("flag", flagKey), zap.String("env", env), zap.String("state", string(state)))
 }
 
 // Window holds an aggregated error rate window for a flag.
