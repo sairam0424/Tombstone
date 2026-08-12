@@ -23,6 +23,7 @@ import (
 	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/scheduler"
+	"github.com/tombstone/flag-api/internal/secrets"
 	"github.com/tombstone/flag-api/internal/telemetry"
 	"github.com/tombstone/flag-api/internal/tlsutil"
 	"github.com/tombstone/flag-api/internal/transparency"
@@ -59,6 +60,25 @@ func main() {
 	if jwtSecret == "" {
 		logger.Fatal("JWT_SECRET environment variable is required")
 	}
+	// SEC-4: token hashing is mandatory — service and break-glass tokens are
+	// stored only as HMAC(pepper, token), so without the pepper no service token
+	// can be authenticated at all. Fail at startup rather than silently
+	// rejecting every service-token request at runtime.
+	tokenHasher, err := secrets.NewTokenHasherFromEnv()
+	if err != nil {
+		logger.Fatal("token hashing not configured", zap.Error(err))
+	}
+
+	// SEC-4: audit exports are signed with a key SEPARATE from JWT_SECRET. This
+	// is intentionally NOT fatal — a deployment that never exports compliance
+	// evidence should still boot; the export endpoint itself fails closed with a
+	// clear message instead.
+	complianceSigner, signerErr := secrets.NewComplianceSignerFromEnv()
+	if signerErr != nil {
+		logger.Warn("compliance export signing disabled — GET /api/v1/compliance/export will return 503",
+			zap.Error(signerErr))
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
@@ -87,7 +107,7 @@ func main() {
 
 	rekorClient := transparency.NewRekorClient()
 
-	authMw := middleware.NewAuthMiddleware(db, jwtSecret)
+	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
@@ -96,10 +116,10 @@ func main() {
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger)
-	complianceH := v1.NewComplianceHandler(db, logger)
+	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner)
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
-	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger)
+	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher)
 	crH := v1.NewChangeRequestHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.

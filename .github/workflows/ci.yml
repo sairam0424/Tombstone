@@ -244,4 +244,4 @@ jobs:
           TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
         run: |
           go build ./cmd/migrate ./internal/db/
-          go test ./internal/db/ -run TestMigrationRunner -v
+          go test ./internal/db/ -v

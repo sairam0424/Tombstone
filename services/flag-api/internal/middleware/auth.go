@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 // actorKey is an unexported struct used as the context key for the authenticated actor.
@@ -27,10 +29,14 @@ var ContextKeyServiceRole = actorKey{"service_role"}
 type AuthMiddleware struct {
 	db        *sql.DB
 	jwtSecret []byte
+	// hasher converts a presented service token into the keyed hash stored in
+	// the database (SEC-4). Required — without it there is no way to look a
+	// token up, since the plaintext is no longer stored.
+	hasher *secrets.TokenHasher
 }
 
-func NewAuthMiddleware(db *sql.DB, jwtSecret string) *AuthMiddleware {
-	return &AuthMiddleware{db: db, jwtSecret: []byte(jwtSecret)}
+func NewAuthMiddleware(db *sql.DB, jwtSecret string, hasher *secrets.TokenHasher) *AuthMiddleware {
+	return &AuthMiddleware{db: db, jwtSecret: []byte(jwtSecret), hasher: hasher}
 }
 
 // Authenticate validates either a JWT (human user) or a service token (SDK).
@@ -94,11 +100,17 @@ func (a *AuthMiddleware) validateJWT(tokenStr string) (string, bool) {
 // A token with no usable role falls back to VIEWER (read-only) rather than to a
 // writable role: an unrecognized or missing role must never widen access.
 func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string) (string, Role, bool) {
+	// SEC-4: tokens are stored as HMAC(pepper, token), never as plaintext, so the
+	// lookup is by hash. A missing hasher must reject rather than fall back to a
+	// plaintext comparison, which would defeat hashing entirely.
+	if a.hasher == nil {
+		return "", "", false
+	}
 	var name, role string
 	err := a.db.QueryRowContext(ctx, `
 		SELECT name, role FROM service_tokens
-		WHERE token=$1 AND revoked_at IS NULL
-	`, token).Scan(&name, &role)
+		WHERE token_hash=$1 AND revoked_at IS NULL
+	`, a.hasher.Hash(token)).Scan(&name, &role)
 	if err != nil {
 		return "", "", false
 	}

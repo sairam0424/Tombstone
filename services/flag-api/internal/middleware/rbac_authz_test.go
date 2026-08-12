@@ -10,7 +10,21 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/secrets"
 )
+
+// testPepper is a fixed pepper so the expected token_hash is deterministic.
+const testPepper = "test-pepper-do-not-use-in-prod"
+
+func testHasher(t *testing.T) *secrets.TokenHasher {
+	t.Helper()
+	h, err := secrets.NewTokenHasher(testPepper)
+	if err != nil {
+		t.Fatalf("hasher: %v", err)
+	}
+	return h
+}
 
 // newTestRBAC builds an RBACMiddleware whose OPA evaluator is deliberately
 // unavailable, so RequirePermission exercises the hardcoded permissionMatrix
@@ -192,11 +206,13 @@ func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
 			}
 			defer db.Close()
 
+			hasher := testHasher(t)
+			// SEC-4: the query must present the HASH, never the plaintext token.
 			mock.ExpectQuery("SELECT name, role FROM service_tokens").
-				WithArgs("tok-123").
+				WithArgs(hasher.Hash("tok-123")).
 				WillReturnRows(sqlmock.NewRows([]string{"name", "role"}).AddRow("gitops-sync", c.dbRole))
 
-			auth := NewAuthMiddleware(db, "secret")
+			auth := NewAuthMiddleware(db, "secret", hasher)
 			actor, role, ok := auth.validateServiceToken(context.Background(), "tok-123")
 
 			if !ok {
@@ -220,11 +236,12 @@ func TestValidateServiceTokenRejectsUnknownOrRevoked(t *testing.T) {
 	defer db.Close()
 
 	// Revoked/absent tokens produce no rows — the query filters revoked_at.
+	hasher := testHasher(t)
 	mock.ExpectQuery("SELECT name, role FROM service_tokens").
-		WithArgs("revoked").
+		WithArgs(hasher.Hash("revoked")).
 		WillReturnError(sql.ErrNoRows)
 
-	auth := NewAuthMiddleware(db, "secret")
+	auth := NewAuthMiddleware(db, "secret", hasher)
 	actor, role, ok := auth.validateServiceToken(context.Background(), "revoked")
 
 	if ok {
