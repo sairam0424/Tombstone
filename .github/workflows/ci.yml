@@ -211,3 +211,37 @@ jobs:
       - name: Test dashboard
         working-directory: workspace-dashboard
         run: npm test
+
+  flag-api-migrations:
+    name: flag-api Migration Runner
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector image — schema.sql's embedding vector(768) column needs it.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: tombstone
+          POSTGRES_PASSWORD: tombstone
+          POSTGRES_DB: tombstone
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tombstone"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+      - name: Fresh-baseline verification (apply-all + idempotent re-run + baseline adopt)
+        working-directory: services/flag-api
+        env:
+          GOWORK: "off"
+          # Keyword/value DSN (no URL); lib/pq reads the password from PGPASSWORD.
+          PGPASSWORD: tombstone
+          TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
+        run: |
+          go build ./cmd/migrate ./internal/db/
+          go test ./internal/db/ -run TestMigrationRunner -v
