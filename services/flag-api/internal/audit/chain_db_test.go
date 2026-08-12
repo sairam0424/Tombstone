@@ -1,0 +1,164 @@
+package audit
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	_ "github.com/lib/pq"
+
+	"github.com/tombstone/flag-api/internal/db"
+)
+
+// TestChainAgainstPostgres is the executable gate for AUD-1. It runs against a
+// real Postgres in the flag-api-migrations CI job and skips locally.
+//
+// Subtest ORDER matters: audit_log blocks DELETE by rule, so a forged row cannot
+// be cleaned up and permanently breaks global verification. Every "chain is
+// intact" assertion therefore runs BEFORE the tampering subtests.
+func TestChainAgainstPostgres(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping DB-backed audit chain test")
+	}
+
+	database, err := sql.Open("postgres", url)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Ensure the schema (incl. migration 015's entry_hash column) exists.
+	if _, err := db.Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	w := NewWriter(database, testKey(t))
+
+	t.Run("append builds a chain that verifies", func(t *testing.T) {
+		for i, ev := range []string{"flag_created", "flag_environment_updated", "flag_archived"} {
+			e := sampleEntry()
+			e.FlagKey = "aud1-chain"
+			e.EventType = ev
+			if _, _, err := w.Append(ctx, e); err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
+		}
+
+		report, err := w.Verify(ctx)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 {
+			t.Fatalf("FailureCount = %d, want 0; failures: %+v", report.FailureCount, report.Failures)
+		}
+		if report.VerifiedEntries < 3 {
+			t.Fatalf("VerifiedEntries = %d, want >= 3", report.VerifiedEntries)
+		}
+		if !report.Intact {
+			t.Fatalf("Intact = false, want true (note: %q)", report.Note)
+		}
+	})
+
+	// The fork race: two writers previously both read the same chain tip and both
+	// wrote a prev_hash pointing at it. If the advisory lock were absent, these
+	// concurrent appends would produce entries whose prev_hash does not match
+	// their predecessor, and Verify would report link failures.
+	t.Run("concurrent appends to one chain do not fork it", func(t *testing.T) {
+		const writers = 8
+		var wg sync.WaitGroup
+		errs := make(chan error, writers)
+
+		for i := 0; i < writers; i++ {
+			wg.Add(1)
+			go func(n int) {
+				defer wg.Done()
+				e := sampleEntry()
+				e.FlagKey = "aud1-concurrent"
+				e.EventType = "flag_environment_updated"
+				if _, _, err := w.Append(ctx, e); err != nil {
+					errs <- err
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent append failed: %v", err)
+		}
+
+		report, err := w.Verify(ctx)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 {
+			t.Fatalf("chain forked under %d concurrent writers: %d failure(s): %+v",
+				writers, report.FailureCount, report.Failures)
+		}
+	})
+
+	t.Run("legacy rows are reported unverifiable rather than intact", func(t *testing.T) {
+		// A pre-AUD-1 row: no entry_hash. Nobody can recompute it.
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO audit_log (flag_key, environment, actor, event_type, prev_hash, entry_hash)
+			VALUES ('aud1-legacy', 'production', 'legacy-actor', 'flag_created', 'deadbeef', NULL)
+		`); err != nil {
+			t.Fatalf("insert legacy row: %v", err)
+		}
+
+		report, err := w.Verify(ctx)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.LegacyEntries < 1 {
+			t.Fatal("a row without entry_hash must be counted as legacy/unverifiable")
+		}
+		// A legacy row is not a FAILURE — it is simply outside the verified span.
+		if report.FailureCount != 0 {
+			t.Fatalf("legacy rows must not be reported as tampering: %+v", report.Failures)
+		}
+		if report.Note == "" {
+			t.Error("report must explain that some entries are excluded from verification")
+		}
+	})
+
+	// This is the threat model: audit_log blocks UPDATE and DELETE, but INSERT is
+	// permitted, so an attacker fabricates a row. Without the key they cannot
+	// compute a valid entry_hash, so verification must catch it.
+	t.Run("a forged inserted row is detected", func(t *testing.T) {
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO audit_log (flag_key, environment, actor, event_type, prev_hash, entry_hash)
+			VALUES ('aud1-forged', 'production', 'mallory', 'flag_environment_updated',
+			        'aaaa', 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
+		`); err != nil {
+			t.Fatalf("insert forged row: %v", err)
+		}
+
+		report, err := w.Verify(ctx)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount < 1 {
+			t.Fatal("a row with a bogus entry_hash must be reported as a failure")
+		}
+		if report.Intact {
+			t.Fatal("Intact must be false once any entry fails verification")
+		}
+
+		found := false
+		for _, f := range report.Failures {
+			if f.FlagKey == "aud1-forged" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the forged row must be named in the failures list; got %+v", report.Failures)
+		}
+	})
+}

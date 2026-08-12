@@ -18,23 +18,22 @@ package scheduler
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/audit"
 )
 
 const tickInterval = 30 * time.Second
 
 // Start launches the background scheduler goroutine.
 // It blocks until ctx is cancelled (intended to be called as: go scheduler.Start(ctx, db, rdb, logger)).
-func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
+func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) {
 	logger.Info("scheduled-change executor starting", zap.Duration("interval", tickInterval))
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -45,7 +44,7 @@ func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logge
 			logger.Info("scheduled-change executor stopped")
 			return
 		case <-ticker.C:
-			runDue(ctx, db, rdb, logger)
+			runDue(ctx, db, rdb, logger, auditW)
 		}
 	}
 }
@@ -81,7 +80,7 @@ type flagEvent struct {
 // FOR UPDATE SKIP LOCKED ensures that when flag-api runs as multiple replicas
 // each instance claims a disjoint batch of rows — preventing duplicate audit
 // entries and duplicate Redis events from concurrent execution of the same row.
-func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
+func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		logger.Error("scheduler: begin transaction failed", zap.Error(err))
@@ -124,14 +123,14 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	}
 
 	for _, pc := range due {
-		applyChange(ctx, db, rdb, logger, pc)
+		applyChange(ctx, db, rdb, logger, auditW, pc)
 	}
 }
 
 // applyChange executes a single scheduled change.
 // On success: updates flag_environments, marks EXECUTED, writes audit + Redis event.
 // On failure: marks FAILED with error_message, logs the error, and returns (does not panic).
-func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, pc pendingChange) {
+func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer, pc pendingChange) {
 	log := logger.With(
 		zap.String("scheduled_change_id", pc.id),
 		zap.String("flag_key", pc.flagKey),
@@ -208,7 +207,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	// Write audit log entry.
 	prev := map[string]any{"enabled": curEnabled, "rollout_pct": curRollout}
 	curr := map[string]any{"enabled": newEnabled, "rollout_pct": newRollout, "scheduled_change_id": pc.id}
-	writeAudit(ctx, db, log, pc.flagKey, pc.environment, "scheduler",
+	writeAudit(ctx, auditW, log, pc.flagKey, pc.environment, "scheduler",
 		"scheduled_change_applied", prev, curr)
 
 	// Publish Redis event on the same channel as manual updates.
@@ -383,40 +382,28 @@ func publishToStream(ctx context.Context, rdb *redis.Client, log *zap.Logger, en
 
 // writeAudit inserts an append-only audit log entry with Merkle hash linking.
 // Mirrors the logic in v1.FlagHandler.writeAudit.
-func writeAudit(ctx context.Context, db *sql.DB, log *zap.Logger,
+func writeAudit(ctx context.Context, auditW *audit.Writer, log *zap.Logger,
 	flagKey, env, actor, eventType string, prev, curr any) {
 
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	// Fetch the most recent audit row for this flag to build the Merkle chain.
-	var lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs string
-	_ = db.QueryRowContext(ctx, `
-		SELECT id, event_type, actor,
-		       COALESCE(prev_state::text, ''),
-		       COALESCE(new_state::text, ''),
-		       EXTRACT(EPOCH FROM created_at)::text
-		FROM audit_log
-		WHERE flag_key = $1
-		ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastEventType, &lastActor, &lastPrevState, &lastNewState, &lastTs)
-
-	// Canonical 6-field pipe-separated Merkle formula — matches flags.go:auditEntryHash
-	// exactly so mixed-provenance chains remain verifiable.
-	// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
-	prevHash := ""
-	if lastID != "" {
-		content := strings.Join([]string{lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs}, "|")
-		hashBytes := sha256.Sum256([]byte(content))
-		prevHash = fmt.Sprintf("%x", hashBytes)
+	// AUD-1: this function used to hand-duplicate the six-field pipe-joined
+	// formula from api/v1 (it could not import the unexported helper across the
+	// package boundary), and did an unlocked SELECT-last-then-INSERT. Both the
+	// duplication and the fork race are gone — audit.Writer is the only writer.
+	if auditW == nil {
+		log.Warn("scheduler: audit log write skipped — no audit writer configured")
+		return
 	}
-
-	newID := uuid.New().String()
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO audit_log
-		    (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8)
-	`, newID, flagKey, env, actor, eventType, prevJSON, currJSON, prevHash); err != nil {
+	if _, _, err := auditW.Append(ctx, audit.Entry{
+		FlagKey:     flagKey,
+		Environment: env,
+		Actor:       actor,
+		EventType:   eventType,
+		PrevState:   prevJSON,
+		NewState:    currJSON,
+	}); err != nil {
 		log.Warn("scheduler: audit log write failed", zap.Error(err))
 	}
 }

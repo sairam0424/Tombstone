@@ -235,7 +235,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
-      - name: Fresh-baseline verification (apply-all + idempotent re-run + baseline adopt)
+      - name: DB-backed verification (migrations, token hashing, audit chain integrity)
         working-directory: services/flag-api
         env:
           GOWORK: "off"
@@ -243,5 +243,5 @@ jobs:
           PGPASSWORD: tombstone
           TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
         run: |
-          go build ./cmd/migrate ./internal/db/
-          go test ./internal/db/ -v
+          go build ./cmd/migrate ./internal/db/ ./internal/audit/
+          go test ./internal/db/ ./internal/audit/ -v

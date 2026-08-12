@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -20,11 +21,16 @@ type ComplianceHandler struct {
 	// nil means no dedicated key is configured; export then fails closed rather
 	// than falling back to the JWT signing key.
 	signer *secrets.ComplianceSigner
+	// audit recomputes real chain integrity (AUD-1) instead of asserting it.
+	audit *audit.Writer
+	// policySource reports the live authorization source ("opa" or
+	// "fallback_matrix"). A func, not a value, because OPA policies hot-reload.
+	policySource func() string
 }
 
 // NewComplianceHandler constructs a ComplianceHandler.
-func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.ComplianceSigner) *ComplianceHandler {
-	return &ComplianceHandler{db: db, logger: logger, signer: signer}
+func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.ComplianceSigner, auditW *audit.Writer, policySource func() string) *ComplianceHandler {
+	return &ComplianceHandler{db: db, logger: logger, signer: signer, audit: auditW, policySource: policySource}
 }
 
 // GetEvidence handles GET /api/v1/compliance/evidence
@@ -104,17 +110,64 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"generated_at":                   time.Now().UTC().Format(time.RFC3339),
-		"audit_log_coverage":             "100%",
-		"total_audit_entries":            totalAuditEntries,
-		"merkle_chain_integrity":         true,
-		"change_approval_rate":           approvalRate,
-		"rbac_enabled":                   true,
+	// AUD-1: these three fields were hardcoded — audit_log_coverage was the
+	// literal string "100%", and merkle_chain_integrity and rbac_enabled were
+	// the literal `true`. Compliance evidence asserting facts nobody computed is
+	// worse than no evidence, so each is now derived.
+	//
+	// Chain verification walks the whole audit_log, which is O(n); audit_log
+	// partitioning (DATA-2) is what makes this cheap at scale.
+	evidence := map[string]any{
+		"generated_at":                    time.Now().UTC().Format(time.RFC3339),
+		"total_audit_entries":             totalAuditEntries,
+		"change_approval_rate":            approvalRate,
 		"break_glass_token_uses_last_90d": breakGlassUses,
-		"service_tokens_active":          serviceTokensActive,
-		"controls":                       controls,
-	})
+		"service_tokens_active":           serviceTokensActive,
+		"controls":                        controls,
+	}
+
+	if h.audit == nil {
+		evidence["merkle_chain_integrity"] = nil
+		evidence["audit_log_coverage"] = nil
+		evidence["merkle_chain_note"] = "AUDIT_HMAC_KEY is not configured — chain integrity cannot be computed and is NOT asserted"
+	} else if report, err := h.audit.Verify(ctx); err != nil {
+		h.logger.Error("compliance: audit verification failed", zap.Error(err))
+		evidence["merkle_chain_integrity"] = nil
+		evidence["audit_log_coverage"] = nil
+		evidence["merkle_chain_note"] = "chain verification failed to run — integrity is NOT asserted"
+	} else {
+		evidence["merkle_chain_integrity"] = report.Intact
+		// Real coverage: the share of entries whose keyed hash was recomputed and
+		// checked. Pre-AUD-1 rows are excluded rather than counted as verified.
+		coverage := 0.0
+		if report.TotalEntries > 0 {
+			coverage = float64(report.VerifiedEntries) / float64(report.TotalEntries) * 100
+		}
+		evidence["audit_log_coverage"] = fmt.Sprintf("%.1f%%", coverage)
+		evidence["audit_chain_verified_entries"] = report.VerifiedEntries
+		evidence["audit_chain_legacy_entries"] = report.LegacyEntries
+		evidence["audit_chain_failures"] = report.FailureCount
+		if report.Note != "" {
+			evidence["merkle_chain_note"] = report.Note
+		}
+	}
+
+	// Replaces the hardcoded rbac_enabled=true with facts: which policy engine is
+	// actually live, and how many role assignments exist. Since SEC-1 every
+	// /api/v1 route carries a RequirePermission gate (enforced by a structural
+	// test), so enforcement is a property of the route table, not a self-claim.
+	source := "unknown"
+	if h.policySource != nil {
+		source = h.policySource()
+	}
+	var roleAssignments int
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_roles`).Scan(&roleAssignments)
+	evidence["rbac"] = map[string]any{
+		"policy_source":    source,
+		"role_assignments": roleAssignments,
+	}
+
+	writeJSON(w, http.StatusOK, evidence)
 }
 
 // GetControls handles GET /api/v1/compliance/controls
@@ -220,9 +273,9 @@ func (h *ComplianceHandler) GetControls(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"framework":  "SOC 2 Type II — Trust Services Criteria 2017",
+		"framework":    "SOC 2 Type II — Trust Services Criteria 2017",
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"controls":   controls,
+		"controls":     controls,
 	})
 }
 
