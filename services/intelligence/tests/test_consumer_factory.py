@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock
 
 
 def test_create_consumer_returns_kafka_by_default():
