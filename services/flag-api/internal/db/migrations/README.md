@@ -31,7 +31,27 @@ the convention is:
 
 ## How to Apply
 
-### Fresh database (dev / CI)
+### Recommended: the migration runner (`cmd/migrate`)
+
+The runner applies the baseline (`schema.sql` = version 1) plus every pending
+`migrations/NNN_*.sql` in ascending order, records each in a `schema_migrations`
+ledger (so re-runs are no-ops), and holds a Postgres advisory lock so concurrent
+flag-api replicas can't double-apply.
+
+```bash
+cd services/flag-api
+DB_URL="$DATABASE_URL" go run ./cmd/migrate            # apply all pending
+DB_URL="$DATABASE_URL" go run ./cmd/migrate -baseline  # adopt on a hand-built DB
+```
+
+`-baseline` records every version as applied **without running any SQL** — use
+it exactly once when adopting the runner on a database that was already built by
+hand (via the manual steps below), so the ledger reflects reality and the runner
+never tries to re-apply a non-idempotent statement. flag-api's own startup does
+**not** auto-migrate: running migrations stays an explicit, auditable step (CI,
+docker-compose init, or ops).
+
+### Manual (reference / fallback)
 
 ```bash
 # From repo root
