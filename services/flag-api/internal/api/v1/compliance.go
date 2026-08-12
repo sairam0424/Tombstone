@@ -1,28 +1,30 @@
 package v1
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 // ComplianceHandler serves SOC 2 evidence and control documentation.
 type ComplianceHandler struct {
 	db     *sql.DB
 	logger *zap.Logger
+	// signer signs audit exports with a key DISTINCT from JWT_SECRET (SEC-4).
+	// nil means no dedicated key is configured; export then fails closed rather
+	// than falling back to the JWT signing key.
+	signer *secrets.ComplianceSigner
 }
 
 // NewComplianceHandler constructs a ComplianceHandler.
-func NewComplianceHandler(db *sql.DB, logger *zap.Logger) *ComplianceHandler {
-	return &ComplianceHandler{db: db, logger: logger}
+func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.ComplianceSigner) *ComplianceHandler {
+	return &ComplianceHandler{db: db, logger: logger, signer: signer}
 }
 
 // GetEvidence handles GET /api/v1/compliance/evidence
@@ -227,7 +229,15 @@ func (h *ComplianceHandler) GetControls(w http.ResponseWriter, r *http.Request) 
 // ExportAuditLog handles GET /api/v1/compliance/export
 // Streams the full audit log as JSONL with a trailing HMAC-SHA256 signature line.
 func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Request) {
-	secret := os.Getenv("JWT_SECRET")
+	// SEC-4: this export was signed with JWT_SECRET, so anyone able to VERIFY an
+	// export could also MINT auth tokens. Signing now uses a separate key and
+	// fails closed if that key is absent — silently reusing JWT_SECRET would
+	// reintroduce the vulnerability.
+	if h.signer == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"compliance export signing key is not configured (set COMPLIANCE_SIGNING_KEY)")
+		return
+	}
 
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
@@ -245,7 +255,7 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 	}
 	defer func() { _ = rows.Close() }()
 
-	mac := hmac.New(sha256.New, []byte(secret))
+	mac := h.signer.New()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"audit_log_export.jsonl\"")
@@ -275,9 +285,10 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		lineCount++
 	}
 
-	sig := hex.EncodeToString(mac.Sum(nil))
+	sig := secrets.Sum(mac)
 	sigLine, _ := json.Marshal(map[string]any{
 		"_type":       "export_signature",
+		"kid":         h.signer.KeyID(),
 		"hmac_sha256": sig,
 		"line_count":  lineCount,
 		"exported_at": time.Now().Unix(),

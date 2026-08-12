@@ -10,16 +10,21 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 type BreakGlassHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
 	logger *zap.Logger
+	// hasher stores/looks up break-glass tokens as keyed hashes (SEC-4). The
+	// plaintext is returned to the creator exactly once and never persisted.
+	hasher *secrets.TokenHasher
 }
 
-func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *BreakGlassHandler {
-	return &BreakGlassHandler{db: db, rdb: rdb, logger: logger}
+func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, hasher *secrets.TokenHasher) *BreakGlassHandler {
+	return &BreakGlassHandler{db: db, rdb: rdb, logger: logger, hasher: hasher}
 }
 
 type CreateBreakGlassTokenRequest struct {
@@ -59,10 +64,17 @@ func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) 
 	token := "bgt_" + hex.EncodeToString(raw)
 	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Hour)
 
+	// SEC-4: persist ONLY the keyed hash. The plaintext below is returned to the
+	// caller once and then discarded, which is what makes the response's
+	// "cannot be retrieved again" promise actually true.
+	if h.hasher == nil {
+		writeError(w, http.StatusInternalServerError, "token hashing is not configured")
+		return
+	}
 	_, err := h.db.ExecContext(r.Context(), `
-		INSERT INTO break_glass_tokens (token, scope, created_by, expires_at, incident_ref)
+		INSERT INTO break_glass_tokens (token_hash, scope, created_by, expires_at, incident_ref)
 		VALUES ($1, $2, $3, $4, $5)
-	`, token, req.Scope, req.CreatedBy, expiresAt, req.IncidentRef)
+	`, h.hasher.Hash(token), req.Scope, req.CreatedBy, expiresAt, req.IncidentRef)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -99,9 +111,13 @@ func (h *BreakGlassHandler) UseToken(w http.ResponseWriter, r *http.Request) {
 	var id, scope string
 	var expiresAt time.Time
 	var used bool
+	if h.hasher == nil {
+		writeError(w, http.StatusInternalServerError, "token hashing is not configured")
+		return
+	}
 	err := h.db.QueryRowContext(r.Context(), `
-		SELECT id, scope, expires_at, used FROM break_glass_tokens WHERE token = $1
-	`, req.Token).Scan(&id, &scope, &expiresAt, &used)
+		SELECT id, scope, expires_at, used FROM break_glass_tokens WHERE token_hash = $1
+	`, h.hasher.Hash(req.Token)).Scan(&id, &scope, &expiresAt, &used)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid break-glass token")
 		return
