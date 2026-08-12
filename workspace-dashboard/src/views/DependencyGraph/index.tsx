@@ -130,7 +130,7 @@ export default function DependencyGraph() {
       const { pointPositions, pointColors, pointSizes, linkArray } =
         buildCosmosData(graphData.nodes, graphData.links);
 
-      // Cosmos.gl v2 constructor: Graph(div, config)
+      // Cosmos.gl v3 constructor: Graph(div, config)
       // TypeScript types are accurate in beta — cast via unknown to allow our ref type
       const GraphClass = mod.Graph as unknown as new (
         div: HTMLDivElement,
@@ -149,9 +149,9 @@ export default function DependencyGraph() {
 
       const cosmos = new GraphClass(canvasRef.current, {
         backgroundColor: '#07080d',
-        pointSize: 5,
-        linkColor: '#1f2433',
-        linkWidth: 1,
+        pointDefaultSize: 5,
+        linkDefaultColor: '#1f2433',
+        linkDefaultWidth: 1,
         simulationRepulsion: 0.5,
         simulationLinkDistance: 80,
         simulationGravity: 0.1,
