@@ -13,7 +13,7 @@ import (
 // expectedVersions is the full set the runner must apply: 1 = schema.sql
 // baseline, then each migrations/NNN_*.sql prefix. Update this alongside any
 // new migration so the runner test stays a real regression gate.
-var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12}
+var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13}
 
 // TestMigrationRunner exercises the runner against a REAL Postgres. It is the
 // executable gate for DATA-1 and runs in CI (the flag-api-migrations job sets

@@ -81,11 +81,11 @@ var permissionMatrix = map[Role][]Permission{
 
 // opaEvaluator holds a compiled OPA query that can be swapped atomically on hot-reload.
 type opaEvaluator struct {
-	mu          sync.RWMutex
-	preparedQ   *rego.PreparedEvalQuery
-	available   bool
-	policyDir   string
-	query       string
+	mu        sync.RWMutex
+	preparedQ *rego.PreparedEvalQuery
+	available bool
+	policyDir string
+	query     string
 }
 
 func newOPAEvaluator(policyDir, query string, logger *zap.Logger) *opaEvaluator {
@@ -159,9 +159,9 @@ func (e *opaEvaluator) evaluate(ctx context.Context, input map[string]interface{
 // RBACMiddleware enforces role-based access control via OPA (primary) with a
 // hardcoded permission matrix as fallback.
 type RBACMiddleware struct {
-	db          *sql.DB
-	logger      *zap.Logger
-	flagsEval   *opaEvaluator
+	db        *sql.DB
+	logger    *zap.Logger
+	flagsEval *opaEvaluator
 }
 
 func NewRBACMiddleware(db *sql.DB, logger *zap.Logger) *RBACMiddleware {
@@ -302,9 +302,17 @@ func (r *RBACMiddleware) LoadRole(next http.Handler) http.Handler {
 }
 
 func (r *RBACMiddleware) resolveRole(ctx context.Context, actor string) Role {
-	// Service tokens are always OPERATOR
+	// Service tokens carry a per-token role, resolved by AuthMiddleware at
+	// token-validation time (SEC-1). Previously every service token was
+	// hardcoded to OPERATOR, so any SDK token could write flags and change
+	// production rollouts. Absent/unknown role => VIEWER (least privilege).
 	if strings.HasPrefix(actor, "sdk:") {
-		return RoleOperator
+		if role, ok := ctx.Value(ContextKeyServiceRole).(Role); ok {
+			if _, known := permissionMatrix[role]; known {
+				return role
+			}
+		}
+		return RoleViewer
 	}
 	var role string
 	err := r.db.QueryRowContext(ctx,
