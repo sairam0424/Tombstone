@@ -48,7 +48,7 @@
         },
         "tombstone.intelligenceApiUrl": {
           "type": "string",
-          "default": "http://localhost:8082",
+          "default": "http://localhost:8083",
           "description": "Base URL of the Tombstone intelligence service (stale flags, NLP search, cleanup PRs)"
         }
       }
