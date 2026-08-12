@@ -13,6 +13,11 @@ from tombstone.types import (
 
 logger = logging.getLogger(__name__)
 
+# A slow client can receive a burst of gateway "lag" frames back-to-back
+# (one per dropped update). Coalesce them into a single snapshot refetch by
+# waiting this long after the LAST lag frame before re-syncing the cache.
+_DEFAULT_REFETCH_DEBOUNCE_SECONDS = 0.5
+
 
 class TombstoneClient:
     def __init__(
@@ -30,8 +35,39 @@ class TombstoneClient:
         self._defaults: dict[str, Any] = defaults or {}
         self._cache: dict[str, FlagEnvironmentState] = {}
         self._lock = threading.Lock()
+        # Debounced snapshot refetch triggered by gateway "lag" events.
+        self._refetch_lock = threading.Lock()
+        self._refetch_timer: threading.Timer | None = None
+        self._refetch_debounce_seconds = _DEFAULT_REFETCH_DEBOUNCE_SECONDS
+        self._stopped = False
 
     def connect(self) -> None:
+        self._fetch_snapshot()
+
+        sse_thread = threading.Thread(
+            target=self._sse_listener, name="flagmind-sse", daemon=True
+        )
+        sse_thread.start()
+
+    def close(self) -> None:
+        """Stop background work and cancel any pending refetch timer.
+
+        Safe to call multiple times and safe to call concurrently with a
+        "lag" event racing to schedule a refetch — after this returns no new
+        refetch timer will be scheduled.
+        """
+        with self._refetch_lock:
+            self._stopped = True
+            if self._refetch_timer is not None:
+                self._refetch_timer.cancel()
+                self._refetch_timer = None
+
+    def _fetch_snapshot(self) -> None:
+        """Fetch the full environment snapshot and replace the flag cache.
+
+        This is the same code path connect() uses to populate the cache; the
+        "lag" event handler reuses it to recover updates the gateway dropped.
+        """
         try:
             with httpx.Client(
                 headers={"Authorization": f"Bearer {self._sdk_key}"},
@@ -46,21 +82,17 @@ class TombstoneClient:
         except Exception as exc:
             logger.warning("Tombstone: failed to fetch snapshot: %s", exc)
 
-        sse_thread = threading.Thread(
-            target=self._sse_listener, name="flagmind-sse", daemon=True
-        )
-        sse_thread.start()
-
-    def evaluate(
-        self, flag_key: str, context: EvaluationContext
-    ) -> EvaluationResult:
+    def evaluate(self, flag_key: str, context: EvaluationContext) -> EvaluationResult:
         try:
             with self._lock:
                 flag_state = self._cache.get(flag_key)
                 all_flags = dict(self._cache)  # shallow copy under lock
             default_value = self._defaults.get(flag_key, False)
             return evaluate(
-                flag_state, context, default_value, flag_key,
+                flag_state,
+                context,
+                default_value,
+                flag_key,
                 all_flags=all_flags,
                 evaluation_cache={},
             )
@@ -90,14 +122,20 @@ class TombstoneClient:
             return list(self._cache.keys())
 
     def _apply_snapshot(self, payload: dict) -> None:
-        from tombstone.types import FlagEnvironmentState, TargetingRule, PropertyCondition
+        from tombstone.types import (
+            FlagEnvironmentState,
+            TargetingRule,
+            PropertyCondition,
+        )
 
         new_cache: dict[str, FlagEnvironmentState] = {}
         for raw in payload.get("flags", []):
             try:
                 flag_key = raw["flag_key"]
             except (KeyError, TypeError):
-                logger.warning("Tombstone: skipping malformed flag entry in snapshot: %r", raw)
+                logger.warning(
+                    "Tombstone: skipping malformed flag entry in snapshot: %r", raw
+                )
                 continue
 
             try:
@@ -134,7 +172,9 @@ class TombstoneClient:
                     target_list=raw.get("target_list", []),
                 )
             except Exception as exc:
-                logger.warning("Tombstone: failed to deserialize flag '%s': %s", flag_key, exc)
+                logger.warning(
+                    "Tombstone: failed to deserialize flag '%s': %s", flag_key, exc
+                )
 
         with self._lock:
             self._cache = new_cache
@@ -152,13 +192,51 @@ class TombstoneClient:
                         url,
                         params={"environment": self._environment},
                     ) as response:
-                        for line in response.iter_lines():
-                            if line.startswith("data:"):
-                                payload = line[5:].strip()
-                                if payload:
-                                    self._apply_event(payload)
+                        self._consume_sse_lines(response.iter_lines())
             except Exception as exc:
                 logger.debug("Tombstone: SSE reconnect after error: %s", exc)
+
+    def _consume_sse_lines(self, lines) -> None:
+        """Parse an SSE line stream, tracking each frame's event type.
+
+        Flag-update frames ("event: flag_updated" / "kill_switch") apply
+        directly to the cache. A "lag" frame is written by the gateway right
+        before it DROPS a flag update for a client that fell behind, so it
+        triggers a debounced full-snapshot refetch to recover the drop.
+        """
+        event_type = "message"
+        for line in lines:
+            if line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload:
+                    if event_type == "lag":
+                        self._schedule_snapshot_refetch()
+                    else:
+                        self._apply_event(payload)
+                # Reset for the next frame — an event type applies only to the
+                # data line that immediately follows it.
+                event_type = "message"
+
+    def _schedule_snapshot_refetch(self) -> None:
+        """Debounce a full-snapshot refetch after gateway "lag" event(s).
+
+        Coalesces a burst of lag frames into a single refetch by cancelling
+        and rescheduling the timer on each frame, so the refetch fires once
+        the client has stopped falling behind.
+        """
+        with self._refetch_lock:
+            if self._stopped:
+                return
+            if self._refetch_timer is not None:
+                self._refetch_timer.cancel()
+            timer = threading.Timer(
+                self._refetch_debounce_seconds, self._fetch_snapshot
+            )
+            timer.daemon = True
+            self._refetch_timer = timer
+            timer.start()
 
     def _apply_event(self, raw_json: str) -> None:
         import json

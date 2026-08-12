@@ -12,9 +12,9 @@
  * before constructing SSEStreamClient — it implements just enough of the
  * interface streaming.ts actually uses (addEventListener, onerror, close).
  */
-import { strict as assert } from 'assert';
-import { SSEStreamClient } from '../streaming.js';
-import type { FlagEvent, TombstoneClientConfig } from '../types.js';
+import { strict as assert } from "assert";
+import { SSEStreamClient } from "../streaming.js";
+import type { FlagEvent, TombstoneClientConfig } from "../types.js";
 
 type Listener = (e: { data?: string }) => void;
 
@@ -24,7 +24,10 @@ class FakeEventSource {
   onerror: (() => void) | null = null;
   closed = false;
 
-  constructor(public url: string, public opts?: unknown) {
+  constructor(
+    public url: string,
+    public opts?: unknown,
+  ) {
     FakeEventSource.instances.push(this);
   }
 
@@ -42,28 +45,32 @@ class FakeEventSource {
   }
 }
 
-(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource;
+(globalThis as unknown as { EventSource: unknown }).EventSource =
+  FakeEventSource;
 
-async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 500,
+): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error('waitFor: condition never became true');
+      throw new Error("waitFor: condition never became true");
     }
-    await new Promise(resolve => setTimeout(resolve, 2));
+    await new Promise((resolve) => setTimeout(resolve, 2));
   }
 }
 
 const baseConfig: TombstoneClientConfig = {
-  sdkKey: 'test-key',
-  environment: 'production',
-  gatewayUrl: 'http://localhost:8080',
+  sdkKey: "test-key",
+  environment: "production",
+  gatewayUrl: "http://localhost:8080",
   defaults: {},
   reconnectIntervalMs: 1,
   maxReconnectMs: 5,
 };
 
-describe('SSEStreamClient — onReconnect callback', () => {
+describe("SSEStreamClient — onReconnect callback", () => {
   beforeEach(() => {
     FakeEventSource.instances = [];
   });
@@ -73,14 +80,20 @@ describe('SSEStreamClient — onReconnect callback', () => {
     const client = new SSEStreamClient(
       baseConfig,
       (_e: FlagEvent) => {},
-      () => { reconnectCount++; },
+      () => {
+        reconnectCount++;
+      },
     );
     client.connect();
 
     const es = FakeEventSource.instances[0];
-    es.emit('connected');
+    es.emit("connected");
 
-    assert.equal(reconnectCount, 0, 'initial connection must not be treated as a reconnect');
+    assert.equal(
+      reconnectCount,
+      0,
+      "initial connection must not be treated as a reconnect",
+    );
     client.disconnect();
   });
 
@@ -89,12 +102,14 @@ describe('SSEStreamClient — onReconnect callback', () => {
     const client = new SSEStreamClient(
       baseConfig,
       (_e: FlagEvent) => {},
-      () => { reconnectCount++; },
+      () => {
+        reconnectCount++;
+      },
     );
     client.connect();
 
     // Initial connection — establishes hasConnectedOnce, no onReconnect yet.
-    FakeEventSource.instances[0].emit('connected');
+    FakeEventSource.instances[0].emit("connected");
     assert.equal(reconnectCount, 0);
 
     // Simulate the connection dropping (network blip) — this schedules a
@@ -105,44 +120,138 @@ describe('SSEStreamClient — onReconnect callback', () => {
     await waitFor(() => FakeEventSource.instances.length === 2);
 
     // The gateway sends "connected" again once the new SSE connection is live.
-    FakeEventSource.instances[1].emit('connected');
+    FakeEventSource.instances[1].emit("connected");
 
-    assert.equal(reconnectCount, 1, 'first reconnect must fire onReconnect exactly once');
+    assert.equal(
+      reconnectCount,
+      1,
+      "first reconnect must fire onReconnect exactly once",
+    );
 
     // A SECOND reconnect must also fire onReconnect — this is the "EVERY
     // reconnect" requirement, not just the first one after a STALE period.
     FakeEventSource.instances[1].onerror?.();
     await waitFor(() => FakeEventSource.instances.length === 3);
-    FakeEventSource.instances[2].emit('connected');
+    FakeEventSource.instances[2].emit("connected");
 
-    assert.equal(reconnectCount, 2, 'second reconnect must also fire onReconnect');
+    assert.equal(
+      reconnectCount,
+      2,
+      "second reconnect must also fire onReconnect",
+    );
 
     client.disconnect();
   });
 
-  it('does not fire onReconnect after disconnect() has been called', () => {
+  it("does not fire onReconnect after disconnect() has been called", () => {
     let reconnectCount = 0;
     const client = new SSEStreamClient(
       baseConfig,
       (_e: FlagEvent) => {},
-      () => { reconnectCount++; },
+      () => {
+        reconnectCount++;
+      },
     );
     client.connect();
-    FakeEventSource.instances[0].emit('connected');
+    FakeEventSource.instances[0].emit("connected");
     client.disconnect();
 
     // A stray error after disconnect() must not schedule a reconnect.
     FakeEventSource.instances[0].onerror?.();
-    assert.equal(FakeEventSource.instances.length, 1, 'disconnect() must not open a new connection');
+    assert.equal(
+      FakeEventSource.instances.length,
+      1,
+      "disconnect() must not open a new connection",
+    );
     assert.equal(reconnectCount, 0);
   });
 
-  it('works with no onReconnect callback provided (optional parameter)', () => {
+  it("works with no onReconnect callback provided (optional parameter)", () => {
     // TombstoneClient always supplies one, but the parameter is optional at
     // the type level — must not throw if omitted.
     const client = new SSEStreamClient(baseConfig, (_e: FlagEvent) => {});
     client.connect();
-    assert.doesNotThrow(() => FakeEventSource.instances[0].emit('connected'));
+    assert.doesNotThrow(() => FakeEventSource.instances[0].emit("connected"));
+    client.disconnect();
+  });
+});
+
+describe("SSEStreamClient — lag event triggers debounced snapshot refetch", () => {
+  // The gateway writes an  event: lag  frame right before dropping a real
+  // flag-update event for a client whose buffer is full. The lag handler must
+  // recover the dropped update by re-running the SAME full-snapshot refetch
+  // that reconnect uses — onReconnect — debounced so a burst collapses to one.
+  // A short debounce window keeps the test fast (mirrors reconnectIntervalMs:1
+  // in baseConfig) while still exercising the real setTimeout path.
+  const lagConfig: TombstoneClientConfig = {
+    ...baseConfig,
+    lagRefetchDebounceMs: 10,
+  };
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+  });
+
+  it("fires exactly ONE refetch for a single lag event", async () => {
+    let refetchCount = 0;
+    const client = new SSEStreamClient(
+      lagConfig,
+      (_e: FlagEvent) => {},
+      () => {
+        refetchCount++;
+      },
+    );
+    client.connect();
+
+    const es = FakeEventSource.instances[0];
+    es.emit("connected"); // initial connect must NOT count as a refetch
+    assert.equal(refetchCount, 0);
+
+    es.emit("lag", '{"lag_ms":42}'); // gateway dropped an update — recover via refetch
+    await waitFor(() => refetchCount === 1);
+    assert.equal(
+      refetchCount,
+      1,
+      "a single lag event must trigger exactly one refetch",
+    );
+
+    // Nothing more should fire once the debounce window has settled.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(refetchCount, 1);
+
+    client.disconnect();
+  });
+
+  it("coalesces a BURST of lag events within the debounce window into ONE refetch", async () => {
+    let refetchCount = 0;
+    const client = new SSEStreamClient(
+      lagConfig,
+      (_e: FlagEvent) => {},
+      () => {
+        refetchCount++;
+      },
+    );
+    client.connect();
+
+    const es = FakeEventSource.instances[0];
+    es.emit("connected");
+    assert.equal(refetchCount, 0);
+
+    // Five lag frames back-to-back (a buffer-full burst). Each one resets the
+    // debounce timer, so only the last window survives to fire the refetch.
+    for (let i = 0; i < 5; i++) {
+      es.emit("lag", `{"lag_ms":${i}}`);
+    }
+
+    await waitFor(() => refetchCount === 1);
+    // Let several more debounce windows elapse to prove no second refetch fires.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(
+      refetchCount,
+      1,
+      "a burst of lag events must coalesce into exactly one refetch",
+    );
+
     client.disconnect();
   });
 });
