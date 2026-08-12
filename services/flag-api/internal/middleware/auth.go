@@ -17,6 +17,13 @@ type actorKey struct{ name string }
 // Must match the key used in v1.ActorContextKey.
 var ContextKeyActor = actorKey{"actor"}
 
+// ContextKeyServiceRole carries the role granted to an authenticated service
+// token (SEC-1). It is set ONLY for service-token callers — human JWT callers
+// have their role resolved from user_roles by RBACMiddleware.LoadRole. Resolving
+// it here, at token-validation time, keeps it keyed by the unique token rather
+// than by the non-unique service_tokens.name.
+var ContextKeyServiceRole = actorKey{"service_role"}
+
 type AuthMiddleware struct {
 	db        *sql.DB
 	jwtSecret []byte
@@ -49,8 +56,9 @@ func (a *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 		}
 
 		// Fallback: service token lookup
-		if actor, ok := a.validateServiceToken(r.Context(), token); ok {
+		if actor, role, ok := a.validateServiceToken(r.Context(), token); ok {
 			ctx := context.WithValue(r.Context(), ContextKeyActor, actor)
+			ctx = context.WithValue(ctx, ContextKeyServiceRole, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -80,14 +88,23 @@ func (a *AuthMiddleware) validateJWT(tokenStr string) (string, bool) {
 	return sub, true
 }
 
-func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string) (string, bool) {
-	var name string
+// validateServiceToken resolves a service token to its actor identity and the
+// role granted to that specific token. Returns (actor, role, ok).
+//
+// A token with no usable role falls back to VIEWER (read-only) rather than to a
+// writable role: an unrecognized or missing role must never widen access.
+func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string) (string, Role, bool) {
+	var name, role string
 	err := a.db.QueryRowContext(ctx, `
-		SELECT name FROM service_tokens
+		SELECT name, role FROM service_tokens
 		WHERE token=$1 AND revoked_at IS NULL
-	`, token).Scan(&name)
+	`, token).Scan(&name, &role)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
-	return "sdk:" + name, true
+	resolved := Role(role)
+	if _, known := permissionMatrix[resolved]; !known {
+		resolved = RoleViewer
+	}
+	return "sdk:" + name, resolved, true
 }

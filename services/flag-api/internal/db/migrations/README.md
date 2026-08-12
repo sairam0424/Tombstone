@@ -17,6 +17,7 @@
 | 010 | `010_idempotency_keys.sql` | Idempotency-key support for flag-api mutation endpoints |
 | 011 | `011_scheduler_retry_columns.sql` | Scheduler retry/backoff columns (retry_count, max_retries, next_retry_at). Confirmed no collision with 010 above — both were developed concurrently from the same `develop` base and landed cleanly. |
 | 012 | `012_idempotency_actor_scope.sql` | Adds actor column to idempotency_keys and re-keys unique index to (actor, idempotency_key, endpoint) — fixes SEC-001 cross-caller cache poisoning. |
+| 013 | `013_service_token_roles.sql` | Per-token `role` on `service_tokens` (default `VIEWER`, CHECK-constrained) — fixes SEC-1: every service token previously resolved to OPERATOR, so any SDK token could create/archive flags and change production rollouts. **Breaking:** existing rows backfill to `VIEWER`; machine writers must be re-provisioned (see the migration header for the exact roles). |
 
 ## Why 001 Is Skipped
 

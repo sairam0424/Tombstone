@@ -68,10 +68,10 @@ func main() {
 	if err != nil {
 		logger.Fatal("open db", zap.Error(err))
 	}
-	db.SetMaxOpenConns(5)                      // Neon free tier — share budget with other services
+	db.SetMaxOpenConns(5) // Neon free tier — share budget with other services
 	db.SetMaxIdleConns(2)
-	db.SetConnMaxLifetime(5 * time.Minute)     // recycle before Neon's ~5 min idle timeout
-	db.SetConnMaxIdleTime(2 * time.Minute)     // release idle conns quickly
+	db.SetConnMaxLifetime(5 * time.Minute) // recycle before Neon's ~5 min idle timeout
+	db.SetConnMaxIdleTime(2 * time.Minute) // release idle conns quickly
 	if err := db.Ping(); err != nil {
 		logger.Fatal("ping db", zap.Error(err))
 	}
@@ -149,16 +149,27 @@ func main() {
 		r.Use(authMw.Authenticate)
 		r.Use(rbacMw.LoadRole)
 
-		r.Get("/flags", flagH.ListFlags)
+		// SEC-1: EVERY route below carries an explicit RequirePermission gate.
+		// Authenticate proves who the caller is and LoadRole resolves their role,
+		// but neither one denies anything — a route without RequirePermission is
+		// authenticated yet unauthorized, so any valid token (including a
+		// read-only SDK token) could previously reach it.
+		r.With(rbacMw.RequirePermission("flags", "read")).
+			Get("/flags", flagH.ListFlags)
 		// Idempotency-key support (opt-in via "Idempotency-Key" header) guards
 		// against a Phase-2 resilient-client retry executing the same mutation
 		// twice. Applied ONLY to CreateFlag, UpdateEnvironment, and KillSwitch —
 		// not globally, and not to any other route.
-		r.With(idempotencyMw.Handle("POST /flags")).
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			With(idempotencyMw.Handle("POST /flags")).
 			Post("/flags", flagH.CreateFlag)
-		r.Get("/flags/{key}", flagH.GetFlag)
-		r.Delete("/flags/{key}", flagH.ArchiveFlag)
-		r.With(idempotencyMw.Handle("PATCH /flags/{key}/environments/{env}")).
+		r.With(rbacMw.RequirePermission("flags", "read")).
+			Get("/flags/{key}", flagH.GetFlag)
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			Delete("/flags/{key}", flagH.ArchiveFlag)
+		// Rollout/targeting changes mutate flag_environments -> environments:write.
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			With(idempotencyMw.Handle("PATCH /flags/{key}/environments/{env}")).
 			Patch("/flags/{key}/environments/{env}", flagH.UpdateEnvironment)
 
 		// Kill-switch: restricted to OWNER and ADMIN only (flags:kill_switch permission).
@@ -166,22 +177,41 @@ func main() {
 			With(idempotencyMw.Handle("POST /flags/{key}/kill")).
 			Post("/flags/{key}/kill", flagH.KillSwitch)
 
-		// Flag prerequisites (GrowthBook ParentConditions pattern)
-		r.Post("/flags/{key}/prerequisites", prereqH.AddPrerequisite)
-		r.Get("/flags/{key}/prerequisites", prereqH.ListPrerequisites)
-		r.Delete("/flags/{key}/prerequisites/{id}", prereqH.DeletePrerequisite)
+		// Flag prerequisites (GrowthBook ParentConditions pattern).
+		// Prerequisites gate whether a flag evaluates at all, so mutating them
+		// is a flag-state change -> flags:write.
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			Post("/flags/{key}/prerequisites", prereqH.AddPrerequisite)
+		r.With(rbacMw.RequirePermission("flags", "read")).
+			Get("/flags/{key}/prerequisites", prereqH.ListPrerequisites)
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			Delete("/flags/{key}/prerequisites/{id}", prereqH.DeletePrerequisite)
 
-		// Scheduled changes
-		r.Post("/flags/{key}/schedule", scheduledH.CreateSchedule)
-		r.Get("/flags/{key}/schedule", scheduledH.ListSchedule)
-		r.Delete("/flags/{key}/schedule/{id}", scheduledH.CancelSchedule)
+		// Scheduled changes — a scheduled write is still a write, gated at
+		// schedule time (the scheduler itself runs in-process, not via HTTP).
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			Post("/flags/{key}/schedule", scheduledH.CreateSchedule)
+		r.With(rbacMw.RequirePermission("flags", "read")).
+			Get("/flags/{key}/schedule", scheduledH.ListSchedule)
+		r.With(rbacMw.RequirePermission("flags", "write")).
+			Delete("/flags/{key}/schedule/{id}", scheduledH.CancelSchedule)
 
-		r.Get("/environments/snapshot", snapH.GetSnapshot)
-		r.Get("/audit", auditH.ListAuditLog)
+		// SDK/relay snapshot fetch — flags:read keeps read-only service tokens
+		// (VIEWER) working, which is the SDK hot path.
+		r.With(rbacMw.RequirePermission("flags", "read")).
+			Get("/environments/snapshot", snapH.GetSnapshot)
+		r.With(rbacMw.RequirePermission("audit", "read")).
+			Get("/audit", auditH.ListAuditLog)
 
-		r.Get("/compliance/evidence", complianceH.GetEvidence)
-		r.Get("/compliance/controls", complianceH.GetControls)
-		r.Get("/compliance/export", complianceH.ExportAuditLog)
+		// Compliance: evidence/controls are summaries (audit:read), but a full
+		// audit-log export is the most sensitive read in the system and is
+		// restricted to ADMIN so a read-only/SDK token cannot exfiltrate it.
+		r.With(rbacMw.RequirePermission("audit", "read")).
+			Get("/compliance/evidence", complianceH.GetEvidence)
+		r.With(rbacMw.RequirePermission("audit", "read")).
+			Get("/compliance/controls", complianceH.GetControls)
+		r.With(rbacMw.RequirePermission("admin", "admin")).
+			Get("/compliance/export", complianceH.ExportAuditLog)
 
 		// Break-glass endpoints: all require elevated roles.
 		// CreateToken and ListTokens require ADMIN (admin:admin permission).
