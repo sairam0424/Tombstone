@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
+	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/docs"
 	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
@@ -79,6 +80,16 @@ func main() {
 			zap.Error(signerErr))
 	}
 
+	// AUD-1: the audit chain is keyed, so only a key holder can extend it. An
+	// unkeyed chain is forgeable by anyone who can INSERT into audit_log. Not
+	// fatal: flag-api still serves traffic, but audit writes are refused and
+	// GET /api/v1/audit/verify reports 503 rather than pretending to verify.
+	auditKey, auditKeyErr := secrets.NewAuditKeyFromEnv()
+	if auditKeyErr != nil {
+		logger.Warn("audit chain key not configured — audit writes will be skipped and verification unavailable",
+			zap.Error(auditKeyErr))
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
@@ -107,19 +118,25 @@ func main() {
 
 	rekorClient := transparency.NewRekorClient()
 
+	// The single audit writer — one canonical keyed hash, one advisory-locked
+	// transactional append path for every call site (AUD-1). Always constructed:
+	// if auditKey is nil the trail is still recorded, just unkeyed and reported
+	// as unverifiable, because dropping audit records outright is worse.
+	auditWriter := audit.NewWriter(db, auditKey)
+
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
-	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient)
+	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter)
 	snapH := v1.NewSnapshotHandler(db, logger)
-	auditH := v1.NewAuditHandler(db, logger)
-	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner)
+	auditH := v1.NewAuditHandler(db, logger, auditWriter)
+	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
-	scheduledH := v1.NewScheduledHandler(db, rdb, logger)
-	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher)
+	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
+	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
 	crH := v1.NewChangeRequestHandler(db, rdb, logger)
 
 	// Background workers — all share the same cancellable root context.
@@ -129,7 +146,7 @@ func main() {
 	go v1.NewOrphanDetector(db, logger).Run(bgCtx)
 
 	// Scheduled-change executor: applies due flag changes every 30 s.
-	go scheduler.Start(bgCtx, db, rdb, logger)
+	go scheduler.Start(bgCtx, db, rdb, logger, auditWriter)
 
 	// Idempotency-key cleanup: purges expired idempotency_keys rows every hour.
 	go idempotencyMw.StartCleanup(bgCtx)
@@ -222,6 +239,9 @@ func main() {
 			Get("/environments/snapshot", snapH.GetSnapshot)
 		r.With(rbacMw.RequirePermission("audit", "read")).
 			Get("/audit", auditH.ListAuditLog)
+		// AUD-1: recomputes the keyed chain and reports real integrity.
+		r.With(rbacMw.RequirePermission("audit", "read")).
+			Get("/audit/verify", auditH.VerifyChain)
 
 		// Compliance: evidence/controls are summaries (audit:read), but a full
 		// audit-log export is the most sensitive read in the system and is

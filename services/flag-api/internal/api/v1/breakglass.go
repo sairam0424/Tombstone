@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -21,10 +22,11 @@ type BreakGlassHandler struct {
 	// hasher stores/looks up break-glass tokens as keyed hashes (SEC-4). The
 	// plaintext is returned to the creator exactly once and never persisted.
 	hasher *secrets.TokenHasher
+	audit  *audit.Writer
 }
 
-func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, hasher *secrets.TokenHasher) *BreakGlassHandler {
-	return &BreakGlassHandler{db: db, rdb: rdb, logger: logger, hasher: hasher}
+func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, hasher *secrets.TokenHasher, auditW *audit.Writer) *BreakGlassHandler {
+	return &BreakGlassHandler{db: db, rdb: rdb, logger: logger, hasher: hasher, audit: auditW}
 }
 
 type CreateBreakGlassTokenRequest struct {
@@ -183,7 +185,20 @@ func (h *BreakGlassHandler) ListTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *BreakGlassHandler) writeAuditBreakGlass(r *http.Request, actor, eventType string, details map[string]any) {
-	// Delegate to FlagHandler's writeAudit which owns the Merkle-linked audit log.
-	fh := &FlagHandler{db: h.db, rdb: h.rdb, logger: h.logger}
-	fh.writeAudit(r.Context(), "", "", actor, eventType, nil, details, ipFromRequest(r))
+	// AUD-1: append via the shared writer. This previously built a throwaway
+	// FlagHandler to borrow its writeAudit, which meant break-glass events were
+	// silently dropped whenever that handler's dependencies differed.
+	if h.audit == nil {
+		h.logger.Warn("break-glass audit write skipped — no audit writer configured")
+		return
+	}
+	detailsJSON, _ := json.Marshal(details)
+	if _, _, err := h.audit.Append(r.Context(), audit.Entry{
+		Actor:     actor,
+		EventType: eventType,
+		NewState:  detailsJSON,
+		IPAddress: ipFromRequest(r),
+	}); err != nil {
+		h.logger.Warn("break-glass audit write failed", zap.Error(err))
+	}
 }

@@ -13,12 +13,17 @@ import (
 // expectedVersions is the full set the runner must apply: 1 = schema.sql
 // baseline, then each migrations/NNN_*.sql prefix. Update this alongside any
 // new migration so the runner test stays a real regression gate.
-var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14}
+var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15}
 
 // TestMigrationRunner exercises the runner against a REAL Postgres. It is the
 // executable gate for DATA-1 and runs in CI (the flag-api-migrations job sets
 // TEST_DATABASE_URL to a fresh pgvector-enabled Postgres). It skips locally when
 // TEST_DATABASE_URL is unset so `go test ./...` needs no database.
+//
+// This test requires a PRISTINE database: the first subtest asserts that every
+// version gets applied, which only holds if nothing migrated it first. Any other
+// DB-backed package sharing TEST_DATABASE_URL must therefore run AFTER this one,
+// never concurrently — see the sequential `go test` invocations in ci.yml.
 func TestMigrationRunner(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {

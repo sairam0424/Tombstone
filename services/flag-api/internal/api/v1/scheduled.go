@@ -2,16 +2,15 @@ package v1
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/tombstone/flag-api/internal/audit"
 	"go.uber.org/zap"
 )
 
@@ -24,11 +23,12 @@ type ScheduledHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
 	logger *zap.Logger
+	audit  *audit.Writer
 }
 
 // NewScheduledHandler constructs a ScheduledHandler.
-func NewScheduledHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *ScheduledHandler {
-	return &ScheduledHandler{db: db, rdb: rdb, logger: logger}
+func NewScheduledHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) *ScheduledHandler {
+	return &ScheduledHandler{db: db, rdb: rdb, logger: logger, audit: auditW}
 }
 
 // ScheduledChange is the API representation of a scheduled_changes row.
@@ -263,22 +263,23 @@ func (h *ScheduledHandler) writeAudit(ctx context.Context, flagKey, env, actor, 
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	var lastID, lastTs string
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT id, EXTRACT(EPOCH FROM created_at)::text FROM audit_log
-		WHERE flag_key=$1 ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastTs)
-
-	prevHash := ""
-	if lastID != "" {
-		hb := sha256.Sum256([]byte(lastID + lastTs))
-		prevHash = fmt.Sprintf("%x", hb)
+	// AUD-1: this used to hash sha256(lastID + lastTs) — two fields, no
+	// separator — while flags.go and scheduler.go hashed six pipe-joined fields.
+	// Any chain containing a scheduled-change entry was therefore unverifiable.
+	// All writers now share one keyed, advisory-locked implementation.
+	if h.audit == nil {
+		h.logger.Warn("audit log write skipped — no audit writer configured")
+		return
 	}
-
-	if _, err := h.db.ExecContext(ctx, `
-		INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, uuid.New().String(), flagKey, env, actor, eventType, prevJSON, currJSON, ip, prevHash); err != nil {
+	if _, _, err := h.audit.Append(ctx, audit.Entry{
+		FlagKey:     flagKey,
+		Environment: env,
+		Actor:       actor,
+		EventType:   eventType,
+		PrevState:   prevJSON,
+		NewState:    currJSON,
+		IPAddress:   ip,
+	}); err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
 	}
 }

@@ -2,21 +2,19 @@ package v1
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/transparency"
 )
@@ -26,24 +24,26 @@ type FlagHandler struct {
 	rdb    *redis.Client
 	logger *zap.Logger
 	rekor  *transparency.RekorClient
+	// audit is the single writer for the hash-chained audit log (AUD-1).
+	audit *audit.Writer
 }
 
-func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient) *FlagHandler {
-	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor}
+func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient, auditW *audit.Writer) *FlagHandler {
+	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor, audit: auditW}
 }
 
 type Flag struct {
-	ID          string  `json:"id"`
-	Key         string  `json:"key"`
-	ProjectID   string  `json:"project_id"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	FlagType    string  `json:"flag_type"`
-	State       string  `json:"state"`
-	OwnerID     string  `json:"owner_id"`
-	SafeDefault string  `json:"safe_default"`
-	CreatedAt   int64   `json:"created_at"`
-	UpdatedAt   int64   `json:"updated_at"`
+	ID          string `json:"id"`
+	Key         string `json:"key"`
+	ProjectID   string `json:"project_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	FlagType    string `json:"flag_type"`
+	State       string `json:"state"`
+	OwnerID     string `json:"owner_id"`
+	SafeDefault string `json:"safe_default"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 type FlagEnvironmentState struct {
@@ -74,16 +74,6 @@ var ValidFlagTypes = map[string]bool{
 	"INTEGER": true,
 	"FLOAT":   true,
 	"JSON":    true,
-}
-
-// auditEntryHash computes the deterministic Merkle hash for an audit log row.
-// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
-// This is the same algorithm used by writeAudit — used by tests to verify
-// chain integrity without a database.
-func auditEntryHash(id, eventType, actor, prevState, newState, ts string) string {
-	content := strings.Join([]string{id, eventType, actor, prevState, newState, ts}, "|")
-	hashBytes := sha256.Sum256([]byte(content))
-	return fmt.Sprintf("%x", hashBytes)
 }
 
 type UpdateEnvironmentRequest struct {
@@ -425,34 +415,29 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	// Get previous entry hash for Merkle chain
-	var lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs string
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT id, event_type, actor,
-		       COALESCE(prev_state::text, ''), COALESCE(new_state::text, ''),
-		       EXTRACT(EPOCH FROM created_at)::text
-		FROM audit_log
-		WHERE flag_key=$1 ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastEventType, &lastActor, &lastPrevState, &lastNewState, &lastTs)
-
-	prevHash := ""
-	if lastID != "" {
-		content := strings.Join([]string{lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs}, "|")
-		hashBytes := sha256.Sum256([]byte(content))
-		prevHash = fmt.Sprintf("%x", hashBytes)
+	// AUD-1: the chain is built by the single audit.Writer, which hashes with a
+	// keyed HMAC inside an advisory-locked transaction. This handler previously
+	// inlined its own SELECT-last-then-INSERT, which both forked under
+	// concurrency and disagreed with scheduled.go's formula.
+	if h.audit == nil {
+		h.logger.Warn("audit log write skipped — no audit writer configured")
+		return
 	}
-
-	entryID := uuid.New().String()
-	_, err := h.db.ExecContext(ctx, `
-		INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, entryID, flagKey, env, actor, eventType, prevJSON, currJSON, ip, prevHash)
+	entryID, entryHash, err := h.audit.Append(ctx, audit.Entry{
+		FlagKey:     flagKey,
+		Environment: env,
+		Actor:       actor,
+		EventType:   eventType,
+		PrevState:   prevJSON,
+		NewState:    currJSON,
+		IPAddress:   ip,
+	})
 	if err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
 		return
 	}
 
-	// Asynchronously submit audit entry hash to Rekor transparency log.
+	// Asynchronously submit the audit entry hash to Rekor transparency log.
 	// Captures only what it needs; ctx is deliberately not forwarded so that
 	// the goroutine outlives the HTTP request without inheriting its deadline.
 	if h.rekor != nil {
@@ -460,14 +445,16 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 		logger := h.logger
 		rekor := h.rekor
 		go func() {
-			// Build a serialisable snapshot of the audit entry for hashing.
+			// Submit the entry's own keyed hash: it commits to every field AND to
+			// the preceding chain, so it is a strictly stronger witness than the
+			// prev_hash snapshot this used to send.
 			entrySnapshot := map[string]any{
-				"id":         entryID,
-				"flag_key":   flagKey,
+				"id":          entryID,
+				"flag_key":    flagKey,
 				"environment": env,
-				"actor":      actor,
-				"event_type": eventType,
-				"prev_hash":  prevHash,
+				"actor":       actor,
+				"event_type":  eventType,
+				"entry_hash":  entryHash,
 			}
 			entryJSON, _ := json.Marshal(entrySnapshot)
 

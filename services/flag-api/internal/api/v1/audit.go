@@ -7,30 +7,52 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tombstone/flag-api/internal/audit"
 	"go.uber.org/zap"
 )
 
 type AuditHandler struct {
 	db     *sql.DB
 	logger *zap.Logger
+	audit  *audit.Writer
 }
 
-func NewAuditHandler(db *sql.DB, logger *zap.Logger) *AuditHandler {
-	return &AuditHandler{db: db, logger: logger}
+func NewAuditHandler(db *sql.DB, logger *zap.Logger, auditW *audit.Writer) *AuditHandler {
+	return &AuditHandler{db: db, logger: logger, audit: auditW}
+}
+
+// VerifyChain handles GET /api/v1/audit/verify.
+//
+// AUD-1: this endpoint recomputes every keyed hash in the audit log and checks
+// each link. Previously no such endpoint existed and the compliance evidence
+// endpoint simply asserted merkle_chain_integrity=true unconditionally.
+func (h *AuditHandler) VerifyChain(w http.ResponseWriter, r *http.Request) {
+	if h.audit == nil || !h.audit.HasKey() {
+		writeError(w, http.StatusServiceUnavailable,
+			"audit chain verification unavailable — AUDIT_HMAC_KEY is not configured")
+		return
+	}
+	report, err := h.audit.Verify(r.Context())
+	if err != nil {
+		h.logger.Error("audit verify failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "verification failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 type AuditEntry struct {
-	ID           string  `json:"id"`
-	FlagKey      string  `json:"flag_key"`
-	Environment  string  `json:"environment"`
-	Actor        string  `json:"actor"`
-	EventType    string  `json:"event_type"`
-	PrevState    any     `json:"prev_state"`
-	NewState     any     `json:"new_state"`
-	IPAddress    string  `json:"ip_address"`
-	PrevHash     string  `json:"prev_hash"`
-	CreatedAt    int64   `json:"created_at"`
-	RekorLogID   string  `json:"rekor_log_id,omitempty"`
+	ID            string `json:"id"`
+	FlagKey       string `json:"flag_key"`
+	Environment   string `json:"environment"`
+	Actor         string `json:"actor"`
+	EventType     string `json:"event_type"`
+	PrevState     any    `json:"prev_state"`
+	NewState      any    `json:"new_state"`
+	IPAddress     string `json:"ip_address"`
+	PrevHash      string `json:"prev_hash"`
+	CreatedAt     int64  `json:"created_at"`
+	RekorLogID    string `json:"rekor_log_id,omitempty"`
 	RekorLogIndex *int64 `json:"rekor_log_index,omitempty"`
 }
 

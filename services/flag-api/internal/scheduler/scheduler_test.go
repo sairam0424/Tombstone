@@ -196,7 +196,7 @@ func TestRunDue_PollQuery_SelectsPendingAndDueRetries(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), 3, "sc-retry-due").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	runDue(context.Background(), db, nil, logger)
+	runDue(context.Background(), db, nil, logger, nil)
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
@@ -222,7 +222,7 @@ func TestRunDue_PollQuery_ExactTextMatch(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
 	mock.ExpectCommit()
 
-	runDue(context.Background(), db, nil, logger)
+	runDue(context.Background(), db, nil, logger, nil)
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("poll query did not match expected retry-aware WHERE clause with FOR UPDATE SKIP LOCKED: %v", err)
@@ -257,8 +257,8 @@ func TestRunDue_ForUpdateSkipLocked_SkipsLockedRows(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
 	mock.ExpectCommit()
 
-	runDue(context.Background(), db, nil, logger)
-	runDue(context.Background(), db, nil, logger) // second replica call
+	runDue(context.Background(), db, nil, logger, nil)
+	runDue(context.Background(), db, nil, logger, nil) // second replica call
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("concurrent runDue expectations not met: %v", err)

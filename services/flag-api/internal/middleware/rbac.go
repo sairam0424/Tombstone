@@ -228,6 +228,22 @@ type contextKeyRole string
 
 const ContextKeyRole contextKeyRole = "role"
 
+// PolicySource reports which authorization source is actually live: "opa" when
+// Rego policies are compiled and loaded, "fallback_matrix" when the hardcoded
+// permissionMatrix is in use. Compliance evidence reports this instead of
+// asserting a hardcoded rbac_enabled=true (AUD-1).
+func (r *RBACMiddleware) PolicySource() string {
+	if r.flagsEval == nil {
+		return "fallback_matrix"
+	}
+	r.flagsEval.mu.RLock()
+	defer r.flagsEval.mu.RUnlock()
+	if r.flagsEval.available && r.flagsEval.preparedQ != nil {
+		return "opa"
+	}
+	return "fallback_matrix"
+}
+
 // RequirePermission returns a middleware that enforces resource+action permission.
 // It first tries OPA evaluation; if unavailable, falls back to the hardcoded matrix.
 func (r *RBACMiddleware) RequirePermission(resource, action string) func(http.Handler) http.Handler {
