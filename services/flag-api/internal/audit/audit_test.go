@@ -93,6 +93,29 @@ func TestCanonicalCoversEveryField(t *testing.T) {
 	}
 }
 
+// TestCanonicalIsMicrosecondQuantized pins a real bug that shipped past all the
+// in-memory tests above and was caught only by TestChainAgainstPostgres:
+// created_at is a timestamptz, which stores MICROSECONDS, but the encoding used
+// RFC3339Nano and committed to nanoseconds Postgres rounds away. The value read
+// back therefore hashed differently from the value written, and every single row
+// reported as forged. The encoding must not depend on precision the database
+// cannot hold.
+func TestCanonicalIsMicrosecondQuantized(t *testing.T) {
+	withNanos := fixedTime.Add(1500 * time.Nanosecond)
+	asStored := withNanos.Truncate(time.Microsecond)
+
+	if string(canonical("id-1", sampleEntry(), withNanos, "p")) !=
+		string(canonical("id-1", sampleEntry(), asStored, "p")) {
+		t.Fatal("sub-microsecond precision must not affect the hash — Postgres discards it, so verification could never reproduce it")
+	}
+
+	// A whole microsecond IS stored, so it must still be covered.
+	if string(canonical("id-1", sampleEntry(), asStored, "p")) ==
+		string(canonical("id-1", sampleEntry(), asStored.Add(time.Microsecond), "p")) {
+		t.Fatal("a one-microsecond difference must change the hash — that is the resolution created_at is stored at")
+	}
+}
+
 // TestHashIsKeyed proves the chain is not forgeable by someone who merely knows
 // the algorithm: without the key they cannot produce a matching hash.
 func TestHashIsKeyed(t *testing.T) {

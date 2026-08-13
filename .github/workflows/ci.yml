@@ -244,4 +244,11 @@ jobs:
           TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
         run: |
           go build ./cmd/migrate ./internal/db/ ./internal/audit/
-          go test ./internal/db/ ./internal/audit/ -v
+          # SEPARATE, SEQUENTIAL invocations on purpose. `go test` runs different
+          # packages in PARALLEL, and both suites share this one database:
+          # internal/db asserts a FRESH apply of every migration, so it must see a
+          # pristine DB and must run BEFORE internal/audit, whose fixture calls
+          # Migrate. A single combined invocation raced and applied the schema out
+          # from under the migration test. Do not merge these back into one line.
+          go test ./internal/db/ -v
+          go test ./internal/audit/ -v

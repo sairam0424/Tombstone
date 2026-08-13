@@ -66,6 +66,32 @@ func TestChainAgainstPostgres(t *testing.T) {
 		}
 	})
 
+	// Regression for the second half of the round-trip bug: prev_state/new_state
+	// are jsonb, so Postgres reparses the JSON and re-renders it on read — keys
+	// come back in jsonb's own order and separators gain a space. Hashing the
+	// caller's bytes instead of that rendering made every row fail its own
+	// self-hash. These states are written in a form jsonb will NOT return verbatim.
+	t.Run("states reformatted by jsonb still verify", func(t *testing.T) {
+		e := sampleEntry()
+		e.FlagKey = "aud1-jsonb"
+		// Keys deliberately out of jsonb's output order, with extra whitespace.
+		e.PrevState = []byte(`{ "zebra":1,   "alpha": {"b":2,"a":1} }`)
+		e.NewState = []byte(`{"zebra":2,"alpha":{"a":1,"b":2}}`)
+
+		if _, _, err := w.Append(ctx, e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+
+		report, err := w.Verify(ctx)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 {
+			t.Fatalf("jsonb reformatting must not read as tampering: %d failure(s): %+v",
+				report.FailureCount, report.Failures)
+		}
+	})
+
 	// The fork race: two writers previously both read the same chain tip and both
 	// wrote a prev_hash pointing at it. If the advisory lock were absent, these
 	// concurrent appends would produce entries whose prev_hash does not match

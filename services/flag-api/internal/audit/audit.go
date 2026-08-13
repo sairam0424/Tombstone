@@ -82,22 +82,50 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 		return "", "", fmt.Errorf("lock audit chain: %w", err)
 	}
 
-	// The tip of this chain. entry_hash is NULL for pre-AUD-1 rows; such a chain
-	// is treated as restarting here, and Verify reports those legacy rows as
-	// unverifiable rather than pretending they check out.
-	var prevHash sql.NullString
-	err = tx.QueryRowContext(ctx, `
-		SELECT entry_hash FROM audit_log
-		WHERE flag_key IS NOT DISTINCT FROM $1
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1
-	`, nullIfEmpty(e.FlagKey)).Scan(&prevHash)
-	if err != nil && err != sql.ErrNoRows {
+	// Two things at once, in one round-trip:
+	//
+	//  1. The tip of this chain. entry_hash is NULL for pre-AUD-1 rows; such a
+	//     chain is treated as restarting here, and Verify reports those legacy
+	//     rows as unverifiable rather than pretending they check out. A scalar
+	//     subquery yields NULL for an empty chain, so there is no ErrNoRows case.
+	//
+	//  2. The states rendered EXACTLY as Postgres will return them. prev_state
+	//     and new_state are jsonb, so Postgres reparses the JSON and re-renders
+	//     it on read — keys are reordered and `{"a":1}` comes back as
+	//     `{"a": 1}`. Hashing the bytes the caller handed us would therefore
+	//     produce a hash Verify could never reproduce, and EVERY row would
+	//     report as forged. jsonb's text rendering does not depend on any
+	//     session setting, so asking Postgres for it is deterministic.
+	var prevStateText, newStateText, prevHash sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT $2::jsonb::text, $3::jsonb::text,
+		       (SELECT entry_hash FROM audit_log
+		         WHERE flag_key IS NOT DISTINCT FROM $1
+		         ORDER BY created_at DESC, id DESC
+		         LIMIT 1)
+	`, nullIfEmpty(e.FlagKey), jsonOrNull(e.PrevState), jsonOrNull(e.NewState)).
+		Scan(&prevStateText, &newStateText, &prevHash); err != nil {
 		return "", "", fmt.Errorf("read chain tip: %w", err)
 	}
 
+	// The entry as it will exist on the record — this, not the caller's copy, is
+	// what gets hashed and stored, so the two can never disagree.
+	stored := e
+	stored.PrevState = []byte(prevStateText.String)
+	stored.NewState = []byte(newStateText.String)
+
 	id := uuid.New().String()
-	createdAt := time.Now().UTC()
+	// timestamptz stores MICROSECONDS, and the two languages disagree on how to
+	// get there: Postgres ROUNDS finer digits (verified — .4917416 stores as
+	// .491742) while Go's UnixMicro() TRUNCATES. An untruncated time.Now() would
+	// therefore be hashed as ...741 but stored as ...742, and no verifier could
+	// ever reproduce the hash from the stored row. Truncating first removes the
+	// disagreement: created_at becomes exactly the instant that was hashed.
+	//
+	// This only reproduces on Linux. darwin's wall clock is already
+	// microsecond-granular (time.Now() never yields sub-microsecond digits), so
+	// the bug is invisible on a Mac and shows up only in CI.
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 
 	// With no key configured the record is still written, but UNKEYED
 	// (entry_hash NULL). Losing an audit record is a worse outcome for an
@@ -107,7 +135,7 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 	// degradation is visible instead of silent.
 	entryHash := ""
 	if w.key != nil {
-		entryHash = w.key.Sum(canonical(id, e, createdAt, prevHash.String))
+		entryHash = w.key.Sum(canonical(id, stored, createdAt, prevHash.String))
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -116,7 +144,7 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 		     ip_address, prev_hash, entry_hash, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 	`, id, nullIfEmpty(e.FlagKey), e.Environment, e.Actor, e.EventType,
-		jsonOrNull(e.PrevState), jsonOrNull(e.NewState), e.IPAddress,
+		jsonOrNull(stored.PrevState), jsonOrNull(stored.NewState), e.IPAddress,
 		nullIfEmpty(prevHash.String), nullIfEmpty(entryHash), createdAt); err != nil {
 		return "", "", fmt.Errorf("insert audit entry: %w", err)
 	}
@@ -136,6 +164,11 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 // serialize identically.
 //
 // prev_hash is included so each entry commits to the entire history behind it.
+//
+// e.PrevState/e.NewState MUST be the states as Postgres renders them from jsonb,
+// and createdAt MUST be microsecond-truncated — both callers (Append and Verify)
+// pass values in that form. Anything else hashes content the database does not
+// hold, and verification of a stored row can then never reproduce the hash.
 func canonical(id string, e Entry, createdAt time.Time, prevHash string) []byte {
 	var b strings.Builder
 	for _, f := range []string{
@@ -147,10 +180,14 @@ func canonical(id string, e Entry, createdAt time.Time, prevHash string) []byte 
 		string(e.PrevState),
 		string(e.NewState),
 		e.IPAddress,
-		// RFC3339Nano in UTC — a stable, unambiguous instant. The old formula
-		// used EXTRACT(EPOCH) as a float string, whose text form varies with
-		// Postgres settings and silently loses sub-microsecond precision.
-		createdAt.UTC().Format(time.RFC3339Nano),
+		// Microsecond Unix epoch — matching timestamptz's storage resolution
+		// exactly, so the encoding cannot commit to precision the database will
+		// discard. RFC3339Nano encoded nanoseconds Postgres cannot store, which
+		// made every row fail its own self-hash on read-back. Rendering the
+		// timestamp via Postgres (as the states are) was rejected: unlike jsonb,
+		// timestamptz's text output depends on the session's TimeZone and
+		// DateStyle — the same flaw as the retired EXTRACT(EPOCH) formula.
+		strconv.FormatInt(createdAt.UTC().UnixMicro(), 10),
 		prevHash,
 	} {
 		b.WriteString(strconv.Itoa(len(f)))
