@@ -9,6 +9,9 @@ on:
       - '.github/workflows/deploy-dashboard-vercel.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
