@@ -26,5 +26,8 @@
     "husky": "^9.0.0",
     "lint-staged": "^15.0.0",
     "typescript": "~5.8.2"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5"
   }
 }
