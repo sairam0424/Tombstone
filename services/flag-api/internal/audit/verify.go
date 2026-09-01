@@ -70,17 +70,20 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 	// comparing it against the raw request string is sensitive to UUID
 	// formatting (case, e.g.) that the native uuid `=` operator normalizes
 	// away — a caller whose resolved project_id differs only in case from the
-	// stored value would silently see zero rows instead of their own. `$1 IS
-	// NULL OR project_id = $1` lets Postgres infer $1 as uuid from the second
-	// comparison and reuses that inference for the NULL check, so an empty
-	// projectID (global scope) and a real one both compare correctly.
+	// stored value would silently see zero rows instead of their own. The
+	// explicit ::uuid cast is required, not cosmetic: without it, lib/pq
+	// cannot determine $1's type from a bare NULL parameter and Postgres
+	// rejects the query outright ("could not determine data type of
+	// parameter $1") — found by CI, not reproducible with a non-NULL value,
+	// which is exactly why an explicit type is safer than relying on
+	// inference from context.
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,''), COALESCE(new_state::text,''),
 		       COALESCE(ip_address,''), COALESCE(prev_hash,''), COALESCE(entry_hash,''),
 		       created_at, COALESCE(project_id::text,'')
 		FROM audit_log
-		WHERE $1 IS NULL OR project_id = $1
+		WHERE $1::uuid IS NULL OR project_id = $1::uuid
 		ORDER BY COALESCE(project_id::text,''), COALESCE(flag_key,''), created_at ASC, id ASC
 	`, nullIfEmpty(projectID))
 	if err != nil {

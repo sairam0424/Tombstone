@@ -135,12 +135,12 @@ func TestChainAgainstPostgres(t *testing.T) {
 	// project B's entry below would have linked its prev_hash to project A's
 	// tip — merging two tenants' audit trails into one chain.
 	t.Run("chains with the same flag_key in different projects do not fork each other", func(t *testing.T) {
-		// Real UUID literals: audit_log.project_id is a UUID column, and
-		// passing a non-UUID string here fails outright against real
-		// Postgres ("invalid input syntax for type uuid") — found by an
-		// adversarial review actually running this test.
-		const projectA = "11111111-1111-1111-1111-111111111111"
-		const projectB = "22222222-2222-2222-2222-222222222222"
+		// Real rows in the projects table: audit_log.project_id has a foreign
+		// key to projects(id), and a literal (even UUID-shaped) string with no
+		// matching row fails the constraint outright — found by an adversarial
+		// review actually running this test against real Postgres.
+		projectA := createAuditTestProject(ctx, t, database, "aud1-tenant-a")
+		projectB := createAuditTestProject(ctx, t, database, "aud1-tenant-b")
 		const sharedKey = "aud1-shared-key"
 
 		// Interleaved on purpose — A1, B1, A2 — so B1 sits BETWEEN two of
@@ -290,4 +290,21 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Errorf("the forged row must be named in the failures list; got %+v", report.Failures)
 		}
 	})
+}
+
+// createAuditTestProject inserts (or reuses, keyed by slug) a real projects
+// row and returns its generated id — audit_log.project_id has a foreign key
+// to projects(id), so a made-up UUID with no matching row is rejected.
+func createAuditTestProject(ctx context.Context, t *testing.T, database *sql.DB, slug string) string {
+	t.Helper()
+	var id string
+	err := database.QueryRowContext(ctx, `
+		INSERT INTO projects (name, slug) VALUES ($1, $1)
+		ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
+		RETURNING id
+	`, slug).Scan(&id)
+	if err != nil {
+		t.Fatalf("create test project %q: %v", slug, err)
+	}
+	return id
 }
