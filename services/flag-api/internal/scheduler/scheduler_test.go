@@ -7,6 +7,8 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -172,10 +174,10 @@ func TestRunDue_PollQuery_SelectsPendingAndDueRetries(t *testing.T) {
 	// takes the fast "invalid JSON" failure path — lets us observe that
 	// runDue actually dispatched to applyChange for this row without needing
 	// to mock the full success path.
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}).
-			AddRow("sc-pending", "my-flag", "production", []byte(`not-json`)).
-			AddRow("sc-retry-due", "my-flag-2", "staging", []byte(`not-json`)))
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload, project_id\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload", "project_id"}).
+			AddRow("sc-pending", "my-flag", "production", []byte(`not-json`), "11111111-1111-1111-1111-111111111111").
+			AddRow("sc-retry-due", "my-flag-2", "staging", []byte(`not-json`), "11111111-1111-1111-1111-111111111111"))
 	mock.ExpectCommit()
 
 	// Both rows hit applyChange's invalid-JSON branch -> markFailed for each.
@@ -218,8 +220,8 @@ func TestRunDue_PollQuery_ExactTextMatch(t *testing.T) {
 	// runDue wraps the SELECT in a transaction so FOR UPDATE SKIP LOCKED can
 	// atomically claim rows across replicas — sqlmock requires Begin/Commit.
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload, project_id\s+FROM scheduled_changes\s+WHERE \(status = 'PENDING' AND scheduled_for <= NOW\(\)\)\s+OR \(status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW\(\)\)\s+ORDER BY scheduled_for ASC\s+FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload", "project_id"}))
 	mock.ExpectCommit()
 
 	runDue(context.Background(), db, nil, logger, nil)
@@ -239,9 +241,9 @@ func TestRunDue_ForUpdateSkipLocked_SkipsLockedRows(t *testing.T) {
 
 	// First replica claims the rows.
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload.*FOR UPDATE SKIP LOCKED`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}).
-			AddRow("sc-1", "flag-a", "production", []byte(`not-json`)))
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload, project_id.*FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload", "project_id"}).
+			AddRow("sc-1", "flag-a", "production", []byte(`not-json`), "11111111-1111-1111-1111-111111111111"))
 	mock.ExpectCommit()
 	// sc-1 applyChange -> markFailed.
 	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
@@ -253,8 +255,8 @@ func TestRunDue_ForUpdateSkipLocked_SkipsLockedRows(t *testing.T) {
 
 	// Second replica gets an empty result (rows were locked by first).
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload.*FOR UPDATE SKIP LOCKED`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload"}))
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload, project_id.*FOR UPDATE SKIP LOCKED`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload", "project_id"}))
 	mock.ExpectCommit()
 
 	runDue(context.Background(), db, nil, logger, nil)
@@ -262,5 +264,88 @@ func TestRunDue_ForUpdateSkipLocked_SkipsLockedRows(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("concurrent runDue expectations not met: %v", err)
+	}
+}
+
+// ---- applyChange project scoping (TEN-1a) ----
+
+// TestApplyChange_LegacyRowWithNoProjectIDFailsClosed is the regression guard
+// for TEN-1a's write-side fix: a scheduled_changes row written before
+// migration 016 has no project_id, and flags.key is unique only per
+// (project_id, key) — matching such a row by key alone risks mutating the
+// WRONG project's flag_environments row. applyChange must refuse to execute
+// it (routing it through the existing markFailed/retry path) rather than
+// fall back to a project-blind match. No flag_environments query should ever
+// be issued for this row — sqlmock's ordered expectations below only cover
+// the markFailed path, so an unexpected extra call would fail this test.
+func TestApplyChange_LegacyRowWithNoProjectIDFailsClosed(t *testing.T) {
+	db, mock := newMockDB(t)
+	logger := zap.NewNop()
+
+	pc := pendingChange{
+		id:            "sc-legacy",
+		flagKey:       "my-flag",
+		environment:   "production",
+		changePayload: []byte(`{"enabled":false}`),
+		projectID:     sql.NullString{}, // legacy row: no project_id
+	}
+
+	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
+		WithArgs(pc.id).
+		WillReturnRows(sqlmock.NewRows([]string{"retry_count", "max_retries"}).AddRow(0, 3))
+	mock.ExpectExec(`UPDATE scheduled_changes\s+SET status = 'FAILED', error_message = \$1, retry_count = \$2, next_retry_at = \$3\s+WHERE id = \$4`).
+		WithArgs(sqlmock.AnyArg(), 1, sqlmock.AnyArg(), pc.id).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applyChange(context.Background(), db, nil, logger, nil, pc)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet or unexpected sqlmock expectations: %v", err)
+	}
+}
+
+// TestApplyChange_ScopesFlagEnvironmentUpdateToProjectID proves the read AND
+// the write both carry the row's own project_id — before TEN-1a, both
+// matched by flag key + environment alone, so a same-keyed flag in a
+// different project would have been read/mutated instead (or, if two
+// projects shared the key, both would have matched a single UPDATE
+// statement simultaneously).
+func TestApplyChange_ScopesFlagEnvironmentUpdateToProjectID(t *testing.T) {
+	db, mock := newMockDB(t)
+	logger := zap.NewNop()
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	const projectID = "22222222-2222-2222-2222-222222222222"
+	pc := pendingChange{
+		id:            "sc-ok",
+		flagKey:       "my-flag",
+		environment:   "production",
+		changePayload: []byte(`{"enabled":true}`),
+		projectID:     sql.NullString{String: projectID, Valid: true},
+	}
+
+	mock.ExpectQuery(`SELECT fe\.enabled, fe\.rollout_pct, fe\.flag_id\s+FROM flag_environments fe\s+JOIN flags f ON f\.id = fe\.flag_id\s+WHERE f\.key = \$1 AND fe\.environment = \$2 AND f\.project_id = \$3`).
+		WithArgs(pc.flagKey, pc.environment, projectID).
+		WillReturnRows(sqlmock.NewRows([]string{"enabled", "rollout_pct", "flag_id"}).AddRow(false, 0, "flag-uuid"))
+
+	mock.ExpectExec(`UPDATE flag_environments fe\s+SET enabled = \$1, rollout_pct = \$2, updated_at = now\(\), updated_by = 'scheduler'\s+FROM flags f\s+WHERE f\.id = fe\.flag_id AND f\.key = \$3 AND fe\.environment = \$4 AND f\.project_id = \$5`).
+		WithArgs(true, 0, pc.flagKey, pc.environment, projectID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectExec(`UPDATE scheduled_changes\s+SET status = 'EXECUTED', executed_at = NOW\(\)\s+WHERE id = \$1`).
+		WithArgs(pc.id).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applyChange(context.Background(), db, rdb, logger, nil, pc)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }

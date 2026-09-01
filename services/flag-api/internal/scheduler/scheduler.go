@@ -55,6 +55,11 @@ type pendingChange struct {
 	flagKey       string
 	environment   string
 	changePayload []byte
+	// projectID is NULL for rows written before migration 016 (legacy rows —
+	// see that migration's comment for why they are never backfilled).
+	// applyChange refuses to execute a row with no project_id rather than
+	// falling back to a project-blind match.
+	projectID sql.NullString
 }
 
 // changePayloadFields mirrors the API struct — enabled and/or rollout_pct.
@@ -89,7 +94,7 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	defer tx.Rollback() //nolint:errcheck
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, flag_key, environment, change_payload
+		SELECT id, flag_key, environment, change_payload, project_id
 		FROM scheduled_changes
 		WHERE (status = 'PENDING' AND scheduled_for <= NOW())
 		   OR (status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW())
@@ -105,7 +110,7 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	var due []pendingChange
 	for rows.Next() {
 		var pc pendingChange
-		if err := rows.Scan(&pc.id, &pc.flagKey, &pc.environment, &pc.changePayload); err != nil {
+		if err := rows.Scan(&pc.id, &pc.flagKey, &pc.environment, &pc.changePayload, &pc.projectID); err != nil {
 			logger.Error("scheduler: scan row failed", zap.Error(err))
 			continue
 		}
@@ -147,6 +152,16 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		return
 	}
 
+	// TEN-1a: a row with no project_id (written before migration 016) cannot
+	// be matched to a flag safely — flags.key is unique only per
+	// (project_id, key), so matching by key alone risks mutating a DIFFERENT
+	// project's same-keyed flag. Refuse rather than guess.
+	if !pc.projectID.Valid {
+		markFailed(ctx, db, log, pc.id, "scheduled change has no project_id (legacy row) — cannot execute safely")
+		return
+	}
+	projectID := pc.projectID.String
+
 	// Read current flag environment state for audit and to fill in unchanged fields.
 	var curEnabled bool
 	var curRollout int
@@ -155,8 +170,8 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		SELECT fe.enabled, fe.rollout_pct, fe.flag_id
 		FROM flag_environments fe
 		JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key = $1 AND fe.environment = $2
-	`, pc.flagKey, pc.environment).Scan(&curEnabled, &curRollout, &flagID)
+		WHERE f.key = $1 AND fe.environment = $2 AND f.project_id = $3
+	`, pc.flagKey, pc.environment, projectID).Scan(&curEnabled, &curRollout, &flagID)
 	if err == sql.ErrNoRows {
 		markFailed(ctx, db, log, pc.id,
 			fmt.Sprintf("flag %q environment %q not found", pc.flagKey, pc.environment))
@@ -182,8 +197,8 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		UPDATE flag_environments fe
 		SET enabled = $1, rollout_pct = $2, updated_at = now(), updated_by = 'scheduler'
 		FROM flags f
-		WHERE f.id = fe.flag_id AND f.key = $3 AND fe.environment = $4
-	`, newEnabled, newRollout, pc.flagKey, pc.environment)
+		WHERE f.id = fe.flag_id AND f.key = $3 AND fe.environment = $4 AND f.project_id = $5
+	`, newEnabled, newRollout, pc.flagKey, pc.environment, projectID)
 	if err != nil {
 		markFailed(ctx, db, log, pc.id, "flag environment update failed: "+err.Error())
 		return
