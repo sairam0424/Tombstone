@@ -135,35 +135,76 @@ func TestChainAgainstPostgres(t *testing.T) {
 	// project B's entry below would have linked its prev_hash to project A's
 	// tip — merging two tenants' audit trails into one chain.
 	t.Run("chains with the same flag_key in different projects do not fork each other", func(t *testing.T) {
-		const projectA = "aud1-tenant-a"
-		const projectB = "aud1-tenant-b"
+		// Real UUID literals: audit_log.project_id is a UUID column, and
+		// passing a non-UUID string here fails outright against real
+		// Postgres ("invalid input syntax for type uuid") — found by an
+		// adversarial review actually running this test.
+		const projectA = "11111111-1111-1111-1111-111111111111"
+		const projectB = "22222222-2222-2222-2222-222222222222"
 		const sharedKey = "aud1-shared-key"
 
-		eA := sampleEntry()
-		eA.FlagKey = sharedKey
-		eA.ProjectID = projectA
-		if _, _, err := w.Append(ctx, eA); err != nil {
-			t.Fatalf("append to project A: %v", err)
+		// Interleaved on purpose — A1, B1, A2 — so B1 sits BETWEEN two of
+		// project A's entries in created_at order. A regression that groups
+		// chains by flag_key alone (instead of (project_id, flag_key)) would
+		// make Verify expect A2's prev_hash to match B1's hash, not A1's —
+		// this ordering is what makes that regression detectable below.
+		eA1 := sampleEntry()
+		eA1.FlagKey = sharedKey
+		eA1.ProjectID = projectA
+		_, hashA1, err := w.Append(ctx, eA1)
+		if err != nil {
+			t.Fatalf("append A1: %v", err)
 		}
 
-		eB := sampleEntry()
-		eB.FlagKey = sharedKey
-		eB.ProjectID = projectB
-		if _, _, err := w.Append(ctx, eB); err != nil {
-			t.Fatalf("append to project B: %v", err)
+		eB1 := sampleEntry()
+		eB1.FlagKey = sharedKey
+		eB1.ProjectID = projectB
+		if _, _, err := w.Append(ctx, eB1); err != nil {
+			t.Fatalf("append B1: %v", err)
 		}
 
-		var prevHashB sql.NullString
+		eA2 := sampleEntry()
+		eA2.FlagKey = sharedKey
+		eA2.ProjectID = projectA
+		if _, _, err := w.Append(ctx, eA2); err != nil {
+			t.Fatalf("append A2: %v", err)
+		}
+
+		// Direct proof of Append's chain-tip-lookup fix: B1 must start its OWN
+		// chain (prev_hash NULL), and A2 must link to A1 — NOT to B1, which
+		// sits between them in wall-clock order.
+		var prevHashB1, prevHashA2 sql.NullString
 		if err := database.QueryRowContext(ctx, `
-			SELECT prev_hash FROM audit_log
-			WHERE flag_key=$1 AND project_id=$2
-			ORDER BY created_at ASC LIMIT 1
-		`, sharedKey, projectB).Scan(&prevHashB); err != nil {
-			t.Fatalf("read project B's first entry: %v", err)
+			SELECT prev_hash FROM audit_log WHERE flag_key=$1 AND project_id=$2 ORDER BY created_at ASC LIMIT 1
+		`, sharedKey, projectB).Scan(&prevHashB1); err != nil {
+			t.Fatalf("read B1: %v", err)
 		}
-		if prevHashB.Valid && prevHashB.String != "" {
-			t.Fatalf("project B's first entry for a key project A also has must start its OWN chain "+
-				"(prev_hash NULL), got prev_hash=%q — the chains forked", prevHashB.String)
+		if prevHashB1.Valid && prevHashB1.String != "" {
+			t.Fatalf("B1 (first entry for a key project A also has) must start its OWN chain "+
+				"(prev_hash NULL), got prev_hash=%q — the chains forked", prevHashB1.String)
+		}
+		if err := database.QueryRowContext(ctx, `
+			SELECT prev_hash FROM audit_log WHERE flag_key=$1 AND project_id=$2 ORDER BY created_at DESC LIMIT 1
+		`, sharedKey, projectA).Scan(&prevHashA2); err != nil {
+			t.Fatalf("read A2: %v", err)
+		}
+		if !prevHashA2.Valid || prevHashA2.String != hashA1 {
+			t.Fatalf("A2's prev_hash = %q, want project A1's hash %q (must link within its own project, "+
+				"not to project B's interleaved entry)", prevHashA2.String, hashA1)
+		}
+
+		// Direct proof of Verify's Go-side grouping-key fix: scan the WHOLE
+		// log (no SQL project filter) with A1/B1/A2 interleaved in it, and
+		// confirm the grouping still keeps each project's chain separate. A
+		// regression here would report a link failure at A2 (expecting B1's
+		// hash) even though nothing was actually tampered with.
+		global, err := w.Verify(ctx, "")
+		if err != nil {
+			t.Fatalf("verify (global): %v", err)
+		}
+		if global.FailureCount != 0 {
+			t.Fatalf("global verify reports tampering it does not have — the (project_id, flag_key) "+
+				"grouping key is not being applied: %+v", global.Failures)
 		}
 
 		reportA, err := w.Verify(ctx, projectA)
@@ -173,8 +214,8 @@ func TestChainAgainstPostgres(t *testing.T) {
 		if reportA.FailureCount != 0 {
 			t.Fatalf("project A reports tampering it does not have: %+v", reportA.Failures)
 		}
-		if reportA.TotalEntries != 1 {
-			t.Errorf("project A TotalEntries = %d, want exactly 1 (project B's entry must not be counted)",
+		if reportA.TotalEntries != 2 {
+			t.Errorf("project A TotalEntries = %d, want exactly 2 (project B's entry must not be counted)",
 				reportA.TotalEntries)
 		}
 
@@ -186,7 +227,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("project B reports tampering it does not have: %+v", reportB.Failures)
 		}
 		if reportB.TotalEntries != 1 {
-			t.Errorf("project B TotalEntries = %d, want exactly 1 (project A's entry must not be counted)",
+			t.Errorf("project B TotalEntries = %d, want exactly 1 (project A's entries must not be counted)",
 				reportB.TotalEntries)
 		}
 	})

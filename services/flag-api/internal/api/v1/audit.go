@@ -88,7 +88,13 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fromTs := int64(0)
-	toTs := time.Now().Unix()
+	// +1s: created_at is microsecond-precision, but time.Now().Unix() floors
+	// to whole seconds. An entry written earlier in THIS same wall-clock
+	// second (e.g. ...20.65s) is strictly greater than a floored boundary
+	// (...20.00s) and would otherwise be excluded from its own default query
+	// window — found by an adversarial review of TEN-1a-2 running this
+	// endpoint against real timing, not a hypothetical.
+	toTs := time.Now().Add(time.Second).Unix()
 	if f := q.Get("from"); f != "" {
 		if n, err := strconv.ParseInt(f, 10, 64); err == nil {
 			fromTs = n
