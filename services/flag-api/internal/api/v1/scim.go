@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/audit"
 )
 
 // SCIMHandler implements SCIM 2.0 User provisioning endpoints.
@@ -19,11 +21,12 @@ type SCIMHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
 	logger *zap.Logger
+	audit  *audit.Writer
 }
 
 // NewSCIMHandler constructs a SCIMHandler.
-func NewSCIMHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *SCIMHandler {
-	return &SCIMHandler{db: db, rdb: rdb, logger: logger}
+func NewSCIMHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) *SCIMHandler {
+	return &SCIMHandler{db: db, rdb: rdb, logger: logger, audit: auditW}
 }
 
 // SCIMEmail represents a SCIM email object.
@@ -256,12 +259,20 @@ func (h *SCIMHandler) DeprovisionUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// orphanedFlag pairs a flag key with its owning project — needed so the
+// audit entry below (TEN-1a-2) attributes to the RIGHT project rather than
+// leaving it unattributed.
+type orphanedFlag struct {
+	key       string
+	projectID string
+}
+
 // detectOrphans finds ACTIVE flags owned by the given email, creates PENDING
 // change_requests for each, appends an audit_log entry, and publishes a Redis
 // event so connected gateways are notified.
 func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 	rows, err := h.db.QueryContext(ctx, `
-		SELECT key FROM flags
+		SELECT key, project_id FROM flags
 		WHERE owner_id = $1 AND state = 'ACTIVE'
 	`, userEmail)
 	if err != nil {
@@ -270,23 +281,28 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var affectedKeys []string
+	var affected []orphanedFlag
 	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
+		var f orphanedFlag
+		if err := rows.Scan(&f.key, &f.projectID); err != nil {
 			h.logger.Error("scim detect orphans scan", zap.Error(err))
 			continue
 		}
-		affectedKeys = append(affectedKeys, key)
+		affected = append(affected, f)
 	}
 
-	if len(affectedKeys) == 0 {
+	if len(affected) == 0 {
 		return
 	}
 
-	for _, flagKey := range affectedKeys {
+	affectedKeys := make([]string, len(affected))
+	for i, f := range affected {
+		affectedKeys[i] = f.key
+	}
+
+	for _, f := range affected {
 		payload := map[string]string{
-			"reason":     "owner_deprovisioned",
+			"reason":      "owner_deprovisioned",
 			"owner_email": userEmail,
 		}
 		payloadJSON, _ := json.Marshal(payload)
@@ -295,37 +311,49 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 			INSERT INTO change_requests
 			    (flag_key, environment, requested_by, status, change_payload)
 			VALUES ($1, 'production', 'system', 'PENDING', $2)
-		`, flagKey, payloadJSON)
+		`, f.key, payloadJSON)
 		if err != nil {
 			h.logger.Error("scim create change_request", zap.Error(err),
-				zap.String("flag_key", flagKey))
+				zap.String("flag_key", f.key))
 		}
 
-		_, err = h.db.ExecContext(ctx, `
-			INSERT INTO audit_log (flag_key, environment, actor, event_type, new_state, ip_address)
-			VALUES ($1, 'production', 'system', 'user_deprovisioned', $2, '')
-		`, flagKey, payloadJSON)
-		if err != nil {
-			h.logger.Error("scim audit log insert", zap.Error(err),
-				zap.String("flag_key", flagKey))
+		// TEN-1a-2: this previously bypassed audit.Writer.Append entirely via
+		// a raw INSERT with no project_id, no prev_hash/entry_hash, and no
+		// HMAC — the row neither joined the hash chain nor was attributable
+		// to any project, so it went permanently invisible to every
+		// project-scoped GET /api/v1/audit view once that filter shipped.
+		if h.audit != nil {
+			if _, _, err := h.audit.Append(ctx, audit.Entry{
+				FlagKey:     f.key,
+				Environment: "production",
+				Actor:       "system",
+				EventType:   "user_deprovisioned",
+				NewState:    payloadJSON,
+				ProjectID:   f.projectID,
+			}); err != nil {
+				h.logger.Error("scim audit log write", zap.Error(err), zap.String("flag_key", f.key))
+			}
+		} else {
+			h.logger.Warn("scim audit log write skipped — no audit writer configured",
+				zap.String("flag_key", f.key))
 		}
 
 		event := map[string]any{
 			"type":     "flag_event",
-			"flag_key": flagKey,
+			"flag_key": f.key,
 			"reason":   "owner_deprovisioned",
 			"owner":    userEmail,
 			"ts":       time.Now().UTC().Unix(),
 		}
 		eventJSON, _ := json.Marshal(event)
 		if pubErr := h.rdb.Publish(ctx, "stream:production:updates", string(eventJSON)).Err(); pubErr != nil {
-			h.logger.Warn("scim redis publish", zap.Error(pubErr), zap.String("flag_key", flagKey))
+			h.logger.Warn("scim redis publish", zap.Error(pubErr), zap.String("flag_key", f.key))
 		}
 	}
 
 	h.logger.Info("scim orphan flags detected",
 		zap.String("owner", userEmail),
-		zap.Int("count", len(affectedKeys)),
+		zap.Int("count", len(affected)),
 		zap.Strings("flag_keys", affectedKeys),
 	)
 }

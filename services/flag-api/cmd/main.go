@@ -280,7 +280,7 @@ func main() {
 	})
 
 	scimToken := os.Getenv("SCIM_TOKEN")
-	scimH := v1.NewSCIMHandler(db, rdb, logger)
+	scimH := v1.NewSCIMHandler(db, rdb, logger, auditWriter)
 	r.Route("/scim/v2", func(r chi.Router) {
 		r.Use(v1.SCIMAuthMiddleware(scimToken))
 		r.Get("/Users", scimH.ListUsers)
