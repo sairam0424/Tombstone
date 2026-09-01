@@ -292,11 +292,22 @@ func (r *RBACMiddleware) checkPermissionWithOPA(req *http.Request, role Role, re
 	actor := actorFromContext(req.Context())
 	pathParts := splitPath(req.URL.Path)
 
+	// resource/action are the SAME two strings the route handler passed to
+	// RequirePermission(resource, action) — this is the permission actually
+	// being checked. Before this fix they were dropped here, leaving OPA to
+	// approximate the decision from method+path alone; that approximation
+	// (flags.rego) was looser than permissionMatrix on every gated route
+	// (e.g. any role could GET anything, any operator could POST/PATCH
+	// anything under /api/...), so a merged SEC-1 fix was silently defeated
+	// at runtime whenever OPA was live — which is the default, since
+	// POLICY_DIR defaults to "policies/" and that directory ships in the repo.
 	input := map[string]interface{}{
-		"method": req.Method,
-		"path":   pathParts,
-		"role":   strings.ToLower(string(role)),
-		"actor":  actor,
+		"method":   req.Method,
+		"path":     pathParts,
+		"role":     strings.ToLower(string(role)),
+		"actor":    actor,
+		"resource": resource,
+		"action":   action,
 	}
 
 	if allow, ok := r.flagsEval.evaluate(req.Context(), input); ok {
