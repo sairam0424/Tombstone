@@ -1,0 +1,21 @@
+-- Migration 016: project_id on scheduled_changes (TEN-1a-1 follow-up).
+--
+-- Without this column, CreateSchedule/ListSchedule/CancelSchedule and the
+-- in-process scheduler executor (scheduler.go) could only match a change to
+-- a flag by flag_key alone. Since flags.key is unique only per
+-- (project_id, key), a caller in one project could schedule — and the
+-- background scheduler would then actually execute — a mutation of ANOTHER
+-- project's same-keyed flag. That is a live cross-tenant write, not just an
+-- audit-attribution gap.
+--
+-- Nullable, not NOT NULL: rows written before this migration have no
+-- reliable way to be attributed to a project after the fact — flag_key alone
+-- cannot disambiguate which project a pre-existing row belonged to. Rather
+-- than guess, legacy rows are left NULL. Every project-scoped query added
+-- alongside this migration matches with `=`, which is never true against
+-- NULL, so legacy rows become permanently unreachable through the scoped API
+-- rather than silently matching (or being executed against) the wrong
+-- project. This mirrors AUD-1's handling of pre-AUD-1 audit rows: report or
+-- skip legacy state honestly rather than pretend it is scoped.
+ALTER TABLE scheduled_changes ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_changes_project_id ON scheduled_changes(project_id);

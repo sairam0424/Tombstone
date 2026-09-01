@@ -65,6 +65,7 @@ func TestTenancyIsolation(t *testing.T) {
 	flagH := NewFlagHandler(database, rdb, logger, nil, nil)
 	snapH := NewSnapshotHandler(database, logger)
 	prereqH := NewPrerequisiteHandler(database, logger)
+	scheduledH := NewScheduledHandler(database, rdb, logger, nil)
 
 	const sharedKey = "ten1a-shared-key"
 
@@ -155,6 +156,23 @@ func TestTenancyIsolation(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422 (prereq_flag_key must not resolve across projects); body: %s",
 				rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("CreateSchedule rejects a key that only exists in another project", func(t *testing.T) {
+		onlyInB := createTestFlag(t, flagH, projectB, "ten1a-schedule-only-in-b")
+
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+onlyInB.Key+"/schedule", map[string]any{
+			"environment":    "production",
+			"scheduled_for":  time.Now().Add(5 * time.Minute).Unix(),
+			"change_payload": map[string]any{"enabled": false},
+		}, projectA, map[string]string{"key": onlyInB.Key})
+		rec := httptest.NewRecorder()
+		scheduledH.CreateSchedule(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (a caller must not be able to schedule a change against "+
+				"another project's flag by guessing its key); body: %s", rec.Code, rec.Body.String())
 		}
 	})
 

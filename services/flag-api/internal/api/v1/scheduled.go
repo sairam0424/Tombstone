@@ -16,9 +16,10 @@ import (
 
 // ScheduledHandler handles the Scheduled Changes API.
 // Routes:
-//   POST   /api/v1/flags/{key}/schedule
-//   GET    /api/v1/flags/{key}/schedule?environment=&status=
-//   DELETE /api/v1/flags/{key}/schedule/{id}
+//
+//	POST   /api/v1/flags/{key}/schedule
+//	GET    /api/v1/flags/{key}/schedule?environment=&status=
+//	DELETE /api/v1/flags/{key}/schedule/{id}
 type ScheduledHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
@@ -64,6 +65,15 @@ type CreateScheduleRequest struct {
 func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 
+	// TEN-1a: the existence check below matched key alone across ALL
+	// projects, so a caller could schedule a change against a flag that only
+	// exists in a different project — and the background scheduler would
+	// then execute it (see scheduler.go), a real cross-tenant write.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var req CreateScheduleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -88,10 +98,10 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the flag exists
+	// Verify the flag exists IN THE CALLER'S OWN PROJECT.
 	var flagExists bool
 	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM flags WHERE key=$1 AND state != 'ARCHIVED')`, key,
+		`SELECT EXISTS(SELECT 1 FROM flags WHERE key=$1 AND project_id=$2 AND state != 'ARCHIVED')`, key, projectID,
 	).Scan(&flagExists); err != nil || !flagExists {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
@@ -110,8 +120,8 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 
 	err = h.db.QueryRowContext(r.Context(), `
 		INSERT INTO scheduled_changes
-		    (id, flag_key, environment, scheduled_for, change_payload, created_by, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
+		    (id, flag_key, environment, scheduled_for, change_payload, created_by, status, project_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
 		RETURNING
 		    id, flag_key, environment,
 		    EXTRACT(EPOCH FROM scheduled_for)::bigint,
@@ -119,7 +129,7 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		    executed_at,
 		    error_message,
 		    EXTRACT(EPOCH FROM created_at)::bigint
-	`, uuid.New().String(), key, req.Environment, scheduledAt, payloadJSON, actor).
+	`, uuid.New().String(), key, req.Environment, scheduledAt, payloadJSON, actor, projectID).
 		Scan(
 			&sc.ID, &sc.FlagKey, &sc.Environment, &sc.ScheduledFor,
 			&sc.ChangePayload, &sc.CreatedBy, &sc.Status,
@@ -152,6 +162,14 @@ func (h *ScheduledHandler) ListSchedule(w http.ResponseWriter, r *http.Request) 
 	envFilter := r.URL.Query().Get("environment")
 	statusFilter := r.URL.Query().Get("status")
 
+	// TEN-1a: this previously matched flag_key alone across ALL projects — a
+	// VIEWER in one project could read another project's pending scheduled
+	// change_payload (future enabled/rollout_pct) for a same-keyed flag.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	query := `
 		SELECT
 		    id, flag_key, environment,
@@ -161,10 +179,10 @@ func (h *ScheduledHandler) ListSchedule(w http.ResponseWriter, r *http.Request) 
 		    error_message,
 		    EXTRACT(EPOCH FROM created_at)::bigint
 		FROM scheduled_changes
-		WHERE flag_key = $1
+		WHERE flag_key = $1 AND project_id = $2
 	`
-	args := []any{key}
-	argIdx := 2
+	args := []any{key, projectID}
+	argIdx := 3
 
 	if envFilter != "" {
 		query += ` AND environment = $` + itoa(argIdx)
@@ -222,13 +240,22 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 	key := chi.URLParam(r, "key")
 	id := chi.URLParam(r, "id")
 
+	// TEN-1a: this previously matched id+flag_key alone across ALL projects —
+	// a caller with flags:write in their own project could cancel another
+	// project's scheduled change if they knew (e.g. via the ListSchedule leak
+	// this same fix closes) its id.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	actor := actorFromContext(r.Context())
 
 	res, err := h.db.ExecContext(r.Context(), `
 		UPDATE scheduled_changes
 		SET status = 'CANCELLED'
-		WHERE id = $1 AND flag_key = $2 AND status = 'PENDING'
-	`, id, key)
+		WHERE id = $1 AND flag_key = $2 AND status = 'PENDING' AND project_id = $3
+	`, id, key, projectID)
 	if err != nil {
 		h.logger.Error("cancel scheduled change", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -237,10 +264,10 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		// Might not exist or might already be non-PENDING
+		// Might not exist, might already be non-PENDING, or belongs to another project.
 		var status string
 		scanErr := h.db.QueryRowContext(r.Context(),
-			`SELECT status FROM scheduled_changes WHERE id=$1 AND flag_key=$2`, id, key,
+			`SELECT status FROM scheduled_changes WHERE id=$1 AND flag_key=$2 AND project_id=$3`, id, key, projectID,
 		).Scan(&status)
 		if scanErr == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "scheduled change not found")
