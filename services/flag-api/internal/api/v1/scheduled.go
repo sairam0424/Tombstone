@@ -149,7 +149,7 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		sc.ErrorMessage = &errorMsg.String
 	}
 
-	h.writeAudit(r.Context(), key, req.Environment, actor, "scheduled_change_created",
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "scheduled_change_created",
 		nil, &sc, ipFromRequest(r))
 
 	writeJSON(w, http.StatusCreated, sc)
@@ -277,7 +277,7 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.writeAudit(r.Context(), key, "", actor, "scheduled_change_cancelled",
+	h.writeAudit(r.Context(), projectID, key, "", actor, "scheduled_change_cancelled",
 		map[string]any{"id": id}, map[string]any{"status": "CANCELLED"}, ipFromRequest(r))
 
 	w.WriteHeader(http.StatusNoContent)
@@ -286,7 +286,7 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 // writeAudit writes an append-only audit entry with Merkle hash linking.
 // Mirrors v1.FlagHandler.writeAudit exactly so ScheduledHandler can log without
 // holding a reference to FlagHandler.
-func (h *ScheduledHandler) writeAudit(ctx context.Context, flagKey, env, actor, eventType string, prev, curr any, ip string) {
+func (h *ScheduledHandler) writeAudit(ctx context.Context, projectID, flagKey, env, actor, eventType string, prev, curr any, ip string) {
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
@@ -306,6 +306,7 @@ func (h *ScheduledHandler) writeAudit(ctx context.Context, flagKey, env, actor, 
 		PrevState:   prevJSON,
 		NewState:    currJSON,
 		IPAddress:   ip,
+		ProjectID:   projectID,
 	}); err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
 	}

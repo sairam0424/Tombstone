@@ -205,7 +205,7 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 		`, f.ID, env, actor)
 	}
 
-	h.writeAudit(r.Context(), f.Key, "", actor, "flag_created", nil, &f, ipFromRequest(r))
+	h.writeAudit(r.Context(), projectID, f.Key, "", actor, "flag_created", nil, &f, ipFromRequest(r))
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -300,7 +300,7 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		FlagKey: key, Environment: env,
 		Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 	}
-	h.writeAudit(r.Context(), key, env, actor, "flag_environment_updated", &prev, &curr, ipFromRequest(r))
+	h.writeAudit(r.Context(), projectID, key, env, actor, "flag_environment_updated", &prev, &curr, ipFromRequest(r))
 	h.publishEvent(r.Context(), env, FlagEvent{
 		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
@@ -365,7 +365,7 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeAudit(r.Context(), key, req.Environment, actor, "kill_switch_activated",
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "kill_switch_activated",
 		nil, map[string]any{"enabled": false, "reason": req.Reason}, ipFromRequest(r))
 	h.publishEvent(r.Context(), req.Environment, FlagEvent{
 		FlagKey: key, Enabled: false, RolloutPct: 0,
@@ -421,7 +421,7 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeAudit(r.Context(), key, "", actor, "flag_archived", nil, map[string]any{"tombstoned": true}, ipFromRequest(r))
+	h.writeAudit(r.Context(), projectID, key, "", actor, "flag_archived", nil, map[string]any{"tombstoned": true}, ipFromRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{"archived": true, "tombstoned": true, "key": key})
 }
 
@@ -464,7 +464,7 @@ func (h *FlagHandler) publishToStream(ctx context.Context, environment string, e
 // writeAudit writes an append-only audit entry with Merkle hash linking, then
 // asynchronously submits the entry hash to the Rekor transparency log (opt-in
 // via REKOR_ENABLED=true). The Rekor submission never blocks the caller.
-func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, eventType string, prev, curr any, ip string) {
+func (h *FlagHandler) writeAudit(ctx context.Context, projectID, flagKey, env, actor, eventType string, prev, curr any, ip string) {
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
@@ -484,6 +484,7 @@ func (h *FlagHandler) writeAudit(ctx context.Context, flagKey, env, actor, event
 		PrevState:   prevJSON,
 		NewState:    currJSON,
 		IPAddress:   ip,
+		ProjectID:   projectID,
 	})
 	if err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))

@@ -35,7 +35,7 @@ import (
 // advisory lock in the system (e.g. the migration runner's).
 const advisoryNamespace int32 = 0x41554431 // "AUD1"
 
-// Entry is one audit record. Every field participates in the hash.
+// Entry is one audit record.
 type Entry struct {
 	FlagKey     string // "" for events not scoped to a flag (e.g. break-glass)
 	Environment string
@@ -44,6 +44,16 @@ type Entry struct {
 	PrevState   []byte // JSON, nil allowed
 	NewState    []byte // JSON, nil allowed
 	IPAddress   string
+	// ProjectID scopes this entry's chain (TEN-1a-2) — "" for events that are
+	// legitimately project-less (break-glass) or written by a caller that
+	// predates this field. It is NOT part of canonical()'s hashed content: it
+	// is set exclusively by server-side code from a resolved, validated
+	// project_id (never client input), so integrity here rests on the same
+	// write-path trust every other server-set field (Actor, EventType) already
+	// relies on, not on cryptographic commitment. Keeping it out of the hash
+	// means canonical()'s existing formula — and every entry_hash already
+	// written under it — is completely unaffected by this field's addition.
+	ProjectID string
 }
 
 // Writer appends entries to the audit log, maintaining the hash chain.
@@ -88,6 +98,14 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 	//     chain is treated as restarting here, and Verify reports those legacy
 	//     rows as unverifiable rather than pretending they check out. A scalar
 	//     subquery yields NULL for an empty chain, so there is no ErrNoRows case.
+	//     TEN-1a-2: scoped by project_id as well as flag_key — flags.key is
+	//     unique only per (project_id, key), so two projects with a same-keyed
+	//     flag would otherwise share one chain and could corrupt each other's
+	//     prev_hash linkage. The advisory lock below stays keyed by flag_key
+	//     alone (unchanged): that only means two different projects' writes to
+	//     a same-keyed flag serialize against each other unnecessarily, which
+	//     is safe, not a correctness bug — the chain-tip lookup here is what
+	//     actually determines correctness, and it IS project-scoped.
 	//
 	//  2. The states rendered EXACTLY as Postgres will return them. prev_state
 	//     and new_state are jsonb, so Postgres reparses the JSON and re-renders
@@ -101,9 +119,10 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 		SELECT $2::jsonb::text, $3::jsonb::text,
 		       (SELECT entry_hash FROM audit_log
 		         WHERE flag_key IS NOT DISTINCT FROM $1
+		           AND project_id IS NOT DISTINCT FROM $4
 		         ORDER BY created_at DESC, id DESC
 		         LIMIT 1)
-	`, nullIfEmpty(e.FlagKey), jsonOrNull(e.PrevState), jsonOrNull(e.NewState)).
+	`, nullIfEmpty(e.FlagKey), jsonOrNull(e.PrevState), jsonOrNull(e.NewState), nullIfEmpty(e.ProjectID)).
 		Scan(&prevStateText, &newStateText, &prevHash); err != nil {
 		return "", "", fmt.Errorf("read chain tip: %w", err)
 	}
@@ -141,11 +160,11 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_log
 		    (id, flag_key, environment, actor, event_type, prev_state, new_state,
-		     ip_address, prev_hash, entry_hash, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		     ip_address, prev_hash, entry_hash, created_at, project_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 	`, id, nullIfEmpty(e.FlagKey), e.Environment, e.Actor, e.EventType,
 		jsonOrNull(stored.PrevState), jsonOrNull(stored.NewState), e.IPAddress,
-		nullIfEmpty(prevHash.String), nullIfEmpty(entryHash), createdAt); err != nil {
+		nullIfEmpty(prevHash.String), nullIfEmpty(entryHash), createdAt, nullIfEmpty(e.ProjectID)); err != nil {
 		return "", "", fmt.Errorf("insert audit entry: %w", err)
 	}
 

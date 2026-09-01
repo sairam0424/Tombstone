@@ -17,8 +17,10 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/db"
 	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 // TestTenancyIsolation is the executable gate for TEN-1a. It runs against a
@@ -62,10 +64,17 @@ func TestTenancyIsolation(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	defer func() { _ = rdb.Close() }()
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, nil)
+	auditKey, err := secrets.NewAuditKey("tenancy-isolation-test-key-000000000000", "")
+	if err != nil {
+		t.Fatalf("audit key: %v", err)
+	}
+	auditW := audit.NewWriter(database, auditKey)
+
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW)
 	snapH := NewSnapshotHandler(database, logger)
 	prereqH := NewPrerequisiteHandler(database, logger)
-	scheduledH := NewScheduledHandler(database, rdb, logger, nil)
+	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
+	auditH := NewAuditHandler(database, logger, auditW)
 
 	const sharedKey = "ten1a-shared-key"
 
@@ -142,6 +151,46 @@ func TestTenancyIsolation(t *testing.T) {
 		snapB := getTestSnapshot(t, snapH, projectB, "production")
 		if s := findSnapshotEntry(snapB, sharedKey); s == nil || !s.Enabled {
 			t.Fatalf("project B's flag was killed by project A's KillSwitch call: %+v", s)
+		}
+	})
+
+	// TEN-1a-2: before this fix, ListAuditLog and VerifyChain had no project
+	// filter at all, so a VIEWER-level caller in either project could read
+	// (or learn the integrity status of) the OTHER project's full audit
+	// history — the writes above (CreateFlag/UpdateEnvironment/KillSwitch)
+	// have already generated real, distinct audit entries in both projects.
+	t.Run("ListAuditLog and VerifyChain never expose another project's history", func(t *testing.T) {
+		beforeA := listTestAuditEntries(t, auditH, projectA)
+		beforeB := listTestAuditEntries(t, auditH, projectB)
+
+		// One more write, to project A only.
+		updateTestEnvironment(t, flagH, projectA, sharedKey, "staging", true, 77)
+
+		afterA := listTestAuditEntries(t, auditH, projectA)
+		afterB := listTestAuditEntries(t, auditH, projectB)
+
+		if len(afterA) != len(beforeA)+1 {
+			t.Fatalf("project A's audit log should have grown by exactly 1 entry, went from %d to %d",
+				len(beforeA), len(afterA))
+		}
+		if len(afterB) != len(beforeB) {
+			t.Fatalf("project A's write leaked into project B's audit log: went from %d to %d entries",
+				len(beforeB), len(afterB))
+		}
+
+		reportA := getTestAuditVerify(t, auditH, projectA)
+		if !reportA.Intact {
+			t.Fatalf("project A's chain should verify intact: %+v", reportA)
+		}
+		if reportA.TotalEntries != len(afterA) {
+			t.Fatalf("VerifyChain TotalEntries = %d, want %d (must match ListAuditLog's own-project count)",
+				reportA.TotalEntries, len(afterA))
+		}
+
+		reportB := getTestAuditVerify(t, auditH, projectB)
+		if reportB.TotalEntries != len(afterB) {
+			t.Fatalf("VerifyChain for project B TotalEntries = %d, want %d — must not include project A's entries",
+				reportB.TotalEntries, len(afterB))
 		}
 	})
 
@@ -350,4 +399,36 @@ func findSnapshotEntry(s Snapshot, key string) *FlagEnvironmentStateWithPrereqs 
 		}
 	}
 	return nil
+}
+
+func listTestAuditEntries(t *testing.T, h *AuditHandler, projectID string) []AuditEntry {
+	t.Helper()
+	req := newTenancyRequest(t, http.MethodGet, "/api/v1/audit", nil, projectID, nil)
+	rec := httptest.NewRecorder()
+	h.ListAuditLog(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listTestAuditEntries(%s) status = %d, want 200; body: %s", projectID, rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Entries []AuditEntry `json:"entries"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode audit list response: %v", err)
+	}
+	return out.Entries
+}
+
+func getTestAuditVerify(t *testing.T, h *AuditHandler, projectID string) audit.VerifyReport {
+	t.Helper()
+	req := newTenancyRequest(t, http.MethodGet, "/api/v1/audit/verify", nil, projectID, nil)
+	rec := httptest.NewRecorder()
+	h.VerifyChain(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("getTestAuditVerify(%s) status = %d, want 200; body: %s", projectID, rec.Code, rec.Body.String())
+	}
+	var report audit.VerifyReport
+	if err := json.NewDecoder(rec.Body).Decode(&report); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	return report
 }

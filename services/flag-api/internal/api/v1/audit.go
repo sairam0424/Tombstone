@@ -32,7 +32,15 @@ func (h *AuditHandler) VerifyChain(w http.ResponseWriter, r *http.Request) {
 			"audit chain verification unavailable — AUDIT_HMAC_KEY is not configured")
 		return
 	}
-	report, err := h.audit.Verify(r.Context())
+	// TEN-1a-2: scoped to the caller's own project — an unscoped verify would
+	// both leak other projects' flag keys via VerifyFailure and let one
+	// project's tampering (or an unrelated legacy/legacy-chain artifact)
+	// produce a false-tampering report for a caller who never touched it.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+	report, err := h.audit.Verify(r.Context(), projectID)
 	if err != nil {
 		h.logger.Error("audit verify failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "verification failed")
@@ -59,6 +67,15 @@ type AuditEntry struct {
 // ListAuditLog handles GET /api/v1/audit
 // Supports filters: flag_key, environment, from (unix ts), to (unix ts), limit
 func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
+	// TEN-1a-2: this previously had no project filter at all, so any VIEWER
+	// (human or read-only service token) could read every project's full
+	// audit history — including prev_state/new_state flag snapshots — by
+	// calling this endpoint with no flag_key filter.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	q := r.URL.Query()
 	flagKey := q.Get("flag_key")
 	env := q.Get("environment")
@@ -71,7 +88,13 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fromTs := int64(0)
-	toTs := time.Now().Unix()
+	// +1s: created_at is microsecond-precision, but time.Now().Unix() floors
+	// to whole seconds. An entry written earlier in THIS same wall-clock
+	// second (e.g. ...20.65s) is strictly greater than a floored boundary
+	// (...20.00s) and would otherwise be excluded from its own default query
+	// window — found by an adversarial review of TEN-1a-2 running this
+	// endpoint against real timing, not a hypothetical.
+	toTs := time.Now().Add(time.Second).Unix()
 	if f := q.Get("from"); f != "" {
 		if n, err := strconv.ParseInt(f, 10, 64); err == nil {
 			fromTs = n
@@ -94,9 +117,10 @@ func (h *AuditHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 		  AND ($2='' OR environment=$2)
 		  AND created_at >= to_timestamp($3)
 		  AND created_at <= to_timestamp($4)
+		  AND project_id = $6
 		ORDER BY created_at DESC
 		LIMIT $5
-	`, flagKey, env, fromTs, toTs, limit)
+	`, flagKey, env, fromTs, toTs, limit, projectID)
 	if err != nil {
 		h.logger.Error("audit log query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")

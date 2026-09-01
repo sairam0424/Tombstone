@@ -44,25 +44,48 @@ const maxReportedFailures = 50
 // Verify recomputes every keyed hash in the audit log and checks that each entry
 // links to its predecessor. It is read-only.
 //
+// projectID scopes both which rows are examined AND how chains are grouped:
+// chains are per (project_id, flag_key), not flag_key alone (TEN-1a-2) —
+// flags.key is unique only per (project_id, key), so two projects with a
+// same-keyed flag would otherwise be treated as one chain. Pass "" for the
+// unscoped, whole-log view (compliance evidence's system-wide integrity
+// figure); the VIEWER-accessible /audit/verify HTTP route always passes the
+// caller's own resolved project_id, so a project cannot learn about (or
+// receive a false-tampering report contaminated by) another project's chains.
+//
 // Intact is true only when there are zero failures AND at least one entry was
 // actually verified — an empty or entirely-legacy log must not be reported as
 // cryptographically intact.
-func (w *Writer) Verify(ctx context.Context) (VerifyReport, error) {
+func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, error) {
 	report := VerifyReport{CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 	if w.key == nil {
 		return report, fmt.Errorf("audit writer has no signing key")
 	}
 
-	// Ordered by chain, then position within the chain, so a single pass can
-	// walk each chain in sequence.
+	// Ordered by (project_id, flag_key), then position within the chain, so a
+	// single pass can walk each chain in sequence.
+	//
+	// The filter passes projectID through nullIfEmpty rather than comparing
+	// "$1 = '' OR project_id::text = $1": casting project_id to text and
+	// comparing it against the raw request string is sensitive to UUID
+	// formatting (case, e.g.) that the native uuid `=` operator normalizes
+	// away — a caller whose resolved project_id differs only in case from the
+	// stored value would silently see zero rows instead of their own. The
+	// explicit ::uuid cast is required, not cosmetic: without it, lib/pq
+	// cannot determine $1's type from a bare NULL parameter and Postgres
+	// rejects the query outright ("could not determine data type of
+	// parameter $1") — found by CI, not reproducible with a non-NULL value,
+	// which is exactly why an explicit type is safer than relying on
+	// inference from context.
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,''), COALESCE(new_state::text,''),
 		       COALESCE(ip_address,''), COALESCE(prev_hash,''), COALESCE(entry_hash,''),
-		       created_at
+		       created_at, COALESCE(project_id::text,'')
 		FROM audit_log
-		ORDER BY COALESCE(flag_key,''), created_at ASC, id ASC
-	`)
+		WHERE $1::uuid IS NULL OR project_id = $1::uuid
+		ORDER BY COALESCE(project_id::text,''), COALESCE(flag_key,''), created_at ASC, id ASC
+	`, nullIfEmpty(projectID))
 	if err != nil {
 		return report, fmt.Errorf("read audit log: %w", err)
 	}
@@ -73,16 +96,20 @@ func (w *Writer) Verify(ctx context.Context) (VerifyReport, error) {
 	first := true
 
 	for rows.Next() {
-		var id, flagKey, env, actor, eventType, prevState, newState, ip, prevHash, entryHash string
+		var id, flagKey, env, actor, eventType, prevState, newState, ip, prevHash, entryHash, rowProjectID string
 		var createdAt time.Time
 		if err := rows.Scan(&id, &flagKey, &env, &actor, &eventType,
-			&prevState, &newState, &ip, &prevHash, &entryHash, &createdAt); err != nil {
+			&prevState, &newState, &ip, &prevHash, &entryHash, &createdAt, &rowProjectID); err != nil {
 			return report, err
 		}
 		report.TotalEntries++
 
-		if first || flagKey != currentChain {
-			currentChain = flagKey
+		// Chain identity is (project_id, flag_key) — "\x00" as a separator
+		// cannot appear in a UUID string or a flag key, so this concatenation
+		// cannot collide two distinct pairs onto the same chain key.
+		chainKey := rowProjectID + "\x00" + flagKey
+		if first || chainKey != currentChain {
+			currentChain = chainKey
 			expectedPrev = ""
 			report.ChainsChecked++
 			first = false

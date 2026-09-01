@@ -130,7 +130,7 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 		evidence["merkle_chain_integrity"] = nil
 		evidence["audit_log_coverage"] = nil
 		evidence["merkle_chain_note"] = "AUDIT_HMAC_KEY is not configured — chain integrity cannot be computed and is NOT asserted"
-	} else if report, err := h.audit.Verify(ctx); err != nil {
+	} else if report, err := h.audit.Verify(ctx, ""); err != nil { // "" = whole-log, cross-project figure by design
 		h.logger.Error("compliance: audit verification failed", zap.Error(err))
 		evidence["merkle_chain_integrity"] = nil
 		evidence["audit_log_coverage"] = nil
@@ -292,6 +292,20 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// TEN-1a-2: an adversarial review of the audit_log project-scoping fix
+	// found this query STILL unscoped — ADMIN is a per-project role
+	// (user_roles is keyed by (user_id, project_id)), so a Project A admin
+	// has no special relationship to Project B, yet this exported EVERY
+	// project's full raw audit rows (prev_state/new_state, actor, ip_address)
+	// under a cryptographic signature that lends the leaked data false
+	// authority. Unlike GetEvidence/GetControls just below — which report
+	// system-wide AGGREGATE counts and stay intentionally cross-project — this
+	// hands over row-level content, the same severity class ListAuditLog was.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
@@ -299,8 +313,9 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		       EXTRACT(EPOCH FROM created_at)::bigint,
 		       COALESCE(rekor_log_id,''), rekor_log_index
 		FROM audit_log
+		WHERE project_id = $1
 		ORDER BY created_at ASC
-	`)
+	`, projectID)
 	if err != nil {
 		h.logger.Error("audit export query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")

@@ -51,7 +51,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			}
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -82,7 +82,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -119,13 +119,116 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("concurrent append failed: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
 		if report.FailureCount != 0 {
 			t.Fatalf("chain forked under %d concurrent writers: %d failure(s): %+v",
 				writers, report.FailureCount, report.Failures)
+		}
+	})
+
+	// TEN-1a-2: flags.key is unique only per (project_id, key), so two
+	// projects can legitimately have a flag with the identical key string.
+	// Before this fix, Append's chain-tip lookup matched flag_key alone, so
+	// project B's entry below would have linked its prev_hash to project A's
+	// tip — merging two tenants' audit trails into one chain.
+	t.Run("chains with the same flag_key in different projects do not fork each other", func(t *testing.T) {
+		// Real rows in the projects table: audit_log.project_id has a foreign
+		// key to projects(id), and a literal (even UUID-shaped) string with no
+		// matching row fails the constraint outright — found by an adversarial
+		// review actually running this test against real Postgres.
+		projectA := createAuditTestProject(ctx, t, database, "aud1-tenant-a")
+		projectB := createAuditTestProject(ctx, t, database, "aud1-tenant-b")
+		const sharedKey = "aud1-shared-key"
+
+		// Interleaved on purpose — A1, B1, A2 — so B1 sits BETWEEN two of
+		// project A's entries in created_at order. A regression that groups
+		// chains by flag_key alone (instead of (project_id, flag_key)) would
+		// make Verify expect A2's prev_hash to match B1's hash, not A1's —
+		// this ordering is what makes that regression detectable below.
+		eA1 := sampleEntry()
+		eA1.FlagKey = sharedKey
+		eA1.ProjectID = projectA
+		_, hashA1, err := w.Append(ctx, eA1)
+		if err != nil {
+			t.Fatalf("append A1: %v", err)
+		}
+
+		eB1 := sampleEntry()
+		eB1.FlagKey = sharedKey
+		eB1.ProjectID = projectB
+		if _, _, err := w.Append(ctx, eB1); err != nil {
+			t.Fatalf("append B1: %v", err)
+		}
+
+		eA2 := sampleEntry()
+		eA2.FlagKey = sharedKey
+		eA2.ProjectID = projectA
+		if _, _, err := w.Append(ctx, eA2); err != nil {
+			t.Fatalf("append A2: %v", err)
+		}
+
+		// Direct proof of Append's chain-tip-lookup fix: B1 must start its OWN
+		// chain (prev_hash NULL), and A2 must link to A1 — NOT to B1, which
+		// sits between them in wall-clock order.
+		var prevHashB1, prevHashA2 sql.NullString
+		if err := database.QueryRowContext(ctx, `
+			SELECT prev_hash FROM audit_log WHERE flag_key=$1 AND project_id=$2 ORDER BY created_at ASC LIMIT 1
+		`, sharedKey, projectB).Scan(&prevHashB1); err != nil {
+			t.Fatalf("read B1: %v", err)
+		}
+		if prevHashB1.Valid && prevHashB1.String != "" {
+			t.Fatalf("B1 (first entry for a key project A also has) must start its OWN chain "+
+				"(prev_hash NULL), got prev_hash=%q — the chains forked", prevHashB1.String)
+		}
+		if err := database.QueryRowContext(ctx, `
+			SELECT prev_hash FROM audit_log WHERE flag_key=$1 AND project_id=$2 ORDER BY created_at DESC LIMIT 1
+		`, sharedKey, projectA).Scan(&prevHashA2); err != nil {
+			t.Fatalf("read A2: %v", err)
+		}
+		if !prevHashA2.Valid || prevHashA2.String != hashA1 {
+			t.Fatalf("A2's prev_hash = %q, want project A1's hash %q (must link within its own project, "+
+				"not to project B's interleaved entry)", prevHashA2.String, hashA1)
+		}
+
+		// Direct proof of Verify's Go-side grouping-key fix: scan the WHOLE
+		// log (no SQL project filter) with A1/B1/A2 interleaved in it, and
+		// confirm the grouping still keeps each project's chain separate. A
+		// regression here would report a link failure at A2 (expecting B1's
+		// hash) even though nothing was actually tampered with.
+		global, err := w.Verify(ctx, "")
+		if err != nil {
+			t.Fatalf("verify (global): %v", err)
+		}
+		if global.FailureCount != 0 {
+			t.Fatalf("global verify reports tampering it does not have — the (project_id, flag_key) "+
+				"grouping key is not being applied: %+v", global.Failures)
+		}
+
+		reportA, err := w.Verify(ctx, projectA)
+		if err != nil {
+			t.Fatalf("verify project A: %v", err)
+		}
+		if reportA.FailureCount != 0 {
+			t.Fatalf("project A reports tampering it does not have: %+v", reportA.Failures)
+		}
+		if reportA.TotalEntries != 2 {
+			t.Errorf("project A TotalEntries = %d, want exactly 2 (project B's entry must not be counted)",
+				reportA.TotalEntries)
+		}
+
+		reportB, err := w.Verify(ctx, projectB)
+		if err != nil {
+			t.Fatalf("verify project B: %v", err)
+		}
+		if reportB.FailureCount != 0 {
+			t.Fatalf("project B reports tampering it does not have: %+v", reportB.Failures)
+		}
+		if reportB.TotalEntries != 1 {
+			t.Errorf("project B TotalEntries = %d, want exactly 1 (project A's entries must not be counted)",
+				reportB.TotalEntries)
 		}
 	})
 
@@ -138,7 +241,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("insert legacy row: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -166,7 +269,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("insert forged row: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -187,4 +290,21 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Errorf("the forged row must be named in the failures list; got %+v", report.Failures)
 		}
 	})
+}
+
+// createAuditTestProject inserts (or reuses, keyed by slug) a real projects
+// row and returns its generated id — audit_log.project_id has a foreign key
+// to projects(id), so a made-up UUID with no matching row is rejected.
+func createAuditTestProject(ctx context.Context, t *testing.T, database *sql.DB, slug string) string {
+	t.Helper()
+	var id string
+	err := database.QueryRowContext(ctx, `
+		INSERT INTO projects (name, slug) VALUES ($1, $1)
+		ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
+		RETURNING id
+	`, slug).Scan(&id)
+	if err != nil {
+		t.Fatalf("create test project %q: %v", slug, err)
+	}
+	return id
 }
