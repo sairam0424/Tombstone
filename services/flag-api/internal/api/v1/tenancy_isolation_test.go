@@ -75,6 +75,7 @@ func TestTenancyIsolation(t *testing.T) {
 	prereqH := NewPrerequisiteHandler(database, logger)
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
 	auditH := NewAuditHandler(database, logger, auditW)
+	crH := NewChangeRequestHandler(database, rdb, logger)
 
 	const sharedKey = "ten1a-shared-key"
 
@@ -191,6 +192,65 @@ func TestTenancyIsolation(t *testing.T) {
 		if reportB.TotalEntries != len(afterB) {
 			t.Fatalf("VerifyChain for project B TotalEntries = %d, want %d — must not include project A's entries",
 				reportB.TotalEntries, len(afterB))
+		}
+	})
+
+	// TEN-1a-3: before this fix, change_requests had no project_id at all —
+	// ListChangeRequests (deliberately reachable by any authenticated user,
+	// per the SEC-3 exemption) leaked every project's requests, and
+	// Approve/RejectChangeRequest matched by id alone.
+	t.Run("ListChangeRequests and ApproveChangeRequest never cross projects", func(t *testing.T) {
+		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey)
+		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey)
+
+		listA := listTestChangeRequests(t, crH, projectA)
+		assertExactlyOneChangeRequestWithID(t, listA, crA)
+
+		listB := listTestChangeRequests(t, crH, projectB)
+		assertExactlyOneChangeRequestWithID(t, listB, crB)
+
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crB+"/approve",
+			map[string]any{"approved_by": "someone"}, projectA, map[string]string{"id": crB})
+		rec := httptest.NewRecorder()
+		crH.ApproveChangeRequest(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("project A approving project B's change request: status = %d, want 404; body: %s",
+				rec.Code, rec.Body.String())
+		}
+
+		req = newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crA+"/approve",
+			map[string]any{"approved_by": "someone"}, projectA, map[string]string{"id": crA})
+		rec = httptest.NewRecorder()
+		crH.ApproveChangeRequest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("approving its own change request: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// RejectChangeRequest carries the identical project_id guard as
+	// ApproveChangeRequest (added in the same commit) but was never exercised
+	// by the subtest above — an adversarial review flagged that a regression
+	// dropping this guard specifically would go uncaught. Fresh change
+	// requests: the ones above are no longer PENDING after being approved.
+	t.Run("RejectChangeRequest never crosses projects", func(t *testing.T) {
+		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey)
+		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey)
+
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crB+"/reject",
+			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crB})
+		rec := httptest.NewRecorder()
+		crH.RejectChangeRequest(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("project A rejecting project B's change request: status = %d, want 404; body: %s",
+				rec.Code, rec.Body.String())
+		}
+
+		req = newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crA+"/reject",
+			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crA})
+		rec = httptest.NewRecorder()
+		crH.RejectChangeRequest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("rejecting its own change request: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -431,4 +491,47 @@ func getTestAuditVerify(t *testing.T, h *AuditHandler, projectID string) audit.V
 		t.Fatalf("decode verify response: %v", err)
 	}
 	return report
+}
+
+// createTestChangeRequest inserts a PENDING change_requests row directly —
+// there is no HTTP creation endpoint (real rows are only ever written by
+// background processes: scim.go's detectOrphans and orphan_detector.go) —
+// and returns its generated id.
+func createTestChangeRequest(ctx context.Context, t *testing.T, database *sql.DB, projectID, flagKey string) string {
+	t.Helper()
+	var id string
+	err := database.QueryRowContext(ctx, `
+		INSERT INTO change_requests (flag_key, environment, requested_by, status, change_payload, project_id)
+		VALUES ($1, 'production', 'system', 'PENDING', '{}', $2)
+		RETURNING id
+	`, flagKey, projectID).Scan(&id)
+	if err != nil {
+		t.Fatalf("create test change request: %v", err)
+	}
+	return id
+}
+
+func listTestChangeRequests(t *testing.T, h *ChangeRequestHandler, projectID string) []ChangeRequest {
+	t.Helper()
+	req := newTenancyRequest(t, http.MethodGet, "/api/v1/change-requests", nil, projectID, nil)
+	rec := httptest.NewRecorder()
+	h.ListChangeRequests(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listTestChangeRequests(%s) status = %d, want 200; body: %s", projectID, rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Requests []ChangeRequest `json:"requests"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode change-requests list response: %v", err)
+	}
+	return out.Requests
+}
+
+func assertExactlyOneChangeRequestWithID(t *testing.T, requests []ChangeRequest, wantID string) {
+	t.Helper()
+	if len(requests) != 1 || requests[0].ID != wantID {
+		t.Errorf("expected the list to contain exactly one change request (id %s), got %d: %+v — "+
+			"the other project's change request must not appear here", wantID, len(requests), requests)
+	}
 }

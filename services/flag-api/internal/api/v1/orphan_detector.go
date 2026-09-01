@@ -47,7 +47,7 @@ func (od *OrphanDetector) Run(ctx context.Context) {
 // change_request for each orphaned flag.
 func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 	rows, err := od.db.QueryContext(ctx, `
-		SELECT f.key, f.owner_id
+		SELECT f.key, f.owner_id, f.project_id
 		FROM flags f
 		WHERE f.state = 'ACTIVE'
 		  AND NOT EXISTS (
@@ -64,14 +64,15 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 	defer func() { _ = rows.Close() }()
 
 	type orphan struct {
-		flagKey string
-		ownerID string
+		flagKey   string
+		ownerID   string
+		projectID string
 	}
 
 	var orphans []orphan
 	for rows.Next() {
 		var o orphan
-		if err := rows.Scan(&o.flagKey, &o.ownerID); err != nil {
+		if err := rows.Scan(&o.flagKey, &o.ownerID, &o.projectID); err != nil {
 			od.logger.Error("orphan detector scan", zap.Error(err))
 			continue
 		}
@@ -88,7 +89,7 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 
 	for _, o := range orphans {
 		payload := map[string]string{
-			"reason":     "orphan_detected",
+			"reason":      "orphan_detected",
 			"owner_email": o.ownerID,
 			"detected_at": time.Now().UTC().Format(time.RFC3339),
 		}
@@ -96,9 +97,9 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 
 		_, err := od.db.ExecContext(ctx, `
 			INSERT INTO change_requests
-			    (flag_key, environment, requested_by, status, change_payload)
-			VALUES ($1, 'production', 'system-orphan-detector', 'PENDING', $2)
-		`, o.flagKey, payloadJSON)
+			    (flag_key, environment, requested_by, status, change_payload, project_id)
+			VALUES ($1, 'production', 'system-orphan-detector', 'PENDING', $2, $3)
+		`, o.flagKey, payloadJSON, o.projectID)
 		if err != nil {
 			od.logger.Error("orphan detector create change_request",
 				zap.Error(err),

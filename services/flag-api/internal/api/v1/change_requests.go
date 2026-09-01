@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
@@ -42,6 +43,15 @@ type ChangeRequest struct {
 // Returns up to 100 change requests ordered by created_at DESC.
 // The status query param defaults to "PENDING".
 func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http.Request) {
+	// TEN-1a-3: this had no project filter at all, so any authenticated user
+	// (this route is deliberately reachable by any role — see the SEC-3
+	// exemption in cmd/authz_routes_test.go, unchanged here) could list every
+	// project's pending/approved/rejected change requests and payloads.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	status := r.URL.Query().Get("status")
 	if status == "" {
 		status = "PENDING"
@@ -54,10 +64,10 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 		       EXTRACT(EPOCH FROM created_at)::bigint,
 		       EXTRACT(EPOCH FROM updated_at)::bigint
 		FROM change_requests
-		WHERE status = $1
+		WHERE status = $1 AND project_id = $2
 		ORDER BY created_at DESC
 		LIMIT 100
-	`, status)
+	`, status, projectID)
 	if err != nil {
 		h.logger.Error("list change requests query", zap.Error(err))
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
@@ -69,9 +79,15 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 	for rows.Next() {
 		var cr ChangeRequest
 		var approvedBy []string
+		// approved_by is a Postgres TEXT[]; lib/pq only converts that to a Go
+		// []string through pq.Array — scanning directly into &approvedBy (as
+		// this did before) fails on every row with "unsupported Scan", so the
+		// row is silently dropped by the continue below and this endpoint has
+		// never actually returned anything. Found by TEN-1a-3's tenancy test,
+		// which is the first thing to ever exercise this against real rows.
 		if scanErr := rows.Scan(
 			&cr.ID, &cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.Status,
-			&cr.ChangePayload, &approvedBy,
+			&cr.ChangePayload, pq.Array(&approvedBy),
 			&cr.RejectedBy, &cr.RejectionReason,
 			&cr.CreatedAt, &cr.UpdatedAt,
 		); scanErr != nil {
@@ -95,6 +111,15 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 // Body: { "approved_by": string }
 func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	// TEN-1a-3: this matched id alone — a caller who learned another
+	// project's change_request id (e.g. via the ListChangeRequests leak this
+	// same fix closes) could approve a mutation of a flag they have no role in.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		ApprovedBy string `json:"approved_by"`
 	}
@@ -109,8 +134,8 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 		SET status      = 'APPROVED',
 		    approved_by = array_append(COALESCE(approved_by, '{}'), $1),
 		    updated_at  = $2
-		WHERE id = $3 AND status = 'PENDING'
-	`, body.ApprovedBy, now, id)
+		WHERE id = $3 AND status = 'PENDING' AND project_id = $4
+	`, body.ApprovedBy, now, id, projectID)
 	if err != nil {
 		h.logger.Error("approve change request", zap.String("id", id), zap.Error(err))
 		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
@@ -129,6 +154,13 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 // Body: { "rejected_by": string, "reason": string }
 func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	// TEN-1a-3: same cross-project fix as ApproveChangeRequest above.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		RejectedBy string `json:"rejected_by"`
 		Reason     string `json:"reason"`
@@ -145,8 +177,8 @@ func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *htt
 		    rejected_by      = $1,
 		    rejection_reason = $2,
 		    updated_at       = $3
-		WHERE id = $4 AND status = 'PENDING'
-	`, body.RejectedBy, body.Reason, now, id)
+		WHERE id = $4 AND status = 'PENDING' AND project_id = $5
+	`, body.RejectedBy, body.Reason, now, id, projectID)
 	if err != nil {
 		h.logger.Error("reject change request", zap.String("id", id), zap.Error(err))
 		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
