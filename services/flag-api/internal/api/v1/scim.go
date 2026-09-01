@@ -309,9 +309,9 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 
 		_, err := h.db.ExecContext(ctx, `
 			INSERT INTO change_requests
-			    (flag_key, environment, requested_by, status, change_payload)
-			VALUES ($1, 'production', 'system', 'PENDING', $2)
-		`, f.key, payloadJSON)
+			    (flag_key, environment, requested_by, status, change_payload, project_id)
+			VALUES ($1, 'production', 'system', 'PENDING', $2, $3)
+		`, f.key, payloadJSON, f.projectID)
 		if err != nil {
 			h.logger.Error("scim create change_request", zap.Error(err),
 				zap.String("flag_key", f.key))
