@@ -243,12 +243,16 @@ jobs:
           PGPASSWORD: tombstone
           TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
         run: |
-          go build ./cmd/migrate ./internal/db/ ./internal/audit/
+          go build ./cmd/migrate ./internal/db/ ./internal/audit/ ./internal/api/v1/
           # SEPARATE, SEQUENTIAL invocations on purpose. `go test` runs different
-          # packages in PARALLEL, and both suites share this one database:
+          # packages in PARALLEL, and all three suites share this one database:
           # internal/db asserts a FRESH apply of every migration, so it must see a
-          # pristine DB and must run BEFORE internal/audit, whose fixture calls
-          # Migrate. A single combined invocation raced and applied the schema out
-          # from under the migration test. Do not merge these back into one line.
+          # pristine DB and must run BEFORE the others, whose fixtures call Migrate
+          # (idempotent, but only correct to run against an already-baselined DB).
+          # A single combined invocation raced and applied the schema out from
+          # under the migration test. Do not merge these back into one line.
           go test ./internal/db/ -v
           go test ./internal/audit/ -v
+          # TEN-1a: proves cross-tenant isolation against a real Postgres — same
+          # key created in two different projects, every handler checked for leaks.
+          go test ./internal/api/v1/ -run TestTenancyIsolation -v

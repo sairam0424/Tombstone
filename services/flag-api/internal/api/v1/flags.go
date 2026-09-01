@@ -62,7 +62,6 @@ type CreateFlagRequest struct {
 	Description string `json:"description"`
 	FlagType    string `json:"flag_type"`
 	OwnerID     string `json:"owner_id"`
-	ProjectID   string `json:"project_id"`
 	SafeDefault string `json:"safe_default"`
 }
 
@@ -103,9 +102,12 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // ListFlags handles GET /api/v1/flags
 func (h *FlagHandler) ListFlags(w http.ResponseWriter, r *http.Request) {
-	projectID := r.URL.Query().Get("project_id")
-	if projectID == "" {
-		projectID = "00000000-0000-0000-0000-000000000001"
+	// TEN-1a: project_id was previously a client-supplied query param, so any
+	// caller could list any other project's flags by naming its UUID. It is
+	// now the tenant resolved from the caller's own identity.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
 	}
 
 	rows, err := h.db.QueryContext(r.Context(), `
@@ -152,14 +154,26 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid flag_type %q: must be one of BOOLEAN, STRING, INTEGER, FLOAT, JSON", req.FlagType))
 		return
 	}
-	if req.ProjectID == "" {
-		req.ProjectID = "00000000-0000-0000-0000-000000000001"
-	}
 	if req.SafeDefault == "" {
 		req.SafeDefault = "false"
 	}
 
-	// Check tombstone at service layer (DB trigger also enforces this)
+	// TEN-1a: a flag is always created in the caller's own resolved project —
+	// CreateFlagRequest no longer accepts project_id at all (it defaulted to a
+	// hardcoded UUID before, and a caller who did supply one could create
+	// flags directly inside any project they could name).
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	// Check tombstone at service layer (DB trigger also enforces this).
+	// flag_tombstones is DELIBERATELY global, not project-scoped: the Knight
+	// Capital prevention this table exists for is "this exact key string must
+	// never be reused, anywhere, once retired" — scoping it per-project would
+	// let a different project silently reuse a key another project already
+	// archived, which is precisely the fat-finger-reuse risk it exists to
+	// close. This is a conscious TEN-1a decision, not an oversight.
 	var exists bool
 	_ = h.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM flag_tombstones WHERE key=$1)`, req.Key).Scan(&exists)
 	if exists {
@@ -174,7 +188,7 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1,$2,$3,$4,$5,'ACTIVE',$6,$7)
 		RETURNING id, key, project_id, name, description, flag_type, state, owner_id, safe_default,
 		          EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-	`, req.Key, req.ProjectID, req.Name, req.Description, req.FlagType, req.OwnerID, req.SafeDefault).
+	`, req.Key, projectID, req.Name, req.Description, req.FlagType, req.OwnerID, req.SafeDefault).
 		Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description, &f.FlagType, &f.State,
 			&f.OwnerID, &f.SafeDefault, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
@@ -198,12 +212,21 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 // GetFlag handles GET /api/v1/flags/{key}
 func (h *FlagHandler) GetFlag(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
+
+	// TEN-1a: this query had NO project filter at all — key alone, and
+	// flags.key is only unique per (project_id, key) — so any authenticated
+	// caller could read any OTHER project's flag by guessing/knowing its key.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var f Flag
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT id, key, project_id, name, description, flag_type, state, owner_id, safe_default,
 		       EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-		FROM flags WHERE key=$1
-	`, key).Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description, &f.FlagType, &f.State,
+		FROM flags WHERE key=$1 AND project_id=$2
+	`, key, projectID).Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description, &f.FlagType, &f.State,
 		&f.OwnerID, &f.SafeDefault, &f.CreatedAt, &f.UpdatedAt)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "flag not found")
@@ -220,6 +243,14 @@ func (h *FlagHandler) GetFlag(w http.ResponseWriter, r *http.Request) {
 func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	env := chi.URLParam(r, "env")
+
+	// TEN-1a: both the prev-state read and the UPDATE below matched on key
+	// alone, so an operator in one project could flip rollout%/enabled for
+	// another project's flag if it happened to share a key.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
 
 	// Inject flag state into the active trace span.
 	span := trace.SpanFromContext(r.Context())
@@ -248,14 +279,14 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		SELECT fe.flag_id, f.key, fe.environment, fe.enabled, fe.rollout_pct, f.safe_default,
 		       EXTRACT(EPOCH FROM fe.updated_at)::bigint
 		FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key=$1 AND fe.environment=$2
-	`, key, env).Scan(&prev.FlagID, &prev.FlagKey, &prev.Environment, &prev.Enabled,
+		WHERE f.key=$1 AND fe.environment=$2 AND f.project_id=$3
+	`, key, env, projectID).Scan(&prev.FlagID, &prev.FlagKey, &prev.Environment, &prev.Enabled,
 		&prev.RolloutPct, &prev.SafeDefault, &prev.UpdatedAt)
 
 	res, err := h.db.ExecContext(r.Context(), `
 		UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
-		FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5
-	`, req.Enabled, req.RolloutPct, req.UpdatedBy, key, env)
+		FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
+	`, req.Enabled, req.RolloutPct, req.UpdatedBy, key, env, projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -285,6 +316,14 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 // KillSwitch handles POST /api/v1/flags/{key}/kill
 func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
+
+	// TEN-1a: the UPDATE below matched key alone — an OWNER/ADMIN in one
+	// project could kill a same-keyed flag belonging to a different project.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	type killReq struct {
 		Environment string `json:"environment"`
 		Reason      string `json:"reason"`
@@ -315,8 +354,8 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	actor := actorFromContext(r.Context())
 	res, err := h.db.ExecContext(r.Context(), `
 		UPDATE flag_environments fe SET enabled=false, updated_at=now(), updated_by=$1
-		FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3
-	`, actor, key, req.Environment)
+		FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.project_id=$4
+	`, actor, key, req.Environment, projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -345,6 +384,15 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	actor := actorFromContext(r.Context())
 
+	// TEN-1a: the UPDATE below matched key alone, so archiving a flag in one
+	// project archived EVERY project's flag sharing that key. flag_tombstones
+	// stays global on purpose (see the comment in CreateFlag) — only the
+	// flags row itself needs to be scoped to the caller's project.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -352,9 +400,14 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(r.Context(), `UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1`, key)
+	res, err := tx.ExecContext(r.Context(),
+		`UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2`, key, projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, "flag not found")
 		return
 	}
 	_, err = tx.ExecContext(r.Context(),
@@ -487,6 +540,28 @@ func actorFromContext(ctx context.Context) string {
 		return v
 	}
 	return "unknown"
+}
+
+// projectIDFromContext reads the tenant resolved by RequireProjectID
+// (TEN-1a). Every route in this package runs behind that middleware, so a
+// missing value here means the route is misconfigured, not that the caller
+// is anonymous — callers must not fall back to any default project.
+func projectIDFromContext(ctx context.Context) (string, bool) {
+	return middleware.ProjectIDFromContext(ctx)
+}
+
+// requireProjectID is the shared guard every handler in this package opens
+// with. It exists so a routing mistake (RequireProjectID missing from some
+// future route) fails loudly as a 500, instead of a handler silently
+// querying without a tenant filter — which is exactly how the pre-TEN-1a
+// cross-tenant reads and writes happened.
+func requireProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	projectID, ok := projectIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "no project resolved for this request")
+		return "", false
+	}
+	return projectID, true
 }
 
 func ipFromRequest(r *http.Request) string {

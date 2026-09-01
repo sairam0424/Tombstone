@@ -62,9 +62,10 @@ func (a *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 		}
 
 		// Fallback: service token lookup
-		if actor, role, ok := a.validateServiceToken(r.Context(), token); ok {
+		if actor, role, projectID, ok := a.validateServiceToken(r.Context(), token); ok {
 			ctx := context.WithValue(r.Context(), ContextKeyActor, actor)
 			ctx = context.WithValue(ctx, ContextKeyServiceRole, role)
+			ctx = context.WithValue(ctx, ContextKeyServiceProjectID, projectID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -94,29 +95,30 @@ func (a *AuthMiddleware) validateJWT(tokenStr string) (string, bool) {
 	return sub, true
 }
 
-// validateServiceToken resolves a service token to its actor identity and the
-// role granted to that specific token. Returns (actor, role, ok).
+// validateServiceToken resolves a service token to its actor identity, the
+// role granted to that specific token, and the project it is scoped to.
+// Returns (actor, role, projectID, ok).
 //
 // A token with no usable role falls back to VIEWER (read-only) rather than to a
 // writable role: an unrecognized or missing role must never widen access.
-func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string) (string, Role, bool) {
+func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string) (string, Role, string, bool) {
 	// SEC-4: tokens are stored as HMAC(pepper, token), never as plaintext, so the
 	// lookup is by hash. A missing hasher must reject rather than fall back to a
 	// plaintext comparison, which would defeat hashing entirely.
 	if a.hasher == nil {
-		return "", "", false
+		return "", "", "", false
 	}
-	var name, role string
+	var name, role, projectID string
 	err := a.db.QueryRowContext(ctx, `
-		SELECT name, role FROM service_tokens
+		SELECT name, role, project_id FROM service_tokens
 		WHERE token_hash=$1 AND revoked_at IS NULL
-	`, a.hasher.Hash(token)).Scan(&name, &role)
+	`, a.hasher.Hash(token)).Scan(&name, &role, &projectID)
 	if err != nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	resolved := Role(role)
 	if _, known := permissionMatrix[resolved]; !known {
 		resolved = RoleViewer
 	}
-	return "sdk:" + name, resolved, true
+	return "sdk:" + name, resolved, projectID, true
 }

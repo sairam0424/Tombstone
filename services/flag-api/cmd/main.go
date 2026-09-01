@@ -184,6 +184,11 @@ func main() {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authMw.Authenticate)
+		// TEN-1a: resolves and validates which project this request is for,
+		// BEFORE LoadRole — role resolution needs project_id to pick the right
+		// user_roles row (that table is keyed by (user_id, project_id), so a
+		// user with roles in more than one project is otherwise ambiguous).
+		r.Use(rbacMw.RequireProjectID)
 		r.Use(rbacMw.LoadRole)
 
 		// SEC-1: EVERY route below carries an explicit RequirePermission gate.

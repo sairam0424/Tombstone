@@ -341,9 +341,21 @@ func (r *RBACMiddleware) resolveRole(ctx context.Context, actor string) Role {
 		}
 		return RoleViewer
 	}
+
+	// user_roles' primary key is (user_id, project_id) — a user can hold
+	// different roles in different projects. Querying by user_id alone (as
+	// this did before TEN-1a) is nondeterministic whenever a user belongs to
+	// more than one project: Postgres returns SOME row with no defined
+	// ordering, so which project's role applies could vary request to
+	// request. RequireProjectID runs before LoadRole precisely so a specific,
+	// validated project_id is available here.
+	projectID, ok := ProjectIDFromContext(ctx)
+	if !ok {
+		return RoleViewer // no resolved project => least privilege, never a guess
+	}
 	var role string
 	err := r.db.QueryRowContext(ctx,
-		"SELECT role FROM user_roles WHERE user_id = $1", actor).Scan(&role)
+		"SELECT role FROM user_roles WHERE user_id = $1 AND project_id = $2", actor, projectID).Scan(&role)
 	if err != nil {
 		return RoleViewer // default to least privilege
 	}

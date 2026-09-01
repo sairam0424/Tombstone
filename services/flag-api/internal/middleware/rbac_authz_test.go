@@ -186,6 +186,7 @@ func TestResolveRoleServiceTokenUsesPerTokenRole(t *testing.T) {
 }
 
 func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
+	const wantProjectID = "11111111-1111-1111-1111-111111111111"
 	cases := []struct {
 		name      string
 		dbRole    string
@@ -208,12 +209,13 @@ func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
 
 			hasher := testHasher(t)
 			// SEC-4: the query must present the HASH, never the plaintext token.
-			mock.ExpectQuery("SELECT name, role FROM service_tokens").
+			mock.ExpectQuery("SELECT name, role, project_id FROM service_tokens").
 				WithArgs(hasher.Hash("tok-123")).
-				WillReturnRows(sqlmock.NewRows([]string{"name", "role"}).AddRow("gitops-sync", c.dbRole))
+				WillReturnRows(sqlmock.NewRows([]string{"name", "role", "project_id"}).
+					AddRow("gitops-sync", c.dbRole, wantProjectID))
 
 			auth := NewAuthMiddleware(db, "secret", hasher)
-			actor, role, ok := auth.validateServiceToken(context.Background(), "tok-123")
+			actor, role, projectID, ok := auth.validateServiceToken(context.Background(), "tok-123")
 
 			if !ok {
 				t.Fatal("expected token to validate")
@@ -223,6 +225,11 @@ func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
 			}
 			if role != c.wantRole {
 				t.Errorf("role = %s, want %s", role, c.wantRole)
+			}
+			// TEN-1a: a service token is scoped to exactly one project — the
+			// row's project_id, never client-suppliable.
+			if projectID != wantProjectID {
+				t.Errorf("projectID = %q, want %q", projectID, wantProjectID)
 			}
 		})
 	}
@@ -237,17 +244,17 @@ func TestValidateServiceTokenRejectsUnknownOrRevoked(t *testing.T) {
 
 	// Revoked/absent tokens produce no rows — the query filters revoked_at.
 	hasher := testHasher(t)
-	mock.ExpectQuery("SELECT name, role FROM service_tokens").
+	mock.ExpectQuery("SELECT name, role, project_id FROM service_tokens").
 		WithArgs(hasher.Hash("revoked")).
 		WillReturnError(sql.ErrNoRows)
 
 	auth := NewAuthMiddleware(db, "secret", hasher)
-	actor, role, ok := auth.validateServiceToken(context.Background(), "revoked")
+	actor, role, projectID, ok := auth.validateServiceToken(context.Background(), "revoked")
 
 	if ok {
 		t.Fatal("revoked token must not validate")
 	}
-	if actor != "" || role != "" {
-		t.Errorf("expected empty actor/role on failure, got %q/%s", actor, role)
+	if actor != "" || role != "" || projectID != "" {
+		t.Errorf("expected empty actor/role/projectID on failure, got %q/%s/%q", actor, role, projectID)
 	}
 }
