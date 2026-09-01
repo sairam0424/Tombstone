@@ -222,7 +222,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	// Write audit log entry.
 	prev := map[string]any{"enabled": curEnabled, "rollout_pct": curRollout}
 	curr := map[string]any{"enabled": newEnabled, "rollout_pct": newRollout, "scheduled_change_id": pc.id}
-	writeAudit(ctx, auditW, log, pc.flagKey, pc.environment, "scheduler",
+	writeAudit(ctx, auditW, log, projectID, pc.flagKey, pc.environment, "scheduler",
 		"scheduled_change_applied", prev, curr)
 
 	// Publish Redis event on the same channel as manual updates.
@@ -398,7 +398,7 @@ func publishToStream(ctx context.Context, rdb *redis.Client, log *zap.Logger, en
 // writeAudit inserts an append-only audit log entry with Merkle hash linking.
 // Mirrors the logic in v1.FlagHandler.writeAudit.
 func writeAudit(ctx context.Context, auditW *audit.Writer, log *zap.Logger,
-	flagKey, env, actor, eventType string, prev, curr any) {
+	projectID, flagKey, env, actor, eventType string, prev, curr any) {
 
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
@@ -418,6 +418,7 @@ func writeAudit(ctx context.Context, auditW *audit.Writer, log *zap.Logger,
 		EventType:   eventType,
 		PrevState:   prevJSON,
 		NewState:    currJSON,
+		ProjectID:   projectID,
 	}); err != nil {
 		log.Warn("scheduler: audit log write failed", zap.Error(err))
 	}

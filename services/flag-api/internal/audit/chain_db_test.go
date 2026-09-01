@@ -51,7 +51,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			}
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -82,7 +82,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -119,13 +119,75 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("concurrent append failed: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
 		if report.FailureCount != 0 {
 			t.Fatalf("chain forked under %d concurrent writers: %d failure(s): %+v",
 				writers, report.FailureCount, report.Failures)
+		}
+	})
+
+	// TEN-1a-2: flags.key is unique only per (project_id, key), so two
+	// projects can legitimately have a flag with the identical key string.
+	// Before this fix, Append's chain-tip lookup matched flag_key alone, so
+	// project B's entry below would have linked its prev_hash to project A's
+	// tip — merging two tenants' audit trails into one chain.
+	t.Run("chains with the same flag_key in different projects do not fork each other", func(t *testing.T) {
+		const projectA = "aud1-tenant-a"
+		const projectB = "aud1-tenant-b"
+		const sharedKey = "aud1-shared-key"
+
+		eA := sampleEntry()
+		eA.FlagKey = sharedKey
+		eA.ProjectID = projectA
+		if _, _, err := w.Append(ctx, eA); err != nil {
+			t.Fatalf("append to project A: %v", err)
+		}
+
+		eB := sampleEntry()
+		eB.FlagKey = sharedKey
+		eB.ProjectID = projectB
+		if _, _, err := w.Append(ctx, eB); err != nil {
+			t.Fatalf("append to project B: %v", err)
+		}
+
+		var prevHashB sql.NullString
+		if err := database.QueryRowContext(ctx, `
+			SELECT prev_hash FROM audit_log
+			WHERE flag_key=$1 AND project_id=$2
+			ORDER BY created_at ASC LIMIT 1
+		`, sharedKey, projectB).Scan(&prevHashB); err != nil {
+			t.Fatalf("read project B's first entry: %v", err)
+		}
+		if prevHashB.Valid && prevHashB.String != "" {
+			t.Fatalf("project B's first entry for a key project A also has must start its OWN chain "+
+				"(prev_hash NULL), got prev_hash=%q — the chains forked", prevHashB.String)
+		}
+
+		reportA, err := w.Verify(ctx, projectA)
+		if err != nil {
+			t.Fatalf("verify project A: %v", err)
+		}
+		if reportA.FailureCount != 0 {
+			t.Fatalf("project A reports tampering it does not have: %+v", reportA.Failures)
+		}
+		if reportA.TotalEntries != 1 {
+			t.Errorf("project A TotalEntries = %d, want exactly 1 (project B's entry must not be counted)",
+				reportA.TotalEntries)
+		}
+
+		reportB, err := w.Verify(ctx, projectB)
+		if err != nil {
+			t.Fatalf("verify project B: %v", err)
+		}
+		if reportB.FailureCount != 0 {
+			t.Fatalf("project B reports tampering it does not have: %+v", reportB.Failures)
+		}
+		if reportB.TotalEntries != 1 {
+			t.Errorf("project B TotalEntries = %d, want exactly 1 (project A's entry must not be counted)",
+				reportB.TotalEntries)
 		}
 	})
 
@@ -138,7 +200,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("insert legacy row: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -166,7 +228,7 @@ func TestChainAgainstPostgres(t *testing.T) {
 			t.Fatalf("insert forged row: %v", err)
 		}
 
-		report, err := w.Verify(ctx)
+		report, err := w.Verify(ctx, "")
 		if err != nil {
 			t.Fatalf("verify: %v", err)
 		}

@@ -130,7 +130,7 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 		evidence["merkle_chain_integrity"] = nil
 		evidence["audit_log_coverage"] = nil
 		evidence["merkle_chain_note"] = "AUDIT_HMAC_KEY is not configured — chain integrity cannot be computed and is NOT asserted"
-	} else if report, err := h.audit.Verify(ctx); err != nil {
+	} else if report, err := h.audit.Verify(ctx, ""); err != nil { // "" = whole-log, cross-project figure by design
 		h.logger.Error("compliance: audit verification failed", zap.Error(err))
 		evidence["merkle_chain_integrity"] = nil
 		evidence["audit_log_coverage"] = nil

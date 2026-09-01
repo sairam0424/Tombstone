@@ -93,6 +93,26 @@ func TestCanonicalCoversEveryField(t *testing.T) {
 	}
 }
 
+// TestCanonicalDoesNotHashProjectID documents a deliberate choice (TEN-1a-2),
+// not an oversight: ProjectID scopes reads/chain grouping but is set
+// exclusively by server-side code from validated context, never client
+// input, so it does not need cryptographic commitment the way attacker-
+// reachable fields do. Keeping it out of canonical() also means every
+// entry_hash already written before this field existed remains valid and
+// reproducible under the unchanged formula — changing this would be a
+// backward-incompatible hash-format change, exactly the kind of risk this
+// test exists to catch if someone "fixes" it later without re-deriving why.
+func TestCanonicalDoesNotHashProjectID(t *testing.T) {
+	base := sampleEntry()
+	baseHash := testKey(t).Sum(canonical("id-1", base, fixedTime, "prev"))
+
+	mutated := base
+	mutated.ProjectID = "some-other-project"
+	if got := testKey(t).Sum(canonical("id-1", mutated, fixedTime, "prev")); got != baseHash {
+		t.Error("canonical() must not hash ProjectID — see the comment on Entry.ProjectID for why")
+	}
+}
+
 // TestCanonicalIsMicrosecondQuantized pins a real bug that shipped past all the
 // in-memory tests above and was caught only by TestChainAgainstPostgres:
 // created_at is a timestamptz, which stores MICROSECONDS, but the encoding used
