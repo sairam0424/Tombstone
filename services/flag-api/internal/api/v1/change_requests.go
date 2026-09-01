@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
@@ -78,9 +79,15 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 	for rows.Next() {
 		var cr ChangeRequest
 		var approvedBy []string
+		// approved_by is a Postgres TEXT[]; lib/pq only converts that to a Go
+		// []string through pq.Array — scanning directly into &approvedBy (as
+		// this did before) fails on every row with "unsupported Scan", so the
+		// row is silently dropped by the continue below and this endpoint has
+		// never actually returned anything. Found by TEN-1a-3's tenancy test,
+		// which is the first thing to ever exercise this against real rows.
 		if scanErr := rows.Scan(
 			&cr.ID, &cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.Status,
-			&cr.ChangePayload, &approvedBy,
+			&cr.ChangePayload, pq.Array(&approvedBy),
 			&cr.RejectedBy, &cr.RejectionReason,
 			&cr.CreatedAt, &cr.UpdatedAt,
 		); scanErr != nil {
