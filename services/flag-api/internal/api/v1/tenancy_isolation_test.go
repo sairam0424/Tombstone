@@ -227,6 +227,33 @@ func TestTenancyIsolation(t *testing.T) {
 		}
 	})
 
+	// RejectChangeRequest carries the identical project_id guard as
+	// ApproveChangeRequest (added in the same commit) but was never exercised
+	// by the subtest above — an adversarial review flagged that a regression
+	// dropping this guard specifically would go uncaught. Fresh change
+	// requests: the ones above are no longer PENDING after being approved.
+	t.Run("RejectChangeRequest never crosses projects", func(t *testing.T) {
+		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey)
+		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey)
+
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crB+"/reject",
+			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crB})
+		rec := httptest.NewRecorder()
+		crH.RejectChangeRequest(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("project A rejecting project B's change request: status = %d, want 404; body: %s",
+				rec.Code, rec.Body.String())
+		}
+
+		req = newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crA+"/reject",
+			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crA})
+		rec = httptest.NewRecorder()
+		crH.RejectChangeRequest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("rejecting its own change request: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("AddPrerequisite rejects a prereq_flag_key that only exists in another project", func(t *testing.T) {
 		onlyInB := createTestFlag(t, flagH, projectB, "ten1a-only-in-b")
 
