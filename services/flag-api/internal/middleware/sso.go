@@ -2,7 +2,10 @@ package middleware
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -42,6 +45,13 @@ const oidcDiscoveryTimeout = 10 * time.Second
 // JWKS endpoints with no backoff at all.
 const jwksInitCooldown = 5 * time.Second
 
+// oauthSessionCookieName/oauthSessionMaxAge bound the lifetime of a single
+// in-flight login attempt's CSRF state, OIDC nonce, and PKCE verifier.
+const (
+	oauthSessionCookieName = "tombstone_oauth_session"
+	oauthSessionMaxAge     = 10 * time.Minute
+)
+
 // SSOMiddleware handles OIDC/SAML SSO flows.
 type SSOMiddleware struct {
 	config    SSOConfig
@@ -78,10 +88,39 @@ func NewSSOMiddleware(config SSOConfig, jwtSecret string, logger *zap.Logger) *S
 }
 
 // LoginHandler redirects the user to the OIDC authorization endpoint.
+//
+// SEC-5: state was previously generated but never validated on callback —
+// generateState()'s only caller wrote it into the redirect and nothing ever
+// read it back, so /auth/callback would accept a code+state pair regardless
+// of whether this server ever issued that state. That is a CSRF hole in the
+// classic OAuth sense: an attacker who starts their own login flow can hand
+// the resulting authorization code (and any state string) to a victim and
+// have the victim's browser complete it, binding the victim's session to
+// the attacker's IdP account. This now stores state (plus a PKCE verifier
+// and OIDC nonce) in a short-lived, HttpOnly, SameSite=Lax cookie that
+// CallbackHandler must match before doing anything else.
 func (s *SSOMiddleware) LoginHandler(w http.ResponseWriter, r *http.Request) {
-	state, err := s.generateState()
+	state, err := generateRandomHexToken(16)
 	if err != nil {
 		s.logger.Error("sso: failed to generate state", zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	nonce, err := generateRandomHexToken(16)
+	if err != nil {
+		s.logger.Error("sso: failed to generate nonce", zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	verifier, err := generatePKCEVerifier()
+	if err != nil {
+		s.logger.Error("sso: failed to generate pkce verifier", zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.setOAuthSessionCookie(w, oauthSession{State: state, Nonce: nonce, Verifier: verifier}); err != nil {
+		s.logger.Error("sso: failed to set oauth session cookie", zap.Error(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -92,15 +131,115 @@ func (s *SSOMiddleware) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	params.Set("response_type", "code")
 	params.Set("scope", "openid email")
 	params.Set("state", state)
+	params.Set("nonce", nonce)
+	// PKCE (RFC 7636): binds the authorization code to whoever holds
+	// `verifier`, so a code intercepted in transit (e.g. via a leaky
+	// redirect_uri, browser history, or a referrer header) can't be
+	// redeemed by anyone but this server.
+	params.Set("code_challenge", pkceChallengeS256(verifier))
+	params.Set("code_challenge_method", "S256")
 
 	authorizeURL := strings.TrimRight(s.config.OIDCIssuer, "/") + "/oauth/authorize?" + params.Encode()
 
 	s.logger.Info("sso: redirecting to authorization endpoint",
 		zap.String("provider", s.config.Provider),
-		zap.String("state", state),
 	)
 
 	http.Redirect(w, r, authorizeURL, http.StatusFound)
+}
+
+// oauthSession is the CSRF state, OIDC nonce, and PKCE verifier for a single
+// in-flight login attempt. All three are server-generated randomness with
+// no meaning to the client — tampering with the cookie can only make
+// validation fail, never succeed, so no separate signature over the cookie
+// value is needed.
+type oauthSession struct {
+	State    string `json:"state"`
+	Nonce    string `json:"nonce"`
+	Verifier string `json:"verifier"`
+}
+
+func (s *SSOMiddleware) setOAuthSessionCookie(w http.ResponseWriter, sess oauthSession) error {
+	raw, err := json.Marshal(sess)
+	if err != nil {
+		return fmt.Errorf("marshal oauth session: %w", err)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthSessionCookieName,
+		Value:    base64.RawURLEncoding.EncodeToString(raw),
+		Path:     "/auth",
+		MaxAge:   int(oauthSessionMaxAge.Seconds()),
+		HttpOnly: true,
+		Secure:   isSecureCallbackURL(s.config.CallbackURL),
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
+// consumeOAuthSessionCookie reads the login attempt's session cookie and
+// immediately expires it client-side — hygiene, so a stale single-purpose
+// cookie doesn't linger in the browser past the login attempt it was
+// generated for. The actual CSRF protection is the state comparison against
+// this cookie's contents, not the expiry itself: expiry is not a
+// server-side revocation, so a party that already possesses the raw cookie
+// value (which HttpOnly keeps out of reach of any XSS on this origin) could
+// still replay it — but a party in that position could equally well use the
+// resulting Tombstone JWT directly.
+func (s *SSOMiddleware) consumeOAuthSessionCookie(w http.ResponseWriter, r *http.Request) (*oauthSession, error) {
+	cookie, err := r.Cookie(oauthSessionCookieName)
+	if err != nil {
+		return nil, fmt.Errorf("read oauth session cookie: %w", err)
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthSessionCookieName,
+		Value:    "",
+		Path:     "/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isSecureCallbackURL(s.config.CallbackURL),
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		return nil, fmt.Errorf("decode oauth session cookie: %w", err)
+	}
+	var sess oauthSession
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		return nil, fmt.Errorf("unmarshal oauth session cookie: %w", err)
+	}
+	if sess.State == "" || sess.Nonce == "" || sess.Verifier == "" {
+		return nil, fmt.Errorf("incomplete oauth session cookie")
+	}
+	return &sess, nil
+}
+
+// isSecureCallbackURL reports whether the OAuth session cookie should carry
+// the Secure flag. Required for any real deployment (CallbackURL is https);
+// relaxed for http so local/CI testing works without standing up TLS —
+// Secure cookies are silently dropped by browsers over plain http anyway,
+// so this only ever narrows, never widens, what a real deployment gets.
+func isSecureCallbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "https"
+}
+
+// generatePKCEVerifier produces a PKCE code_verifier per RFC 7636: 32 random
+// bytes, base64url-encoded (43 characters, all within RFC 7636's unreserved
+// character set).
+func generatePKCEVerifier() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate pkce verifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// pkceChallengeS256 derives the PKCE code_challenge for the S256 method.
+func pkceChallengeS256(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // tokenResponse is the JSON body returned by the OIDC token endpoint.
@@ -118,23 +257,36 @@ type oidcDiscoveryDocument struct {
 }
 
 // CallbackHandler handles the OIDC authorization code callback.
-// It exchanges the code for tokens, validates the email domain, and issues a
-// Tombstone JWT.
+// It validates the CSRF state, exchanges the code for tokens (via PKCE),
+// validates the email domain, and issues a Tombstone JWT.
 func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.consumeOAuthSessionCookie(w, r)
+	if err != nil {
+		s.logger.Warn("sso: missing or invalid oauth session cookie", zap.Error(err))
+		http.Error(w, "invalid or expired login attempt, please try again", http.StatusBadRequest)
+		return
+	}
+
+	if !hmac.Equal([]byte(r.URL.Query().Get("state")), []byte(sess.State)) {
+		s.logger.Warn("sso: state parameter mismatch")
+		http.Error(w, "invalid state parameter", http.StatusForbidden)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing authorization code", http.StatusBadRequest)
 		return
 	}
 
-	tokenResp, err := s.exchangeCode(code)
+	tokenResp, err := s.exchangeCode(code, sess.Verifier)
 	if err != nil {
 		s.logger.Error("sso: token exchange failed", zap.Error(err))
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
 
-	email, err := s.verifyIDTokenAndExtractEmail(r.Context(), tokenResp.IDToken)
+	email, err := s.verifyIDTokenAndExtractEmail(r.Context(), tokenResp.IDToken, sess.Nonce)
 	if err != nil {
 		s.logger.Error("sso: id_token verification failed", zap.Error(err))
 		http.Error(w, "invalid id_token", http.StatusBadGateway)
@@ -163,9 +315,9 @@ func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// exchangeCode posts the authorization code to the OIDC token endpoint and
-// returns the parsed token response.
-func (s *SSOMiddleware) exchangeCode(code string) (*tokenResponse, error) {
+// exchangeCode posts the authorization code (plus its PKCE verifier) to the
+// OIDC token endpoint and returns the parsed token response.
+func (s *SSOMiddleware) exchangeCode(code, codeVerifier string) (*tokenResponse, error) {
 	tokenURL := strings.TrimRight(s.config.OIDCIssuer, "/") + "/oauth/token"
 
 	params := url.Values{}
@@ -173,6 +325,7 @@ func (s *SSOMiddleware) exchangeCode(code string) (*tokenResponse, error) {
 	params.Set("code", code)
 	params.Set("redirect_uri", s.config.CallbackURL)
 	params.Set("client_id", s.config.OIDCClientID)
+	params.Set("code_verifier", codeVerifier)
 
 	resp, err := http.PostForm(tokenURL, params)
 	if err != nil {
@@ -208,7 +361,7 @@ func (s *SSOMiddleware) exchangeCode(code string) (*tokenResponse, error) {
 // authenticated. This now cryptographically verifies the token was signed
 // by a key the configured issuer actually publishes, for this exact client
 // (aud) and issuer (iss), before trusting anything in it.
-func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToken string) (string, error) {
+func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToken, expectedNonce string) (string, error) {
 	keySet, err := s.jwks(ctx)
 	if err != nil {
 		return "", fmt.Errorf("fetch issuer jwks: %w", err)
@@ -247,6 +400,20 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 	// and treating absence as untrusted would break those.
 	if verified, present := emailVerifiedClaim(tok); present && !verified {
 		return "", fmt.Errorf("id_token email is not verified by issuer")
+	}
+
+	// nonce binds this ID token to the specific authorization request that
+	// this server initiated (via LoginHandler) — without it, a token issued
+	// for a different, unrelated login attempt (e.g. one an attacker
+	// started themselves) would otherwise be indistinguishable from a
+	// legitimate response to THIS callback, as long as it carries a valid
+	// signature and matching iss/aud.
+	var nonce string
+	if err := tok.Get("nonce", &nonce); err != nil || nonce == "" {
+		return "", fmt.Errorf("id_token missing nonce claim")
+	}
+	if !hmac.Equal([]byte(nonce), []byte(expectedNonce)) {
+		return "", fmt.Errorf("id_token nonce does not match this login attempt")
 	}
 
 	return email, nil
@@ -407,12 +574,12 @@ func (s *SSOMiddleware) isAllowedDomain(email string) bool {
 	return false
 }
 
-// generateState produces a cryptographically-random 16-byte hex string for use
-// as the OAuth2 state parameter.
-func (s *SSOMiddleware) generateState() (string, error) {
-	b := make([]byte, 16)
+// generateRandomHexToken produces a cryptographically-random n-byte hex
+// string, used for both the OAuth2 state and OIDC nonce parameters.
+func generateRandomHexToken(n int) (string, error) {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate random state: %w", err)
+		return "", fmt.Errorf("generate random token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }
