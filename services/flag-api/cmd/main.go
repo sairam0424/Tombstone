@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -297,11 +298,27 @@ func main() {
 	})
 
 	if ssoProvider := os.Getenv("SSO_PROVIDER"); ssoProvider != "" {
+		// SEC-5: SSOConfig.AllowedDomains has always been read and enforced by
+		// isAllowedDomain — it was just never populated here, so every
+		// deployment's domain allowlist silently had zero effect and any
+		// successfully-authenticated OIDC user from any domain could log in.
+		rawAllowedDomains := os.Getenv("SSO_ALLOWED_DOMAINS")
+		allowedDomains := splitCommaList(rawAllowedDomains)
+		if rawAllowedDomains != "" && len(allowedDomains) == 0 {
+			// The var is SET but parses to zero domains (e.g. a lone space or
+			// comma from a config-templating mistake) — this is
+			// indistinguishable from "unset" to isAllowedDomain, silently
+			// reopening the exact gap this fix exists to close. Warn loudly
+			// rather than booting into a fail-open state with no signal.
+			logger.Warn("SSO_ALLOWED_DOMAINS is set but contains no usable domains — SSO login will accept ANY domain",
+				zap.String("raw_value", rawAllowedDomains))
+		}
 		ssoMw := middleware.NewSSOMiddleware(middleware.SSOConfig{
-			Provider:     ssoProvider,
-			OIDCIssuer:   os.Getenv("OIDC_ISSUER"),
-			OIDCClientID: os.Getenv("OIDC_CLIENT_ID"),
-			CallbackURL:  os.Getenv("SSO_CALLBACK_URL"),
+			Provider:       ssoProvider,
+			OIDCIssuer:     os.Getenv("OIDC_ISSUER"),
+			OIDCClientID:   os.Getenv("OIDC_CLIENT_ID"),
+			CallbackURL:    os.Getenv("SSO_CALLBACK_URL"),
+			AllowedDomains: allowedDomains,
 		}, jwtSecret, logger)
 		r.Get("/auth/login", ssoMw.LoginHandler)
 		r.Get("/auth/callback", ssoMw.CallbackHandler)
@@ -371,4 +388,21 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// splitCommaList parses a comma-separated env var into a trimmed,
+// non-empty slice. Returns nil (not enforcing any restriction) for an
+// unset/empty value — matching SSOConfig.AllowedDomains' own documented
+// "empty means unrestricted" contract.
+func splitCommaList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
