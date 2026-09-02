@@ -313,6 +313,22 @@ func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
 		}
 		revokedProjectIDs = append(revokedProjectIDs, projectID)
 	}
+
+	// SEC-5: deprovisioning must also invalidate any JWT already issued to
+	// this email — deleting user_roles above only affects FUTURE
+	// authorization checks; the SSO JWT itself is stateless and stays
+	// cryptographically valid for up to 24h otherwise. Written
+	// unconditionally (even when revokedProjectIDs is empty) so
+	// deprovisioning always forces re-authentication for this identity,
+	// not just when it happened to find roles to delete.
+	if _, err := h.db.ExecContext(ctx, `
+		INSERT INTO user_token_watermarks (user_email, valid_after)
+		VALUES (lower($1), now())
+		ON CONFLICT (user_email) DO UPDATE SET valid_after = now()
+	`, userEmail); err != nil {
+		h.logger.Warn("scim: failed to set token revocation watermark", zap.Error(err), zap.String("user", userEmail))
+	}
+
 	if len(revokedProjectIDs) == 0 {
 		return
 	}

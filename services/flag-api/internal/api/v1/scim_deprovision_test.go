@@ -123,6 +123,21 @@ func TestSCIMDeprovisionRevokesUserRoles(t *testing.T) {
 		}
 		return entries
 	}
+	watermarkFor := func(t *testing.T, userEmail string) *time.Time {
+		t.Helper()
+		var validAfter time.Time
+		err := database.QueryRowContext(ctx,
+			`SELECT valid_after FROM user_token_watermarks WHERE user_email = $1`, strings.ToLower(userEmail),
+		).Scan(&validAfter)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("query watermark: %v", err)
+		}
+		return &validAfter
+	}
+
 	revocationEntriesFor := func(t *testing.T, userEmail string) []auditEntry {
 		t.Helper()
 		var out []auditEntry
@@ -184,6 +199,13 @@ func TestSCIMDeprovisionRevokesUserRoles(t *testing.T) {
 		}
 		if !entries[0].ProjectID.Valid || entries[0].ProjectID.String != projectID {
 			t.Errorf("entry project_id = %v, want %q — an unscoped entry is unreachable through ListAuditLog/VerifyChain/ExportAuditLog", entries[0].ProjectID, projectID)
+		}
+
+		// SEC-5 (revoke-after watermark): deprovisioning must also make any
+		// already-issued JWT for this email fail auth.go's validateJWT on
+		// its next use, not just remove future authorization.
+		if watermarkFor(t, email) == nil {
+			t.Error("no user_token_watermarks row after deprovision — an already-issued JWT for this email would remain valid until its natural 24h expiry")
 		}
 	})
 
@@ -330,6 +352,52 @@ func TestSCIMDeprovisionRevokesUserRoles(t *testing.T) {
 
 		if entries := revocationEntriesFor(t, email); len(entries) != 0 {
 			t.Errorf("user_roles_revoked entries for a user with no roles = %d, want 0", len(entries))
+		}
+		// The watermark write is unconditional — it must still happen even
+		// when there were no roles to delete, so deprovisioning always
+		// forces re-authentication for this identity regardless of the
+		// user_roles table's current state.
+		if watermarkFor(t, email) == nil {
+			t.Error("no user_token_watermarks row after deprovisioning a roleless user — the watermark write must not be gated on finding roles to revoke")
+		}
+	})
+
+	t.Run("watermark is set case-insensitively and re-deprovisioning updates it forward, not duplicated", func(t *testing.T) {
+		email := "sec5-watermark-case@example.com"
+		grantedAs := "SEC5-Watermark-Case@Example.com"
+		createScimUser(t, "ext-watermark-1", grantedAs)
+		grantRole(t, grantedAs, projectID)
+
+		rec := httptest.NewRecorder()
+		scimH.DeprovisionUser(rec, scimRequest(http.MethodDelete, "/scim/v2/Users/ext-watermark-1", "ext-watermark-1", nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+		}
+
+		first := watermarkFor(t, email) // looked up via the LOWERCASE form
+		if first == nil {
+			t.Fatal("no watermark row found via a lowercase lookup — the write must normalize case the same way auth.go's lookup does")
+		}
+
+		// Re-provision and deprovision again — the SAME row must be updated
+		// forward (ON CONFLICT DO UPDATE), never duplicated into a second
+		// row (which user_email's PRIMARY KEY would reject anyway, but a
+		// bug swallowing that error would silently leave the OLD watermark
+		// in place instead of advancing it).
+		createScimUser(t, "ext-watermark-1", grantedAs)
+		grantRole(t, grantedAs, projectID)
+		rec2 := httptest.NewRecorder()
+		scimH.DeprovisionUser(rec2, scimRequest(http.MethodDelete, "/scim/v2/Users/ext-watermark-1", "ext-watermark-1", nil))
+		if rec2.Code != http.StatusNoContent {
+			t.Fatalf("second deprovision status = %d, want 204; body: %s", rec2.Code, rec2.Body.String())
+		}
+
+		second := watermarkFor(t, email)
+		if second == nil {
+			t.Fatal("watermark row disappeared after the second deprovision")
+		}
+		if !second.After(*first) {
+			t.Errorf("second watermark %v is not after the first %v — a re-deprovision must advance the watermark, not leave it stale", second, first)
 		}
 	})
 }
