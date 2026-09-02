@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -101,10 +102,15 @@ func main() {
 	if err != nil {
 		logger.Fatal("open db", zap.Error(err))
 	}
-	db.SetMaxOpenConns(5) // Neon free tier — share budget with other services
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxLifetime(5 * time.Minute) // recycle before Neon's ~5 min idle timeout
-	db.SetConnMaxIdleTime(2 * time.Minute) // release idle conns quickly
+	// DATA-2: env-tunable, defaulting to the exact values this pool has
+	// always hardcoded, so an unconfigured deployment behaves identically
+	// to before. The defaults themselves stay Neon-free-tier-shaped (share
+	// a small connection budget with other services); a larger Postgres
+	// tier can now raise them without a code change.
+	db.SetMaxOpenConns(envIntOrDefault("DB_MAX_OPEN_CONNS", 5, logger))
+	db.SetMaxIdleConns(envIntOrDefault("DB_MAX_IDLE_CONNS", 2, logger))
+	db.SetConnMaxLifetime(envSecondsOrDefault("DB_CONN_MAX_LIFETIME_SECONDS", 5*time.Minute, logger))  // recycle before Neon's ~5 min idle timeout
+	db.SetConnMaxIdleTime(envSecondsOrDefault("DB_CONN_MAX_IDLE_TIME_SECONDS", 2*time.Minute, logger)) // release idle conns quickly
 	if err := db.Ping(); err != nil {
 		logger.Fatal("ping db", zap.Error(err))
 	}
@@ -420,4 +426,39 @@ func splitCommaList(s string) []string {
 		}
 	}
 	return out
+}
+
+// envIntOrDefault parses an optional positive-integer env var (DATA-2's
+// pool-tuning knobs), falling back to def for an unset, empty, non-numeric,
+// or non-positive value. A misconfigured value warns rather than crashing
+// startup — pool tuning is an optimization, not something that should be
+// able to take the whole service down.
+func envIntOrDefault(envVar string, def int, logger *zap.Logger) int {
+	raw := os.Getenv(envVar)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		logger.Warn("invalid value for env var, using default",
+			zap.String("env_var", envVar), zap.String("value", raw), zap.Int("default", def))
+		return def
+	}
+	return n
+}
+
+// envSecondsOrDefault parses an optional positive-integer-seconds env var,
+// falling back to def under the same conditions as envIntOrDefault.
+func envSecondsOrDefault(envVar string, def time.Duration, logger *zap.Logger) time.Duration {
+	raw := os.Getenv(envVar)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		logger.Warn("invalid value for env var, using default",
+			zap.String("env_var", envVar), zap.String("value", raw), zap.Duration("default", def))
+		return def
+	}
+	return time.Duration(n) * time.Second
 }

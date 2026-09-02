@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"go.uber.org/zap"
 )
 
 // TestSplitCommaList is the direct regression proof for SEC-5's AllowedDomains
@@ -53,6 +56,65 @@ func TestSSOConfigWiresAllowedDomains(t *testing.T) {
 	if !regexp.MustCompile(`AllowedDomains:\s*allowedDomains`).MatchString(block) {
 		t.Errorf("SSOConfig{...} literal no longer sets AllowedDomains — this silently reopens the exact gap "+
 			"SEC-5 fixed (any successfully-authenticated OIDC user from any domain could log in):\n%s", block)
+	}
+}
+
+// TestEnvIntOrDefault is the direct regression proof for DATA-2's
+// env-tunable pooling: an unset/empty env var must reproduce today's
+// hardcoded default exactly, and a malformed or non-positive value must
+// warn and fall back rather than passing a nonsensical value straight to
+// sql.DB.SetMaxOpenConns/SetMaxIdleConns.
+func TestEnvIntOrDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		def  int
+		want int
+	}{
+		{"unset env var uses the default", "", 5, 5},
+		{"valid positive value overrides the default", "20", 5, 20},
+		{"zero is invalid, falls back to default", "0", 5, 5},
+		{"negative is invalid, falls back to default", "-3", 5, 5},
+		{"non-numeric is invalid, falls back to default", "not-a-number", 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.in != "" {
+				t.Setenv("TEST_ENV_INT_VAR", tc.in)
+			}
+			got := envIntOrDefault("TEST_ENV_INT_VAR", tc.def, zap.NewNop())
+			if got != tc.want {
+				t.Errorf("envIntOrDefault(%q, %d) = %d, want %d", tc.in, tc.def, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnvSecondsOrDefault mirrors TestEnvIntOrDefault for the
+// duration-valued pool settings (ConnMaxLifetime/ConnMaxIdleTime).
+func TestEnvSecondsOrDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"unset env var uses the default", "", 5 * time.Minute, 5 * time.Minute},
+		{"valid positive value overrides the default", "600", 5 * time.Minute, 10 * time.Minute},
+		{"zero is invalid, falls back to default", "0", 5 * time.Minute, 5 * time.Minute},
+		{"negative is invalid, falls back to default", "-1", 5 * time.Minute, 5 * time.Minute},
+		{"non-numeric is invalid, falls back to default", "not-a-number", 5 * time.Minute, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.in != "" {
+				t.Setenv("TEST_ENV_SECONDS_VAR", tc.in)
+			}
+			got := envSecondsOrDefault("TEST_ENV_SECONDS_VAR", tc.def, zap.NewNop())
+			if got != tc.want {
+				t.Errorf("envSecondsOrDefault(%q, %s) = %s, want %s", tc.in, tc.def, got, tc.want)
+			}
+		})
 	}
 }
 
