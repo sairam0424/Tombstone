@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -186,13 +187,38 @@ func (h *ChangeRequestHandler) ProposeChangeRequest(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// Snapshot the project's CURRENT quorum policy onto the row now, rather
+	// than having ApproveChangeRequest re-read projects.required_approvals
+	// fresh on every single approval call. Without this, lowering a
+	// project's quorum mid-flight would silently downgrade the bar an
+	// in-flight proposal is held to — the two approvers who already voted
+	// under a stricter policy would never know the goalposts moved.
+	var requiredApprovals int
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT required_approvals FROM projects WHERE id = $1`, projectID,
+	).Scan(&requiredApprovals); err != nil {
+		h.logger.Error("propose change request read required_approvals", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
 	var cr ChangeRequest
 	err = h.db.QueryRowContext(r.Context(), `
-		INSERT INTO change_requests (flag_key, environment, requested_by, status, change_payload, project_id)
-		VALUES ($1, $2, $3, 'PENDING', $4, $5)
+		INSERT INTO change_requests (flag_key, environment, requested_by, status, change_payload, project_id, required_approvals)
+		VALUES ($1, $2, $3, 'PENDING', $4, $5, $6)
 		RETURNING id, EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-	`, body.FlagKey, body.Environment, actor, payload, projectID).Scan(&cr.ID, &cr.CreatedAt, &cr.UpdatedAt)
+	`, body.FlagKey, body.Environment, actor, payload, projectID, requiredApprovals).Scan(&cr.ID, &cr.CreatedAt, &cr.UpdatedAt)
 	if err != nil {
+		// idx_change_requests_one_pending_proposal (migration 020): only one
+		// applicable (flag-environment-shaped) proposal may be PENDING at a
+		// time for a given flag+environment — otherwise two independently
+		// quorum-approved requests could apply in sequence and silently
+		// clobber each other's result with no error to either approving group.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code.Name() == "unique_violation" {
+			writeError(w, http.StatusConflict, "a change request for this flag and environment is already pending")
+			return
+		}
 		h.logger.Error("propose change request insert", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "insert failed")
 		return
@@ -271,18 +297,19 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	defer func() { _ = tx.Rollback() }()
 
 	var cr struct {
-		FlagKey       string
-		Environment   string
-		RequestedBy   string
-		ChangePayload json.RawMessage
-		ApprovedBy    []string
+		FlagKey           string
+		Environment       string
+		RequestedBy       string
+		ChangePayload     json.RawMessage
+		ApprovedBy        []string
+		RequiredApprovals int
 	}
 	err = tx.QueryRowContext(r.Context(), `
-		SELECT flag_key, environment, requested_by, change_payload, COALESCE(approved_by, '{}')
+		SELECT flag_key, environment, requested_by, change_payload, COALESCE(approved_by, '{}'), required_approvals
 		FROM change_requests
 		WHERE id = $1 AND project_id = $2 AND status = 'PENDING'
 		FOR UPDATE
-	`, id, projectID).Scan(&cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.ChangePayload, pq.Array(&cr.ApprovedBy))
+	`, id, projectID).Scan(&cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.ChangePayload, pq.Array(&cr.ApprovedBy), &cr.RequiredApprovals)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "change request not found or not in PENDING state")
 		return
@@ -307,14 +334,13 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	}
 	newApprovedBy := append(cr.ApprovedBy, actor)
 
-	var requiredApprovals int
-	if err := tx.QueryRowContext(r.Context(),
-		`SELECT required_approvals FROM projects WHERE id = $1`, projectID,
-	).Scan(&requiredApprovals); err != nil {
-		h.logger.Error("read required_approvals", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "query failed")
-		return
-	}
+	// required_approvals is read from THIS ROW (captured at propose time),
+	// not projects.required_approvals live — that pinned value is exactly
+	// what was already locked by the FOR UPDATE above, so there is nothing
+	// further to read or lock here. Re-reading projects fresh on every
+	// approval call would let lowering a project's quorum mid-flight
+	// silently downgrade the bar an in-flight proposal is held to.
+	requiredApprovals := cr.RequiredApprovals
 	quorumMet := len(newApprovedBy) >= requiredApprovals
 
 	payload, applicable := decodeFlagEnvironmentChangePayload(cr.ChangePayload)
@@ -356,10 +382,16 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	`, cr.FlagKey, cr.Environment, projectID).Scan(&prev.FlagID, &prev.FlagKey, &prev.Environment,
 		&prev.Enabled, &prev.RolloutPct, &prev.SafeDefault, &prev.UpdatedAt)
 
+	// updated_by is the approver whose action just executed this write, not
+	// the original proposer (cr.RequestedBy) — matching how every other
+	// direct-write path (UpdateEnvironment, KillSwitch) attributes
+	// updated_by to whoever's API call performed the mutation. Self-approval
+	// is already rejected above, so actor != cr.RequestedBy is guaranteed
+	// here.
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE flag_environments fe SET enabled = $1, rollout_pct = $2, updated_at = now(), updated_by = $3
 		FROM flags f WHERE f.id = fe.flag_id AND f.key = $4 AND fe.environment = $5 AND f.project_id = $6
-	`, payload.Enabled, payload.RolloutPct, cr.RequestedBy, cr.FlagKey, cr.Environment, projectID)
+	`, payload.Enabled, payload.RolloutPct, actor, cr.FlagKey, cr.Environment, projectID)
 	if err != nil {
 		h.logger.Error("apply change request", zap.String("id", id), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "apply failed")
