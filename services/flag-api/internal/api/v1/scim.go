@@ -225,6 +225,7 @@ func (h *SCIMHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	if !u.Active {
 		h.detectOrphans(ctx, email)
+		h.revokeUserRoles(ctx, email)
 	}
 
 	u.ID = id
@@ -256,7 +257,55 @@ func (h *SCIMHandler) DeprovisionUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.detectOrphans(ctx, email)
+	h.revokeUserRoles(ctx, email)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeUserRoles deletes every project role a deactivated SCIM user held.
+//
+// SEC-5: deprovisioning (via DELETE, or PUT with active=false — many IdPs
+// use the latter for what they call a "deprovision") only ever flipped
+// scim_users.active, a bookkeeping column with no authorization effect of
+// its own. user_roles (what rbac.go's resolveRole actually reads, keyed by
+// the same email string as this handler's user_id) was never touched, so a
+// deprovisioned user's RBAC grants across every project persisted
+// indefinitely — deprovisioning revoked nothing.
+func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
+	rows, err := h.db.QueryContext(ctx, `DELETE FROM user_roles WHERE user_id = $1 RETURNING project_id`, userEmail)
+	if err != nil {
+		h.logger.Error("scim revoke user roles", zap.Error(err), zap.String("user", userEmail))
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	var revokedProjectIDs []string
+	for rows.Next() {
+		var projectID string
+		if err := rows.Scan(&projectID); err != nil {
+			h.logger.Error("scim revoke user roles scan", zap.Error(err))
+			continue
+		}
+		revokedProjectIDs = append(revokedProjectIDs, projectID)
+	}
+	if len(revokedProjectIDs) == 0 {
+		return
+	}
+
+	h.logger.Warn("scim revoked user roles on deprovision",
+		zap.String("user", userEmail), zap.Strings("project_ids", revokedProjectIDs))
+
+	if h.audit == nil {
+		h.logger.Warn("scim role-revocation audit write skipped — no audit writer configured")
+		return
+	}
+	detailsJSON, _ := json.Marshal(map[string]any{"user": userEmail, "revoked_project_ids": revokedProjectIDs})
+	if _, _, err := h.audit.Append(ctx, audit.Entry{
+		Actor:     "system-scim",
+		EventType: "user_roles_revoked",
+		NewState:  detailsJSON,
+	}); err != nil {
+		h.logger.Warn("scim role-revocation audit write failed", zap.Error(err))
+	}
 }
 
 // orphanedFlag pairs a flag key with its owning project — needed so the

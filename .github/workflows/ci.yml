@@ -258,7 +258,9 @@ jobs:
           # SEC-3b: proves propose->quorum->apply actually mutates flag_environments,
           # not just the change_requests row's own status. SEC-3b part 2: proves
           # require_approval actually blocks UpdateEnvironment and that a valid
-          # break-glass token bypasses it exactly once. Same package, same DB, run
-          # together (one process, sequential top-level tests, no t.Parallel)
-          # rather than separate invocations — no fixture collision between them.
-          go test ./internal/api/v1/ -run 'TestTenancyIsolation|TestChangeRequestProposeQuorumAndApply|TestRequireApprovalGate' -v
+          # break-glass token bypasses it exactly once. SEC-5: proves SCIM
+          # deprovisioning actually revokes the RBAC grant (user_roles), not just
+          # scim_users.active. Same package, same DB, run together (one process,
+          # sequential top-level tests, no t.Parallel) rather than separate
+          # invocations — no fixture collision between them.
+          go test ./internal/api/v1/ -run 'TestTenancyIsolation|TestChangeRequestProposeQuorumAndApply|TestRequireApprovalGate|TestSCIMDeprovisionRevokesUserRoles' -v

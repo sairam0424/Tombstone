@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -302,6 +303,11 @@ func main() {
 			OIDCIssuer:   os.Getenv("OIDC_ISSUER"),
 			OIDCClientID: os.Getenv("OIDC_CLIENT_ID"),
 			CallbackURL:  os.Getenv("SSO_CALLBACK_URL"),
+			// SEC-5: SSOConfig.AllowedDomains has always been read and enforced
+			// by isAllowedDomain — it was just never populated here, so every
+			// deployment's domain allowlist silently had zero effect and any
+			// successfully-authenticated OIDC user from any domain could log in.
+			AllowedDomains: splitCommaList(os.Getenv("SSO_ALLOWED_DOMAINS")),
 		}, jwtSecret, logger)
 		r.Get("/auth/login", ssoMw.LoginHandler)
 		r.Get("/auth/callback", ssoMw.CallbackHandler)
@@ -371,4 +377,21 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// splitCommaList parses a comma-separated env var into a trimmed,
+// non-empty slice. Returns nil (not enforcing any restriction) for an
+// unset/empty value — matching SSOConfig.AllowedDomains' own documented
+// "empty means unrestricted" contract.
+func splitCommaList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
