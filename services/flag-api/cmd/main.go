@@ -130,7 +130,7 @@ func main() {
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
-	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter)
+	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger, auditWriter)
 	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)

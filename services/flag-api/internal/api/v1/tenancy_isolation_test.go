@@ -70,7 +70,7 @@ func TestTenancyIsolation(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
 	snapH := NewSnapshotHandler(database, logger)
 	prereqH := NewPrerequisiteHandler(database, logger)
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
