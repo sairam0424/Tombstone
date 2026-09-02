@@ -137,7 +137,7 @@ func main() {
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
-	crH := v1.NewChangeRequestHandler(db, rdb, logger)
+	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -270,12 +270,18 @@ func main() {
 				Get("/tokens", breakGlassH.ListTokens)
 		})
 
-		// Four-eyes approval workflow: list is available to any authenticated user;
-		// approve/reject require OWNER or ADMIN (flags:kill_switch permission).
+		// Four-eyes approval workflow: list is available to any authenticated
+		// user (see the documented SEC-3 exemption in cmd/authz_routes_test.go).
+		// Proposing a change needs the same privilege making it directly would
+		// (environments:write). Approve/reject use approvals:approve (SEC-3b) —
+		// OWNER/ADMIN only, same role set flags:kill_switch granted, but now
+		// under the permission actually meant for this action.
 		r.Get("/change-requests", crH.ListChangeRequests)
-		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			Post("/change-requests", crH.ProposeChangeRequest)
+		r.With(rbacMw.RequirePermission("approvals", "approve")).
 			Post("/change-requests/{id}/approve", crH.ApproveChangeRequest)
-		r.With(rbacMw.RequirePermission("flags", "kill_switch")).
+		r.With(rbacMw.RequirePermission("approvals", "approve")).
 			Post("/change-requests/{id}/reject", crH.RejectChangeRequest)
 	})
 
