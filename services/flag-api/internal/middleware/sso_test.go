@@ -999,3 +999,34 @@ func TestIsSecureCallbackURL(t *testing.T) {
 		}
 	}
 }
+
+// TestIsAllowedDomain is the direct regression proof that SEC-5's
+// SSO_ALLOWED_DOMAINS wiring actually restricts logins once main.go
+// populates AllowedDomains — this exact function had zero test coverage
+// before, despite being the enforcement point the whole feature relies on.
+func TestIsAllowedDomain(t *testing.T) {
+	cases := []struct {
+		name           string
+		allowedDomains []string
+		email          string
+		want           bool
+	}{
+		{"nil AllowedDomains allows everything (unset/unrestricted)", nil, "anyone@anywhere.example", true},
+		{"empty AllowedDomains allows everything", []string{}, "anyone@anywhere.example", true},
+		{"matching domain is allowed", []string{"example.com"}, "alice@example.com", true},
+		{"non-matching domain is rejected", []string{"example.com"}, "alice@evil.example", false},
+		{"leading @ in config is normalized — documented format", []string{"@example.com"}, "alice@example.com", true},
+		{"matching is case-insensitive on the email side", []string{"example.com"}, "Alice@Example.COM", true},
+		{"a domain that is merely a suffix of the mailbox local-part does not match", []string{"example.com"}, "alice@notexample.com", false},
+		{"one of several configured domains matching is enough", []string{"other.example", "example.com"}, "alice@example.com", true},
+		{"none of several configured domains matching is rejected", []string{"other.example", "third.example"}, "alice@example.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SSOMiddleware{config: SSOConfig{AllowedDomains: tc.allowedDomains}}
+			if got := s.isAllowedDomain(tc.email); got != tc.want {
+				t.Errorf("isAllowedDomain(%q) with AllowedDomains=%v = %v, want %v", tc.email, tc.allowedDomains, got, tc.want)
+			}
+		})
+	}
+}

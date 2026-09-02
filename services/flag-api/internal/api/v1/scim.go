@@ -196,6 +196,25 @@ func (h *SCIMHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SEC-5: the identity used to revoke a deactivated user's roles below
+	// must be the email ALREADY on file for this external_id — not
+	// primaryEmail(u), which is derived from this PUT's own body and falls
+	// back to u.UserName whenever the caller's "emails" array is empty (a
+	// legitimate deactivation-only payload some IdPs send). Using the
+	// caller-supplied value would let a partial/malformed body silently
+	// target the wrong (or nonexistent) user_roles.user_id, no-opping the
+	// revocation with no error.
+	var currentEmail string
+	if err := h.db.QueryRowContext(ctx, `SELECT email FROM scim_users WHERE external_id = $1`, id).Scan(&currentEmail); err != nil {
+		if err == sql.ErrNoRows {
+			writeSCIMError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		h.logger.Error("scim update user lookup", zap.Error(err))
+		writeSCIMError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+
 	email := primaryEmail(u)
 	displayName := u.DisplayName
 	if displayName == "" {
@@ -224,8 +243,8 @@ func (h *SCIMHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !u.Active {
-		h.detectOrphans(ctx, email)
-		h.revokeUserRoles(ctx, email)
+		h.detectOrphans(ctx, currentEmail)
+		h.revokeUserRoles(ctx, currentEmail)
 	}
 
 	u.ID = id
@@ -271,7 +290,14 @@ func (h *SCIMHandler) DeprovisionUser(w http.ResponseWriter, r *http.Request) {
 // deprovisioned user's RBAC grants across every project persisted
 // indefinitely — deprovisioning revoked nothing.
 func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
-	rows, err := h.db.QueryContext(ctx, `DELETE FROM user_roles WHERE user_id = $1 RETURNING project_id`, userEmail)
+	// Case-insensitive: user_roles.user_id is a plain TEXT column populated
+	// out-of-band (there is no API that ever inserts into it), so the case
+	// an admin typed when granting a role has no guaranteed relationship to
+	// the case an IdP's SCIM feed asserts later. Matching case-insensitively
+	// only ever revokes MORE broadly, never less — the safe direction to err
+	// in for a deprovisioning action, and it closes the silent no-op this
+	// would otherwise produce on a case mismatch.
+	rows, err := h.db.QueryContext(ctx, `DELETE FROM user_roles WHERE lower(user_id) = lower($1) RETURNING project_id`, userEmail)
 	if err != nil {
 		h.logger.Error("scim revoke user roles", zap.Error(err), zap.String("user", userEmail))
 		return
@@ -298,13 +324,22 @@ func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
 		h.logger.Warn("scim role-revocation audit write skipped — no audit writer configured")
 		return
 	}
-	detailsJSON, _ := json.Marshal(map[string]any{"user": userEmail, "revoked_project_ids": revokedProjectIDs})
-	if _, _, err := h.audit.Append(ctx, audit.Entry{
-		Actor:     "system-scim",
-		EventType: "user_roles_revoked",
-		NewState:  detailsJSON,
-	}); err != nil {
-		h.logger.Warn("scim role-revocation audit write failed", zap.Error(err))
+	// One entry PER revoked project, each carrying its own ProjectID — not
+	// one combined entry with the project list buried in NewState. Every
+	// exposed read path (ListAuditLog, VerifyChain, ExportAuditLog) filters
+	// on an exact project_id match with no NULL-fallback; a single
+	// unscoped entry would be permanently unreachable through any of them,
+	// the same TEN-1a-2 bug class detectOrphans below was fixed to avoid.
+	detailsJSON, _ := json.Marshal(map[string]any{"user": userEmail})
+	for _, projectID := range revokedProjectIDs {
+		if _, _, err := h.audit.Append(ctx, audit.Entry{
+			Actor:     "system-scim",
+			EventType: "user_roles_revoked",
+			NewState:  detailsJSON,
+			ProjectID: projectID,
+		}); err != nil {
+			h.logger.Warn("scim role-revocation audit write failed", zap.Error(err), zap.String("project_id", projectID))
+		}
 	}
 }
 
