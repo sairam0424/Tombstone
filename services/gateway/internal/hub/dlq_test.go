@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,9 +13,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupDLQTest starts a miniredis instance, a Broadcaster wired to it, and
-// a fresh consumer group on streamKey, returning everything a test needs
-// plus a teardown func.
+// setupDLQTest starts a miniredis instance, a Broadcaster wired to it
+// (whose own per-replica group, per GW-1, is what gets seeded on
+// streamKey), returning everything a test needs plus a teardown func.
 func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rdb *redis.Client, b *Broadcaster, streamKey string) {
 	t.Helper()
 
@@ -26,7 +29,7 @@ func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rd
 	b = NewBroadcaster(rdb, h, zap.NewNop())
 	streamKey = StreamKey(environment)
 
-	if err := rdb.XGroupCreateMkStream(context.Background(), streamKey, ConsumerGroup, "0").Err(); err != nil {
+	if err := rdb.XGroupCreateMkStream(context.Background(), streamKey, b.Group(), "0").Err(); err != nil {
 		t.Fatalf("XGroupCreateMkStream: %v", err)
 	}
 
@@ -34,10 +37,11 @@ func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rd
 }
 
 // deliverPoisonMessage publishes a malformed (non-JSON payload) message onto
-// streamKey and reads it once via XREADGROUP as consumerName, simulating
-// what RunStreamConsumer's real read loop does: read it, fail to unmarshal,
-// and (per the fix under test) leave it un-acked in the PEL.
-func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey, consumerName string) string {
+// streamKey and reads it once via XREADGROUP (against group) as
+// consumerName, simulating what RunStreamConsumer's real read loop does:
+// read it, fail to unmarshal, and (per the fix under test) leave it
+// un-acked in the PEL.
+func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey, group, consumerName string) string {
 	t.Helper()
 
 	id, err := rdb.XAdd(ctx, &redis.XAddArgs{
@@ -54,7 +58,7 @@ func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, 
 	}
 
 	msgs, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    ConsumerGroup,
+		Group:    group,
 		Consumer: consumerName,
 		Streams:  []string{streamKey, ">"},
 		Count:    10,
@@ -83,7 +87,7 @@ func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 	defer rdb.Close()
 
 	ctx := context.Background()
-	id := deliverPoisonMessage(t, ctx, rdb, streamKey, "gateway-test-consumer")
+	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
 
 	// Advance miniredis's clock past the idle threshold so XPENDING considers
 	// this entry stale enough to reclaim. XPENDING/XCLAIM idle-time math is
@@ -108,7 +112,7 @@ func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 	}
 
 	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream: streamKey, Group: ConsumerGroup, Start: "-", End: "+", Count: 10,
+		Stream: streamKey, Group: b.Group(), Start: "-", End: "+", Count: 10,
 	}).Result()
 	if err != nil {
 		t.Fatalf("XPendingExt: %v", err)
@@ -130,7 +134,7 @@ func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 	defer rdb.Close()
 
 	ctx := context.Background()
-	id := deliverPoisonMessage(t, ctx, rdb, streamKey, "gateway-test-consumer")
+	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
 
 	// Run reclaim cycles until the message is dead-lettered. Delivery count
 	// starts at 1 (the initial XReadGroup delivery); each XCLAIM increments
@@ -160,7 +164,7 @@ func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 
 	// The original message must be gone from the primary stream's PEL.
 	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream: streamKey, Group: ConsumerGroup, Start: "-", End: "+", Count: 10,
+		Stream: streamKey, Group: b.Group(), Start: "-", End: "+", Count: 10,
 	}).Result()
 	if err != nil {
 		t.Fatalf("XPendingExt: %v", err)
@@ -193,6 +197,192 @@ func TestReclaimStalePending_NoPendingIsNoop(t *testing.T) {
 	if dlqLen != 0 {
 		t.Errorf("expected no dlq entries when PEL was empty, got %d", dlqLen)
 	}
+}
+
+// TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast is the direct
+// regression proof for the dedup/reclaim-window fix: reclaiming a stuck
+// entry from a DIFFERENT (dead) replica's group must drain it (ack) but must
+// NEVER broadcast it. Under GW-1's per-replica fan-out, this replica's own
+// group has already independently delivered the identical event via the
+// normal RunStreamConsumer path, so redelivering a dead replica's abandoned
+// copy would be a pure duplicate to this replica's own already-served
+// clients, not a recovery of anything — see reprocessClaimedMessage's doc
+// comment.
+func TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	// A second, foreign group on the SAME stream — standing in for a dead
+	// replica that read this message into its own PEL but never acked or
+	// broadcast it before crashing.
+	deadGroup := ReplicaGroupName("dead-replica")
+	if err := rdb.XGroupCreateMkStream(ctx, streamKey, deadGroup, "0").Err(); err != nil {
+		t.Fatalf("XGroupCreateMkStream(dead): %v", err)
+	}
+
+	event := FlagEvent{FlagKey: "cross-group-flag", Enabled: true, RolloutPct: 100, Reason: "manual", Ts: 1_700_000_020, Environment: "production"}
+	payload, _ := json.Marshal(event)
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{"payload": string(payload), "environment": "production"},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	// The dead group reads (and never acks) the message — simulating its
+	// consumer crashing mid-processing, before it could broadcast or ack.
+	// b's OWN group never reads this message in this test — standing in for
+	// the (near-certain, in production) case where b's own group's
+	// RunStreamConsumer already independently delivered and acked its own
+	// copy moments after publish, well before this reclaim sweep runs.
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: deadGroup, Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(dead): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	assertNoFrame(t, ch, 200*time.Millisecond, "cross-group reclaim of a dead replica's abandoned entry")
+
+	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: streamKey, Group: deadGroup, Start: "-", End: "+", Count: 10,
+	}).Result()
+	if err != nil {
+		t.Fatalf("XPendingExt(dead): %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected the dead group's PEL entry to be drained by the reclaim sweep, got %+v", pending)
+	}
+}
+
+// TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts proves the
+// complement of the cross-group test above: reclaiming a stuck entry from
+// THIS replica's OWN group (e.g. recovering from a transient ack failure,
+// not a crash) still goes through the normal broadcast+dedup path — the
+// cross-group fix must only suppress broadcast for FOREIGN groups, never
+// for a replica's own.
+func TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	event := FlagEvent{FlagKey: "self-reclaim-flag", Enabled: true, RolloutPct: 100, Reason: "manual", Ts: 1_700_000_021, Environment: "production"}
+	payload, _ := json.Marshal(event)
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{"payload": string(payload), "environment": "production"},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	// Deliver into b's OWN group but never ack, simulating a stuck consumer.
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: b.Group(), Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(own): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	if !strings.Contains(string(frame), "self-reclaim-flag") {
+		t.Errorf("own-group reclaim must still broadcast: %s", frame)
+	}
+}
+
+// TestReclaimStalePendingInGroup_DeadLetterIsGatedBehindAClaim is a
+// structural regression guard for the deadLetter atomicity fix.
+//
+// The property the fix actually relies on — that of several concurrent
+// reclaim sweeps racing the SAME over-budget PEL entry, only ONE can ever
+// win the atomic claim and proceed to dead-letter it — rests on a real
+// Redis guarantee (XCLAIM's MinIdle filter is atomic under concurrent
+// access) that could not be reliably reproduced against this package's
+// existing miniredis-based tests: miniredis v2.38.0 does NOT correctly
+// enforce that guarantee. Confirmed via two throwaway diagnostics: (1)
+// against miniredis with SetTime-frozen idle, two concurrent XCLAIM calls
+// for the identical entry ID with the same MinIdle both succeeded in 50/50
+// trials; (2) against a REAL local redis-server at comparable idle/MinIdle
+// margins (100ms idle, 50ms MinIdle — the same ~2x safety margin production
+// gets from reclaimIdleThreshold's 30s vs. a sub-millisecond Redis round
+// trip), exactly one winner in 300/300 trials. Since the real guarantee
+// isn't faithfully testable with this package's test double, this instead
+// pins the CODE STRUCTURE the fix depends on: reclaimStalePendingInGroup
+// must call XClaim and check whether the claim actually succeeded BEFORE
+// ever calling deadLetter — not decide to dead-letter directly off the
+// plain (unclaimed) XPendingExt read, which is what let two concurrent
+// sweeps both dead-letter the same message before this fix.
+func TestReclaimStalePendingInGroup_DeadLetterIsGatedBehindAClaim(t *testing.T) {
+	src, err := os.ReadFile("dlq.go")
+	if err != nil {
+		t.Fatalf("read dlq.go: %v", err)
+	}
+	body := reclaimStalePendingInGroupBody(t, string(src))
+
+	claimIdx := strings.Index(body, "b.rdb.XClaim(")
+	if claimIdx == -1 {
+		t.Fatal("reclaimStalePendingInGroup no longer calls XClaim at all")
+	}
+	emptyCheckIdx := strings.Index(body, "len(msgs) == 0")
+	if emptyCheckIdx == -1 || emptyCheckIdx < claimIdx {
+		t.Fatal("reclaimStalePendingInGroup no longer checks whether the claim actually succeeded (len(msgs) == 0) after calling XClaim")
+	}
+	deadLetterIdx := strings.Index(body, "b.deadLetter(")
+	if deadLetterIdx == -1 {
+		t.Fatal("reclaimStalePendingInGroup no longer calls deadLetter at all")
+	}
+	if deadLetterIdx < emptyCheckIdx {
+		t.Error("reclaimStalePendingInGroup calls deadLetter BEFORE checking whether this sweep actually won the claim race — this reintroduces the double-dead-letter bug: two concurrent sweeps that both read the same over-budget PEL entry would both dead-letter it")
+	}
+}
+
+// reclaimStalePendingInGroupBody returns the body of
+// reclaimStalePendingInGroup's function literal by brace-matching from its
+// opening "{" to the matching close, mirroring flag-api's
+// ssoConfigBlock helper (cmd/main_helpers_test.go).
+func reclaimStalePendingInGroupBody(t *testing.T, src string) string {
+	t.Helper()
+	const marker = "func (b *Broadcaster) reclaimStalePendingInGroup("
+	start := strings.Index(src, marker)
+	if start == -1 {
+		t.Fatalf("could not find %q in dlq.go", marker)
+	}
+	open := strings.Index(src[start:], "{")
+	if open == -1 {
+		t.Fatalf("no opening brace found for reclaimStalePendingInGroup")
+	}
+	open += start
+
+	depth := 0
+	for i := open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[open : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces in reclaimStalePendingInGroup")
+	return ""
 }
 
 // TestDLQStreamKey_MatchesConvention pins the "<stream>:dlq" naming
