@@ -2,7 +2,9 @@ package v1
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +15,14 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/db"
+	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -156,6 +160,34 @@ func TestSCIMDeprovisionRevokesUserRoles(t *testing.T) {
 			}
 		}
 		return out
+	}
+
+	genJWTKey := func(t *testing.T) string {
+		t.Helper()
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatalf("generate jwt key: %v", err)
+		}
+		return hex.EncodeToString(b)
+	}
+	mintJWT := func(t *testing.T, key, sub string, iat time.Time) string {
+		t.Helper()
+		claims := jwt.MapClaims{"sub": sub, "iat": iat.Unix(), "exp": iat.Add(24 * time.Hour).Unix()}
+		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		signed, err := tok.SignedString([]byte(key))
+		if err != nil {
+			t.Fatalf("sign jwt: %v", err)
+		}
+		return signed
+	}
+	authenticates := func(t *testing.T, authMw *middleware.AuthMiddleware, token string) bool {
+		t.Helper()
+		var passed bool
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/flags", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		authMw.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { passed = true })).ServeHTTP(rec, req)
+		return passed
 	}
 
 	scimRequest := func(method, path, externalID string, body map[string]any) *http.Request {
@@ -398,6 +430,45 @@ func TestSCIMDeprovisionRevokesUserRoles(t *testing.T) {
 		}
 		if !second.After(*first) {
 			t.Errorf("second watermark %v is not after the first %v — a re-deprovision must advance the watermark, not leave it stale", second, first)
+		}
+	})
+
+	// This is the end-to-end proof the two halves of the feature (SCIM's
+	// write, auth.go's read) are actually wired together correctly against
+	// ONE real database — every other watermark assertion in this file
+	// only checks that a row landed in user_token_watermarks; every
+	// watermark test in auth_test.go only exercises validateJWT against a
+	// hand-written sqlmock expectation. Neither proves SCIM's real write
+	// is what auth.go's real read actually sees.
+	t.Run("watermark written by a real SCIM deprovision is read and honored by auth.go's real Authenticate handler", func(t *testing.T) {
+		email := "sec5-e2e-watermark@example.com"
+		createScimUser(t, "ext-e2e-1", email)
+		grantRole(t, email, projectID)
+
+		key := genJWTKey(t)
+		authMw := middleware.NewAuthMiddleware(database, key, nil, zap.NewNop())
+
+		preRevocationToken := mintJWT(t, key, email, time.Now().Add(-time.Hour))
+		if !authenticates(t, authMw, preRevocationToken) {
+			t.Fatal("setup: token must authenticate before deprovisioning")
+		}
+
+		rec := httptest.NewRecorder()
+		scimH.DeprovisionUser(rec, scimRequest(http.MethodDelete, "/scim/v2/Users/ext-e2e-1", "ext-e2e-1", nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("deprovision status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+		}
+
+		if authenticates(t, authMw, preRevocationToken) {
+			t.Error("the pre-revocation token still authenticated after deprovision — the watermark SCIM wrote was not actually honored by auth.go's real Authenticate handler")
+		}
+
+		// A FRESH token minted AFTER deprovision must still work — the
+		// watermark blocks tokens issued before it, not the identity
+		// permanently.
+		postRevocationToken := mintJWT(t, key, email, time.Now())
+		if !authenticates(t, authMw, postRevocationToken) {
+			t.Error("a token issued AFTER deprovision was rejected — the watermark must not permanently lock out the identity")
 		}
 	})
 }

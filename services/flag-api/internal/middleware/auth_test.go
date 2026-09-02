@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -187,5 +189,150 @@ func TestValidateJWT_InvalidSignatureStillRejected(t *testing.T) {
 
 	if _, ok := auth.validateJWT(context.Background(), forged); ok {
 		t.Fatal("a token with an invalid signature must be rejected before any watermark lookup")
+	}
+}
+
+// TestValidateJWT_MissingIatRejected covers a token structurally different
+// from anything issueTombstoneJWT ever mints (which always sets iat) — it
+// must be rejected outright rather than silently falling through to
+// int64(0), which would behave inconsistently depending on whether the
+// subject has ever been watermarked (rejected if so, accepted if not).
+func TestValidateJWT_MissingIatRejected(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	key := testHMACKey(t)
+	claims := jwt.MapClaims{"sub": "alice@example.com", "exp": time.Now().Add(time.Hour).Unix()}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := tok.SignedString([]byte(key))
+	if err != nil {
+		t.Fatalf("sign test jwt: %v", err)
+	}
+
+	auth := NewAuthMiddleware(db, key, nil, zap.NewNop())
+	if _, ok := auth.validateJWT(context.Background(), signed); ok {
+		t.Fatal("a token with no iat claim at all must be rejected before any watermark lookup — the sqlmock instance with no .ExpectQuery set proves the lookup was never reached")
+	}
+}
+
+// TestValidateJWT_TokenIssuedSameSecondAsWatermarkAccepted is the direct
+// regression proof for the whole-second/microsecond granularity mismatch:
+// a token minted in the SAME wall-clock second as the watermark (e.g. an
+// immediate reactivate-then-login) must be accepted, not spuriously
+// rejected just because Postgres's now() carries more precision than a
+// JWT's Unix-seconds iat claim can express.
+func TestValidateJWT_TokenIssuedSameSecondAsWatermarkAccepted(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	sameSecond := time.Now().Truncate(time.Second)
+	iat := sameSecond                                   // whole-second iat
+	watermark := sameSecond.Add(900 * time.Millisecond) // set later in the SAME second
+
+	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
+		WithArgs("alice@example.com").
+		WillReturnRows(sqlmock.NewRows([]string{"valid_after"}).AddRow(watermark))
+
+	key := testHMACKey(t)
+	auth := NewAuthMiddleware(db, key, nil, zap.NewNop())
+	token := mintTestJWT(t, key, "alice@example.com", iat)
+
+	if _, ok := auth.validateJWT(context.Background(), token); !ok {
+		t.Fatal("a token issued in the same wall-clock second as the watermark must be accepted, not spuriously rejected")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestAuthenticate_WatermarkRevokedJWTRejected drives the real, exported
+// Authenticate HTTP handler (not the internal validateJWT method directly)
+// end-to-end, proving a watermark-rejected token actually produces a 401
+// through the real middleware chain — including that Authenticate's
+// fallback-to-service-token path doesn't accidentally rescue it.
+func TestAuthenticate_WatermarkRevokedJWTRejected(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	iat := time.Now().Add(-2 * time.Hour)
+	watermark := iat.Add(time.Hour)
+
+	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
+		WithArgs("alice@example.com").
+		WillReturnRows(sqlmock.NewRows([]string{"valid_after"}).AddRow(watermark))
+	// Authenticate's fallback path re-attempts the same string as a service
+	// token once the JWT branch rejects it — hasher is nil here (matching
+	// validateServiceToken's own "no hasher configured" rejection), so this
+	// asserts the fallback can't accidentally rescue a rejected JWT.
+
+	key := testHMACKey(t)
+	auth := NewAuthMiddleware(db, key, nil, zap.NewNop())
+	token := mintTestJWT(t, key, "alice@example.com", iat)
+
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/flags", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	auth.Authenticate(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Error("the next handler ran despite a watermark-rejected token — Authenticate must not pass the request through")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestAuthenticate_ValidJWTPassesThrough is the same HTTP-level harness's
+// positive case — proves the 401 above is specific to the watermark
+// rejection, not an artifact of the test harness itself.
+func TestAuthenticate_ValidJWTPassesThrough(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
+		WithArgs("alice@example.com").
+		WillReturnError(sql.ErrNoRows)
+
+	key := testHMACKey(t)
+	auth := NewAuthMiddleware(db, key, nil, zap.NewNop())
+	token := mintTestJWT(t, key, "alice@example.com", time.Now())
+
+	var gotActor any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotActor = r.Context().Value(ContextKeyActor)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/flags", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	auth.Authenticate(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotActor != "alice@example.com" {
+		t.Errorf("actor in context = %v, want alice@example.com", gotActor)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }

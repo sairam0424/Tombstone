@@ -101,8 +101,16 @@ func (a *AuthMiddleware) validateJWT(ctx context.Context, tokenStr string) (stri
 	// watermark must be rejected even though its signature and exp are
 	// still valid — this closes the gap where SCIM deprovisioning deletes
 	// user_roles but leaves an already-issued JWT valid until natural
-	// expiry (24h). iat is a Unix-seconds numeric claim per issueTombstoneJWT.
-	iat, _ := claims["iat"].(float64)
+	// expiry (24h). iat is a Unix-seconds numeric claim per issueTombstoneJWT
+	// — required, not best-effort: a token missing it entirely is
+	// structurally different from anything this service ever mints, so it
+	// fails closed here (distinct from a watermark LOOKUP error below,
+	// which fails open because that's a DB-availability concern layered on
+	// top of an otherwise well-formed token, not a malformed-token concern).
+	iat, ok := claims["iat"].(float64)
+	if !ok {
+		return "", false
+	}
 	if a.tokenPredatesWatermark(ctx, sub, int64(iat)) {
 		return "", false
 	}
@@ -125,10 +133,21 @@ func (a *AuthMiddleware) tokenPredatesWatermark(ctx context.Context, sub string,
 	// Matched case-insensitively for the same reason SCIM's role-revocation
 	// query is (internal/api/v1/scim.go's revokeUserRoles): the email in a
 	// JWT's sub claim (asserted by the IdP at login) and the email SCIM
-	// later revokes against have no guaranteed casing relationship.
+	// later revokes against have no guaranteed casing relationship. Only
+	// lower($1) is folded, not the indexed user_email column itself — the
+	// sole writer (revokeUserRoles) already stores lower(email), so
+	// wrapping the column too would only defeat its PK index for no
+	// behavioral gain. Accepted tradeoff: Postgres's lower() is
+	// Unicode-aware (this project's default collation is en_US.utf8), so
+	// two subject strings differing only by a code point that happens to
+	// fold to the same lowercase (e.g. U+212A KELVIN SIGN vs "k") would
+	// collide here — the same class of risk the existing case-insensitive
+	// role-revocation match already accepts, for the same reason: erring
+	// toward revoking/matching too broadly is safer than a silent
+	// case-mismatch no-op.
 	var validAfter time.Time
 	err := a.db.QueryRowContext(ctx, `
-		SELECT valid_after FROM user_token_watermarks WHERE lower(user_email) = lower($1)
+		SELECT valid_after FROM user_token_watermarks WHERE user_email = lower($1)
 	`, sub).Scan(&validAfter)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -136,7 +155,13 @@ func (a *AuthMiddleware) tokenPredatesWatermark(ctx context.Context, sub string,
 		}
 		return false
 	}
-	return time.Unix(iat, 0).Before(validAfter)
+	// Both sides compared at whole-second granularity, matching iat's own
+	// precision: valid_after is a microsecond-precision TIMESTAMPTZ, and
+	// comparing it directly against time.Unix(iat, 0) would spuriously
+	// reject a token minted in the SAME wall-clock second as the watermark
+	// (e.g. an immediate reactivate-then-login) even though iat can't
+	// actually distinguish "before" from "same second" at that resolution.
+	return iat < validAfter.Unix()
 }
 
 // validateServiceToken resolves a service token to its actor identity, the
