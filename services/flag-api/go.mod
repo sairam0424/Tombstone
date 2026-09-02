@@ -11,7 +11,10 @@ require (
 	github.com/go-chi/cors v1.2.1
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
+	github.com/lestrrat-go/httprc/v3 v3.0.5
+	github.com/lestrrat-go/jwx/v3 v3.1.1
 	github.com/lib/pq v1.10.9
+	github.com/mvrilo/go-redoc v0.1.5
 	github.com/open-policy-agent/opa v1.17.1
 	github.com/redis/go-redis/v9 v9.5.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
@@ -20,7 +23,6 @@ require (
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/zap v1.27.0
-	golang.org/x/time v0.15.0
 )
 
 require (
@@ -41,10 +43,7 @@ require (
 	github.com/lestrrat-go/dsig v1.2.1 // indirect
 	github.com/lestrrat-go/dsig-secp256k1 v1.0.0 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
-	github.com/lestrrat-go/httprc/v3 v3.0.5 // indirect
-	github.com/lestrrat-go/jwx/v3 v3.1.1 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
-	github.com/mvrilo/go-redoc v0.1.5 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect

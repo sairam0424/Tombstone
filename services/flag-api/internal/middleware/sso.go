@@ -1,17 +1,22 @@
 package middleware
 
 import (
+	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lestrrat-go/httprc/v3"
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
+	oidcjwt "github.com/lestrrat-go/jwx/v3/jwt"
 	"go.uber.org/zap"
 )
 
@@ -30,6 +35,15 @@ type SSOMiddleware struct {
 	config    SSOConfig
 	jwtSecret []byte
 	logger    *zap.Logger
+
+	// jwksMu guards jwksCache/jwksURL, lazily initialized on first ID-token
+	// verification rather than in the constructor — a constructor that
+	// blocks (or fails outright) on the IdP being reachable at Tombstone's
+	// own startup would make an unrelated network hiccup an availability
+	// incident for the whole service, not just login.
+	jwksMu    sync.Mutex
+	jwksCache *jwk.Cache
+	jwksURL   string
 }
 
 // NewSSOMiddleware creates a new SSOMiddleware.
@@ -75,10 +89,10 @@ type tokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-// idTokenClaims holds the minimal claims parsed from the OIDC ID token.
-type idTokenClaims struct {
-	Email string `json:"email"`
-	Sub   string `json:"sub"`
+// oidcDiscoveryDocument is the minimal subset of an OIDC provider's
+// /.well-known/openid-configuration response this package needs.
+type oidcDiscoveryDocument struct {
+	JWKSURI string `json:"jwks_uri"`
 }
 
 // CallbackHandler handles the OIDC authorization code callback.
@@ -98,9 +112,9 @@ func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	email, err := s.extractEmailFromIDToken(tokenResp.IDToken)
+	email, err := s.verifyIDTokenAndExtractEmail(r.Context(), tokenResp.IDToken)
 	if err != nil {
-		s.logger.Error("sso: failed to extract email from id_token", zap.Error(err))
+		s.logger.Error("sso: id_token verification failed", zap.Error(err))
 		http.Error(w, "invalid id_token", http.StatusBadGateway)
 		return
 	}
@@ -158,29 +172,106 @@ func (s *SSOMiddleware) exchangeCode(code string) (*tokenResponse, error) {
 	return &tr, nil
 }
 
-// extractEmailFromIDToken decodes the middle (payload) segment of the JWT-format
-// ID token and returns the email claim without verifying the signature.
-// Full signature verification should be added for production use.
-func (s *SSOMiddleware) extractEmailFromIDToken(idToken string) (string, error) {
-	parts := strings.Split(idToken, ".")
-	if len(parts) != 3 {
-		return "", fmt.Errorf("id_token does not have three segments")
-	}
-
-	// JWT uses base64url encoding without padding.
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+// verifyIDTokenAndExtractEmail verifies the ID token's signature against the
+// issuer's published JWKS and returns its email claim.
+//
+// SEC-5: this used to decode the token's payload segment and trust its
+// claims directly, with NO signature check at all — anything shaped like a
+// 3-segment base64 JWT with an "email" field would be accepted, regardless
+// of who (if anyone) actually signed it. That means Tombstone's own
+// signature-verified, 24h-valid login token could be minted for an
+// arbitrary email supplied by anything positioned to answer the token
+// exchange (a compromised/misdirected network path to the IdP, a
+// misconfigured issuer, etc.) — not necessarily the person who actually
+// authenticated. This now cryptographically verifies the token was signed
+// by a key the configured issuer actually publishes, for this exact client
+// (aud) and issuer (iss), before trusting anything in it.
+func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToken string) (string, error) {
+	keySet, err := s.jwks(ctx)
 	if err != nil {
-		return "", fmt.Errorf("base64 decode id_token payload: %w", err)
+		return "", fmt.Errorf("fetch issuer jwks: %w", err)
 	}
 
-	var claims idTokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("unmarshal id_token claims: %w", err)
+	tok, err := oidcjwt.Parse([]byte(idToken),
+		// Infer the verification algorithm from the KEY we fetched from the
+		// issuer's own trusted JWKS endpoint, never from the token's own
+		// (attacker-influenceable) header — some IdPs (e.g. Azure AD) omit
+		// "alg" from their published JWKs, so relying on the token header
+		// alone would fail verification for them.
+		oidcjwt.WithKeySet(keySet, jws.WithInferAlgorithmFromKey(true)),
+		oidcjwt.WithIssuer(s.config.OIDCIssuer),
+		oidcjwt.WithAudience(s.config.OIDCClientID),
+	)
+	if err != nil {
+		return "", fmt.Errorf("verify id_token: %w", err)
 	}
-	if claims.Email == "" {
-		return "", fmt.Errorf("id_token claims missing email")
+
+	var email string
+	if err := tok.Get("email", &email); err != nil || email == "" {
+		return "", fmt.Errorf("id_token missing email claim")
 	}
-	return claims.Email, nil
+	return email, nil
+}
+
+// jwks returns the issuer's current JSON Web Key Set, fetching and caching
+// it (via OIDC discovery of the issuer's jwks_uri) on first use. A failed
+// attempt is never cached — an early transient failure must not wedge SSO
+// for the lifetime of the process.
+func (s *SSOMiddleware) jwks(ctx context.Context) (jwk.Set, error) {
+	s.jwksMu.Lock()
+	cache, jwksURL := s.jwksCache, s.jwksURL
+	s.jwksMu.Unlock()
+
+	if cache == nil {
+		discoveredURL, err := discoverJWKSURL(ctx, s.config.OIDCIssuer)
+		if err != nil {
+			return nil, fmt.Errorf("discover jwks_uri: %w", err)
+		}
+
+		newCache, err := jwk.NewCache(context.Background(), httprc.NewClient())
+		if err != nil {
+			return nil, fmt.Errorf("create jwks cache: %w", err)
+		}
+		if err := newCache.Register(ctx, discoveredURL); err != nil {
+			return nil, fmt.Errorf("register jwks endpoint: %w", err)
+		}
+
+		s.jwksMu.Lock()
+		s.jwksCache, s.jwksURL = newCache, discoveredURL
+		cache, jwksURL = newCache, discoveredURL
+		s.jwksMu.Unlock()
+	}
+
+	return cache.Lookup(ctx, jwksURL)
+}
+
+// discoverJWKSURL fetches the issuer's OIDC discovery document and returns
+// its jwks_uri, per the standard /.well-known/openid-configuration convention.
+func discoverJWKSURL(ctx context.Context, issuer string) (string, error) {
+	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build discovery request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch discovery document: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("discovery endpoint returned status %d", resp.StatusCode)
+	}
+
+	var doc oidcDiscoveryDocument
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return "", fmt.Errorf("decode discovery document: %w", err)
+	}
+	if doc.JWKSURI == "" {
+		return "", fmt.Errorf("discovery document missing jwks_uri")
+	}
+	return doc.JWKSURI, nil
 }
 
 // issueTombstoneJWT creates a signed HS256 JWT containing sub=email valid for
