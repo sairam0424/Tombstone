@@ -200,8 +200,8 @@ func TestTenancyIsolation(t *testing.T) {
 	// per the SEC-3 exemption) leaked every project's requests, and
 	// Approve/RejectChangeRequest matched by id alone.
 	t.Run("ListChangeRequests and ApproveChangeRequest never cross projects", func(t *testing.T) {
-		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey)
-		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey)
+		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey, "system")
+		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey, "system")
 
 		listA := listTestChangeRequests(t, crH, projectA)
 		assertExactlyOneChangeRequestWithID(t, listA, crA)
@@ -210,7 +210,7 @@ func TestTenancyIsolation(t *testing.T) {
 		assertExactlyOneChangeRequestWithID(t, listB, crB)
 
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crB+"/approve",
-			map[string]any{"approved_by": "someone"}, projectA, map[string]string{"id": crB})
+			nil, projectA, map[string]string{"id": crB})
 		rec := httptest.NewRecorder()
 		crH.ApproveChangeRequest(rec, req)
 		if rec.Code != http.StatusNotFound {
@@ -219,11 +219,27 @@ func TestTenancyIsolation(t *testing.T) {
 		}
 
 		req = newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crA+"/approve",
-			map[string]any{"approved_by": "someone"}, projectA, map[string]string{"id": crA})
+			nil, projectA, map[string]string{"id": crA})
 		rec = httptest.NewRecorder()
 		crH.ApproveChangeRequest(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("approving its own change request: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// SEC-3: the requester must not be able to approve their own request.
+	// newTenancyRequest always authenticates as "tenancy-test" — requesting
+	// AS that same identity and then trying to approve as it too must be
+	// blocked, distinctly from a plain 404.
+	t.Run("ApproveChangeRequest rejects self-approval", func(t *testing.T) {
+		selfCR := createTestChangeRequest(ctx, t, database, projectA, sharedKey, "tenancy-test")
+
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+selfCR+"/approve",
+			nil, projectA, map[string]string{"id": selfCR})
+		rec := httptest.NewRecorder()
+		crH.ApproveChangeRequest(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("self-approval: status = %d, want 403; body: %s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -233,11 +249,11 @@ func TestTenancyIsolation(t *testing.T) {
 	// dropping this guard specifically would go uncaught. Fresh change
 	// requests: the ones above are no longer PENDING after being approved.
 	t.Run("RejectChangeRequest never crosses projects", func(t *testing.T) {
-		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey)
-		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey)
+		crA := createTestChangeRequest(ctx, t, database, projectA, sharedKey, "system")
+		crB := createTestChangeRequest(ctx, t, database, projectB, sharedKey, "system")
 
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crB+"/reject",
-			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crB})
+			map[string]any{"reason": "test"}, projectA, map[string]string{"id": crB})
 		rec := httptest.NewRecorder()
 		crH.RejectChangeRequest(rec, req)
 		if rec.Code != http.StatusNotFound {
@@ -246,7 +262,7 @@ func TestTenancyIsolation(t *testing.T) {
 		}
 
 		req = newTenancyRequest(t, http.MethodPost, "/api/v1/change-requests/"+crA+"/reject",
-			map[string]any{"rejected_by": "someone", "reason": "test"}, projectA, map[string]string{"id": crA})
+			map[string]any{"reason": "test"}, projectA, map[string]string{"id": crA})
 		rec = httptest.NewRecorder()
 		crH.RejectChangeRequest(rec, req)
 		if rec.Code != http.StatusOK {
@@ -497,14 +513,14 @@ func getTestAuditVerify(t *testing.T, h *AuditHandler, projectID string) audit.V
 // there is no HTTP creation endpoint (real rows are only ever written by
 // background processes: scim.go's detectOrphans and orphan_detector.go) —
 // and returns its generated id.
-func createTestChangeRequest(ctx context.Context, t *testing.T, database *sql.DB, projectID, flagKey string) string {
+func createTestChangeRequest(ctx context.Context, t *testing.T, database *sql.DB, projectID, flagKey, requestedBy string) string {
 	t.Helper()
 	var id string
 	err := database.QueryRowContext(ctx, `
 		INSERT INTO change_requests (flag_key, environment, requested_by, status, change_payload, project_id)
-		VALUES ($1, 'production', 'system', 'PENDING', '{}', $2)
+		VALUES ($1, 'production', $3, 'PENDING', '{}', $2)
 		RETURNING id
-	`, flagKey, projectID).Scan(&id)
+	`, flagKey, projectID, requestedBy).Scan(&id)
 	if err != nil {
 		t.Fatalf("create test change request: %v", err)
 	}

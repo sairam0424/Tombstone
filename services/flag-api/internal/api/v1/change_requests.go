@@ -107,8 +107,9 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"requests": requests})
 }
 
-// ApproveChangeRequest handles POST /api/v1/change-requests/{id}/approve
-// Body: { "approved_by": string }
+// ApproveChangeRequest handles POST /api/v1/change-requests/{id}/approve.
+// No request body: the approver is the authenticated caller (see SEC-3 note
+// below), not something a caller can name.
 func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -120,13 +121,12 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 		return
 	}
 
-	var body struct {
-		ApprovedBy string `json:"approved_by"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ApprovedBy == "" {
-		http.Error(w, `{"error":"approved_by required"}`, http.StatusBadRequest)
-		return
-	}
+	// SEC-3: the approver used to be a client-supplied "approved_by" body
+	// field, trusted verbatim — any caller could claim to be any approver.
+	// It is now the authenticated actor, and requested_by != $1 in the WHERE
+	// below rejects self-approval: the person who proposed a change must not
+	// be the one who approves it.
+	actor := actorFromContext(r.Context())
 
 	now := time.Now().UTC()
 	result, err := h.db.ExecContext(r.Context(), `
@@ -134,14 +134,26 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 		SET status      = 'APPROVED',
 		    approved_by = array_append(COALESCE(approved_by, '{}'), $1),
 		    updated_at  = $2
-		WHERE id = $3 AND status = 'PENDING' AND project_id = $4
-	`, body.ApprovedBy, now, id, projectID)
+		WHERE id = $3 AND status = 'PENDING' AND project_id = $4 AND requested_by != $1
+	`, actor, now, id, projectID)
 	if err != nil {
 		h.logger.Error("approve change request", zap.String("id", id), zap.Error(err))
 		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
 		return
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
+		// The UPDATE's WHERE clause can't say WHY it matched nothing — ask
+		// separately so a self-approval attempt gets an honest 403 instead of
+		// being indistinguishable from a genuine 404.
+		var requestedBy string
+		scanErr := h.db.QueryRowContext(r.Context(),
+			`SELECT requested_by FROM change_requests WHERE id=$1 AND project_id=$2 AND status='PENDING'`,
+			id, projectID,
+		).Scan(&requestedBy)
+		if scanErr == nil && requestedBy == actor {
+			http.Error(w, `{"error":"a change request cannot be approved by the user who requested it"}`, http.StatusForbidden)
+			return
+		}
 		http.Error(w, `{"error":"change request not found or not in PENDING state"}`, http.StatusNotFound)
 		return
 	}
@@ -151,7 +163,7 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 }
 
 // RejectChangeRequest handles POST /api/v1/change-requests/{id}/reject
-// Body: { "rejected_by": string, "reason": string }
+// Body: { "reason": string } (optional)
 func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -161,14 +173,16 @@ func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// SEC-3: the rejecter is the authenticated actor, not a client-supplied
+	// "rejected_by" body field, mirroring the ApproveChangeRequest fix above.
+	// Unlike approval, self-rejection is fine — withdrawing your own proposal
+	// isn't a security concern, so there is no requested_by check here.
+	actor := actorFromContext(r.Context())
+
 	var body struct {
-		RejectedBy string `json:"rejected_by"`
-		Reason     string `json:"reason"`
+		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RejectedBy == "" {
-		http.Error(w, `{"error":"rejected_by required"}`, http.StatusBadRequest)
-		return
-	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // reason is optional; an empty/absent body is not an error
 
 	now := time.Now().UTC()
 	result, err := h.db.ExecContext(r.Context(), `
@@ -178,7 +192,7 @@ func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *htt
 		    rejection_reason = $2,
 		    updated_at       = $3
 		WHERE id = $4 AND status = 'PENDING' AND project_id = $5
-	`, body.RejectedBy, body.Reason, now, id, projectID)
+	`, actor, body.Reason, now, id, projectID)
 	if err != nil {
 		h.logger.Error("reject change request", zap.String("id", id), zap.Error(err))
 		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
