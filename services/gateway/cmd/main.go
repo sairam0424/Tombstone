@@ -73,15 +73,17 @@ func main() {
 	defer cancel()
 	go broadcaster.Run(ctx)
 
-	// Seed consumer groups for known environments. New environments auto-register
-	// on first XREADGROUP call (MKSTREAM). Start one stream reader per environment.
+	// Seed THIS REPLICA'S OWN consumer group (GW-1) for known environments.
+	// New environments auto-register on first XREADGROUP call (MKSTREAM).
+	// Start one stream reader per environment.
 	knownEnvs := []string{"development", "staging", "production"}
-	hub.CreateConsumerGroups(ctx, rdb, knownEnvs, logger)
+	hub.CreateConsumerGroups(ctx, rdb, knownEnvs, broadcaster.Group(), logger)
 	for _, env := range knownEnvs {
 		env := env // capture loop variable
 		go broadcaster.RunStreamConsumer(ctx, env)
 	}
-	logger.Info("Redis Streams consumers started", zap.Strings("environments", knownEnvs))
+	logger.Info("Redis Streams consumers started",
+		zap.Strings("environments", knownEnvs), zap.String("group", broadcaster.Group()))
 
 	// Snapshot reconciler: low-frequency (5 min) belt-and-suspenders poll of
 	// flag-api's snapshot per environment, to recover from the dual-write gap
@@ -99,6 +101,13 @@ func main() {
 	// unmarshal failure left pending and either XCLAIM-retry them or
 	// dead-letter them once they exceed maxDeliveryAttempts. See dlq.go.
 	go runReclaimLoop(ctx, broadcaster, knownEnvs, logger)
+
+	// GW-1: idle-group GC, a much slower sweep than reclaim above (this is
+	// about abandoned GROUPS, not stuck MESSAGES) — the backstop for a
+	// replica that died without running the graceful-shutdown destroy
+	// below. Any live replica can run this against any environment's
+	// stream; it is not scoped to this replica's own group.
+	go runGroupGCLoop(ctx, rdb, knownEnvs, logger)
 
 	sseH := v1.NewSSEHandler(h, logger)
 	snapH := v1.NewSnapshotProxy(rdb, flagAPIURL, logger)
@@ -178,6 +187,23 @@ func main() {
 
 	cancel() // stop broadcaster
 	logger.Info("shutting down gateway")
+
+	// GW-1: destroy this replica's own consumer group on every known
+	// environment's stream — the fast, common-case path for a graceful
+	// shutdown (rolling deploy, deliberate scale-down), so an abandoned
+	// group and its PEL don't have to wait for the much slower idle-GC
+	// backstop (groupIdleGCThreshold, 5m) to notice. Best-effort: a failure
+	// here just means the backstop handles it instead, so this must never
+	// block or delay the rest of shutdown.
+	shutdownDestroyCtx, shutdownDestroyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	for _, env := range knownEnvs {
+		if err := rdb.XGroupDestroy(shutdownDestroyCtx, hub.StreamKey(env), broadcaster.Group()).Err(); err != nil {
+			logger.Warn("shutdown: failed to destroy own consumer group",
+				zap.String("stream", hub.StreamKey(env)), zap.String("group", broadcaster.Group()), zap.Error(err))
+		}
+	}
+	shutdownDestroyCancel()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
@@ -207,6 +233,33 @@ func runReclaimLoop(ctx context.Context, b *hub.Broadcaster, environments []stri
 					logger.Warn("reclaim sweep failed",
 						zap.String("stream", streamKey), zap.Error(err))
 				}
+			}
+		}
+	}
+}
+
+// groupGCTickInterval controls how often the idle-consumer-group GC sweep
+// runs. Much slower than reclaimTickInterval on purpose — this is looking
+// for an entire ABANDONED GROUP (a dead replica), not a stuck message, and
+// groupIdleGCThreshold (5m) already gives a wide safety margin, so there's
+// no benefit to checking more often than this.
+const groupGCTickInterval = 2 * time.Minute
+
+// runGroupGCLoop periodically calls hub.GCIdleGroups for every known
+// environment's primary stream until ctx is cancelled. Any live replica
+// runs this against every stream, not just its own — it's cleaning up
+// after replicas that are no longer around to clean up after themselves.
+func runGroupGCLoop(ctx context.Context, rdb *redis.Client, environments []string, logger *zap.Logger) {
+	ticker := time.NewTicker(groupGCTickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, env := range environments {
+				hub.GCIdleGroups(ctx, rdb, hub.StreamKey(env), logger)
 			}
 		}
 	}

@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupDLQTest starts a miniredis instance, a Broadcaster wired to it, and
-// a fresh consumer group on streamKey, returning everything a test needs
-// plus a teardown func.
+// setupDLQTest starts a miniredis instance, a Broadcaster wired to it
+// (whose own per-replica group, per GW-1, is what gets seeded on
+// streamKey), returning everything a test needs plus a teardown func.
 func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rdb *redis.Client, b *Broadcaster, streamKey string) {
 	t.Helper()
 
@@ -26,7 +26,7 @@ func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rd
 	b = NewBroadcaster(rdb, h, zap.NewNop())
 	streamKey = StreamKey(environment)
 
-	if err := rdb.XGroupCreateMkStream(context.Background(), streamKey, ConsumerGroup, "0").Err(); err != nil {
+	if err := rdb.XGroupCreateMkStream(context.Background(), streamKey, b.Group(), "0").Err(); err != nil {
 		t.Fatalf("XGroupCreateMkStream: %v", err)
 	}
 
@@ -34,10 +34,11 @@ func setupDLQTest(t *testing.T, environment string) (mr *miniredis.Miniredis, rd
 }
 
 // deliverPoisonMessage publishes a malformed (non-JSON payload) message onto
-// streamKey and reads it once via XREADGROUP as consumerName, simulating
-// what RunStreamConsumer's real read loop does: read it, fail to unmarshal,
-// and (per the fix under test) leave it un-acked in the PEL.
-func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey, consumerName string) string {
+// streamKey and reads it once via XREADGROUP (against group) as
+// consumerName, simulating what RunStreamConsumer's real read loop does:
+// read it, fail to unmarshal, and (per the fix under test) leave it
+// un-acked in the PEL.
+func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey, group, consumerName string) string {
 	t.Helper()
 
 	id, err := rdb.XAdd(ctx, &redis.XAddArgs{
@@ -54,7 +55,7 @@ func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, 
 	}
 
 	msgs, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    ConsumerGroup,
+		Group:    group,
 		Consumer: consumerName,
 		Streams:  []string{streamKey, ">"},
 		Count:    10,
@@ -83,7 +84,7 @@ func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 	defer rdb.Close()
 
 	ctx := context.Background()
-	id := deliverPoisonMessage(t, ctx, rdb, streamKey, "gateway-test-consumer")
+	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
 
 	// Advance miniredis's clock past the idle threshold so XPENDING considers
 	// this entry stale enough to reclaim. XPENDING/XCLAIM idle-time math is
@@ -108,7 +109,7 @@ func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 	}
 
 	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream: streamKey, Group: ConsumerGroup, Start: "-", End: "+", Count: 10,
+		Stream: streamKey, Group: b.Group(), Start: "-", End: "+", Count: 10,
 	}).Result()
 	if err != nil {
 		t.Fatalf("XPendingExt: %v", err)
@@ -130,7 +131,7 @@ func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 	defer rdb.Close()
 
 	ctx := context.Background()
-	id := deliverPoisonMessage(t, ctx, rdb, streamKey, "gateway-test-consumer")
+	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
 
 	// Run reclaim cycles until the message is dead-lettered. Delivery count
 	// starts at 1 (the initial XReadGroup delivery); each XCLAIM increments
@@ -160,7 +161,7 @@ func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 
 	// The original message must be gone from the primary stream's PEL.
 	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream: streamKey, Group: ConsumerGroup, Start: "-", End: "+", Count: 10,
+		Stream: streamKey, Group: b.Group(), Start: "-", End: "+", Count: 10,
 	}).Result()
 	if err != nil {
 		t.Fatalf("XPendingExt: %v", err)

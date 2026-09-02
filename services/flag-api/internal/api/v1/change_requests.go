@@ -421,14 +421,15 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 
 	curr := FlagEnvironmentState{FlagKey: cr.FlagKey, Environment: cr.Environment, Enabled: payload.Enabled, RolloutPct: payload.RolloutPct}
 	h.writeAudit(r.Context(), projectID, cr.FlagKey, cr.Environment, actor, "change_request_applied", &prev, &curr, ipFromRequest(r))
-	publishFlagEvent(r.Context(), h.rdb, h.logger, cr.Environment, FlagEvent{
+	// GW-1: one event value shared by both transports — see flags.go's
+	// UpdateEnvironment/KillSwitch for why two independent time.Now().Unix()
+	// calls would break gateway's dedup for this same logical mutation.
+	applyEvent := FlagEvent{
 		FlagKey: cr.FlagKey, Enabled: payload.Enabled, RolloutPct: payload.RolloutPct,
 		Reason: "change_request_applied", Ts: time.Now().Unix(), Environment: cr.Environment,
-	})
-	publishFlagEventToStream(r.Context(), h.rdb, h.logger, cr.Environment, FlagEvent{
-		FlagKey: cr.FlagKey, Enabled: payload.Enabled, RolloutPct: payload.RolloutPct,
-		Reason: "change_request_applied", Ts: time.Now().Unix(), Environment: cr.Environment,
-	})
+	}
+	publishFlagEvent(r.Context(), h.rdb, h.logger, cr.Environment, applyEvent)
+	publishFlagEventToStream(r.Context(), h.rdb, h.logger, cr.Environment, applyEvent)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "status": "APPLIED", "approvals": len(newApprovedBy), "required_approvals": requiredApprovals,

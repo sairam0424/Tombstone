@@ -59,13 +59,40 @@ func DLQStreamKey(streamKey string) string {
 //     XAdd convention), then XACK the original ID off the primary stream's
 //     PEL. Redis 7 has no native "move to DLQ" primitive — this is the
 //     explicit application-level decision that replaces it.
+//
+// GW-1: each replica now has its OWN consumer group, so a stream can have
+// several groups' PELs to sweep, not one shared PEL. This enumerates every
+// group on streamKey (via XINFO GROUPS) and reclaims within each — an
+// entry stuck in a DEAD replica's group's PEL is exactly what needs
+// reclaiming, and any live replica's sweep can XCLAIM/dead-letter within
+// ANY group, not just its own (Redis Streams consumer groups aren't tied
+// to a specific client connection).
 func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string) error {
+	groups, err := b.rdb.XInfoGroups(ctx, streamKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil // stream doesn't exist yet — normal, not an error
+		}
+		return err
+	}
+
+	for _, g := range groups {
+		if err := b.reclaimStalePendingInGroup(ctx, streamKey, g.Name); err != nil {
+			b.logger.Warn("dlq: reclaim failed for group",
+				zap.String("stream", streamKey), zap.String("group", g.Name), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// reclaimStalePendingInGroup is ReclaimStalePending's per-group core.
+func (b *Broadcaster) reclaimStalePendingInGroup(ctx context.Context, streamKey, group string) error {
 	consumer := reclaimConsumerName()
 	dlqKey := DLQStreamKey(streamKey)
 
 	pending, err := b.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream: streamKey,
-		Group:  ConsumerGroup,
+		Group:  group,
 		Idle:   reclaimIdleThreshold,
 		Start:  "-",
 		End:    "+",
@@ -80,9 +107,10 @@ func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string)
 
 	for _, entry := range pending {
 		if entry.RetryCount >= maxDeliveryAttempts {
-			if err := b.deadLetter(ctx, streamKey, dlqKey, entry.ID); err != nil {
+			if err := b.deadLetter(ctx, streamKey, group, dlqKey, entry.ID); err != nil {
 				b.logger.Warn("dlq: failed to dead-letter message",
 					zap.String("stream", streamKey),
+					zap.String("group", group),
 					zap.String("id", entry.ID),
 					zap.Error(err))
 			}
@@ -94,7 +122,7 @@ func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string)
 		// so no second read call is needed to get the payload back.
 		msgs, err := b.rdb.XClaim(ctx, &redis.XClaimArgs{
 			Stream:   streamKey,
-			Group:    ConsumerGroup,
+			Group:    group,
 			Consumer: consumer,
 			MinIdle:  reclaimIdleThreshold,
 			Messages: []string{entry.ID},
@@ -102,13 +130,14 @@ func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string)
 		if err != nil {
 			b.logger.Warn("dlq: xclaim failed",
 				zap.String("stream", streamKey),
+				zap.String("group", group),
 				zap.String("id", entry.ID),
 				zap.Error(err))
 			continue
 		}
 
 		for _, msg := range msgs {
-			b.reprocessClaimedMessage(ctx, streamKey, msg)
+			b.reprocessClaimedMessage(ctx, streamKey, group, msg)
 		}
 	}
 
@@ -120,7 +149,7 @@ func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string)
 // see publishToStream in services/flag-api/internal/scheduler/scheduler.go
 // for the identical XAdd option shape), then XACK the original ID so it
 // leaves the primary stream's PEL for good.
-func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, dlqKey, msgID string) error {
+func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, group, dlqKey, msgID string) error {
 	// XPendingExt only returns PEL metadata (ID, consumer, idle, delivery
 	// count) — re-read the message body via XRange before it's gone.
 	msgs, err := b.rdb.XRange(ctx, streamKey, msgID, msgID).Result()
@@ -131,7 +160,7 @@ func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, dlqKey, msgID s
 		// Message already trimmed off the primary stream (MaxLen approx
 		// eviction raced us) — nothing left to preserve. ACK to drop the
 		// now-orphaned PEL entry.
-		AckStreamMessage(ctx, b.rdb, streamKey, msgID)
+		AckStreamMessage(ctx, b.rdb, streamKey, group, msgID)
 		return nil
 	}
 
@@ -144,9 +173,10 @@ func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, dlqKey, msgID s
 		return err
 	}
 
-	AckStreamMessage(ctx, b.rdb, streamKey, msgID)
+	AckStreamMessage(ctx, b.rdb, streamKey, group, msgID)
 	b.logger.Warn("dlq: message moved to dead-letter stream",
 		zap.String("stream", streamKey),
+		zap.String("group", group),
 		zap.String("dlq", dlqKey),
 		zap.String("id", msgID))
 	return nil
@@ -158,7 +188,7 @@ func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, dlqKey, msgID s
 // deliberately does NOT ack — the entry stays in the PEL, idle again, with
 // delivery-count already incremented by XCLAIM, until a future sweep finds
 // it over maxDeliveryAttempts and dead-letters it above.
-func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey string, msg redis.XMessage) {
+func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, group string, msg redis.XMessage) {
 	payload, ok := msg.Values["payload"].(string)
 	if !ok {
 		b.logger.Warn("dlq: reclaimed message missing payload field, leaving pending",
@@ -177,13 +207,19 @@ func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey str
 	if environment == "" {
 		environment = event.Environment
 	}
-	b.hub.Broadcast(environment, event)
-	AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+	// GW-1 (dedup.go): a reclaimed message may still race a fresh delivery
+	// of the same logical event via pub/sub or another replica's group.
+	if b.deduper.claim(event) {
+		b.hub.Broadcast(environment, event)
+	}
+	AckStreamMessage(ctx, b.rdb, streamKey, group, msg.ID)
 }
 
 // reclaimConsumerName builds a consumer identity distinct from
-// RunStreamConsumer's own ("gateway-{hostname}") so XPENDING/XCLAIM activity
-// from the reclaim sweep is attributable separately in XINFO CONSUMERS.
+// RunStreamConsumer's own ("primary") so XPENDING/XCLAIM activity from the
+// reclaim sweep is attributable separately in XINFO CONSUMERS — including
+// when a live replica's sweep reclaims a DEAD replica's group, where this
+// name shows up as a new consumer within a group it doesn't otherwise own.
 func reclaimConsumerName() string {
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("gateway-reclaim-%s", hostname)

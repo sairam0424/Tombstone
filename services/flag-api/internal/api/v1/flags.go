@@ -375,14 +375,18 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		writeBreakGlassAuditEntry(r.Context(), h.audit, h.logger, ipFromRequest(r), actor, bgTokenID, bgScope,
 			"bypassed require_approval on "+r.URL.Path, key, env, projectID)
 	}
-	h.publishEvent(r.Context(), env, FlagEvent{
+	// GW-1: publish ONE event value to both transports, not two independently
+	// constructed literals — gateway's dedup (services/gateway/internal/hub/
+	// dedup.go) keys on the full event including Ts, so two separate
+	// time.Now().Unix() calls straddling a second boundary would make the
+	// same logical mutation look like two different events and double-
+	// broadcast to every gateway replica's clients.
+	event := FlagEvent{
 		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
-	})
-	h.publishToStream(r.Context(), env, FlagEvent{
-		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
-		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
-	})
+	}
+	h.publishEvent(r.Context(), env, event)
+	h.publishToStream(r.Context(), env, event)
 
 	writeJSON(w, http.StatusOK, curr)
 }
@@ -441,14 +445,15 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "kill_switch_activated",
 		nil, map[string]any{"enabled": false, "reason": req.Reason}, ipFromRequest(r))
-	h.publishEvent(r.Context(), req.Environment, FlagEvent{
+	// GW-1: see UpdateEnvironment's identical comment above — one event
+	// value shared by both transports, not two independently-timestamped
+	// literals.
+	killEvent := FlagEvent{
 		FlagKey: key, Enabled: false, RolloutPct: 0,
 		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
-	})
-	h.publishToStream(r.Context(), req.Environment, FlagEvent{
-		FlagKey: key, Enabled: false, RolloutPct: 0,
-		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
-	})
+	}
+	h.publishEvent(r.Context(), req.Environment, killEvent)
+	h.publishToStream(r.Context(), req.Environment, killEvent)
 
 	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
 }
