@@ -137,7 +137,7 @@ func consumeBreakGlassToken(ctx context.Context, db *sql.DB, hasher *secrets.Tok
 		return "", "", fmt.Errorf("commit: %w", err)
 	}
 
-	writeBreakGlassAuditEntry(ctx, auditW, logger, ip, usedBy, tokenID, scope, actionDesc)
+	writeBreakGlassAuditEntry(ctx, auditW, logger, ip, usedBy, tokenID, scope, actionDesc, "", "", "")
 	return scope, tokenID, nil
 }
 
@@ -145,17 +145,27 @@ func consumeBreakGlassToken(ctx context.Context, db *sql.DB, hasher *secrets.Tok
 // regardless of which caller consumed it — an auditor filtering audit_log
 // for "break_glass_token_used" sees every use, whether via the standalone
 // UseToken ceremony or the require_approval gate's bypass path.
-func writeBreakGlassAuditEntry(ctx context.Context, auditW *audit.Writer, logger *zap.Logger, ip, actor, tokenID, scope, actionDesc string) {
+//
+// flagKey/environment/projectID are "" for the standalone ceremony (a
+// break-glass token isn't inherently tied to one flag), but populated when
+// the gate calls this from within a specific flag write — otherwise an
+// auditor querying "everything that happened to this flag" would never see
+// the break-glass entry alongside the flag_environment_updated_via_breakglass
+// one it accompanies, only find it by knowing to search event_type instead.
+func writeBreakGlassAuditEntry(ctx context.Context, auditW *audit.Writer, logger *zap.Logger, ip, actor, tokenID, scope, actionDesc, flagKey, environment, projectID string) {
 	if auditW == nil {
 		logger.Warn("break-glass audit write skipped — no audit writer configured")
 		return
 	}
 	detailsJSON, _ := json.Marshal(map[string]any{"scope": scope, "action": actionDesc, "token_id": tokenID})
 	if _, _, err := auditW.Append(ctx, audit.Entry{
-		Actor:     actor,
-		EventType: "break_glass_token_used",
-		NewState:  detailsJSON,
-		IPAddress: ip,
+		FlagKey:     flagKey,
+		Environment: environment,
+		Actor:       actor,
+		EventType:   "break_glass_token_used",
+		NewState:    detailsJSON,
+		IPAddress:   ip,
+		ProjectID:   projectID,
 	}); err != nil {
 		// Best-effort, matching every other audit write in this codebase — a
 		// failed audit write must not undo an already-consumed token or block

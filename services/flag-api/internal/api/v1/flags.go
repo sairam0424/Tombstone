@@ -373,7 +373,7 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 			zap.String("project_id", projectID), zap.String("actor", actor),
 			zap.String("scope", bgScope), zap.String("token_id", bgTokenID), zap.String("path", r.URL.Path))
 		writeBreakGlassAuditEntry(r.Context(), h.audit, h.logger, ipFromRequest(r), actor, bgTokenID, bgScope,
-			"bypassed require_approval on "+r.URL.Path)
+			"bypassed require_approval on "+r.URL.Path, key, env, projectID)
 	}
 	h.publishEvent(r.Context(), env, FlagEvent{
 		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
