@@ -2,10 +2,10 @@ package v1
 
 import (
 	"context"
+	"crypto/hmac"
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -359,15 +359,20 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 }
 
 // SCIMAuthMiddleware returns HTTP middleware that validates Bearer token auth
-// for SCIM endpoints. When SCIM_TOKEN env var is empty, all requests pass
-// through (dev mode).
+// for SCIM endpoints.
+//
+// SEC-5: this used to allow EVERY request through unauthenticated ("dev
+// mode") whenever SCIM_TOKEN was unset — and SCIM_TOKEN is set nowhere in
+// .env.example, ci.yml, or the northflank/helm deployment configs, so every
+// currently-documented deployment ran with SCIM wide open: anyone could list,
+// provision, update, or DEPROVISION users with no credential at all. It now
+// fails closed instead — SCIM is unavailable, not unauthenticated, until a
+// token is actually configured.
 func SCIMAuthMiddleware(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			envToken := os.Getenv("SCIM_TOKEN")
-			if envToken == "" {
-				// Dev mode: no token configured, allow all requests.
-				next.ServeHTTP(w, r)
+			if token == "" {
+				writeSCIMError(w, http.StatusServiceUnavailable, "SCIM is not configured (SCIM_TOKEN is unset)")
 				return
 			}
 
@@ -378,13 +383,11 @@ func SCIMAuthMiddleware(token string) func(http.Handler) http.Handler {
 			}
 
 			provided := strings.TrimPrefix(authHeader, "Bearer ")
-			// Use the token passed at router setup time if non-empty,
-			// otherwise fall back to the env var re-read at request time.
-			expected := token
-			if expected == "" {
-				expected = envToken
-			}
-			if provided != expected {
+			// Constant-time: a length/byte-position-dependent timing
+			// difference on a bearer credential is a real side channel, the
+			// same reasoning already applied to every other token comparison
+			// in this codebase (internal/secrets' TokenHasher.Equal, AuditKey.Equal).
+			if !hmac.Equal([]byte(provided), []byte(token)) {
 				writeSCIMError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
