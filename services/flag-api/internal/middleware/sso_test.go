@@ -35,6 +35,22 @@ type ssoTestIdP struct {
 	rsaPub         *rsa.PublicKey
 	discoveryCalls atomic.Int32
 	failDiscovery  atomic.Bool
+
+	// tokenClaimsMu guards tokenClaims: set by the test goroutine (once it
+	// knows the nonce LoginHandler generated), read by /oauth/token's
+	// handler goroutine when a test drives a real LoginHandler->CallbackHandler
+	// round trip.
+	tokenClaimsMu sync.Mutex
+	tokenClaims   map[string]any
+}
+
+// setTokenClaims makes /oauth/token respond with a real ID token signed
+// with these claims. Needed only by tests that exercise a full
+// LoginHandler->CallbackHandler round trip against this fake IdP.
+func (idp *ssoTestIdP) setTokenClaims(claims map[string]any) {
+	idp.tokenClaimsMu.Lock()
+	defer idp.tokenClaimsMu.Unlock()
+	idp.tokenClaims = claims
 }
 
 func newSSOTestIdP(t *testing.T) *ssoTestIdP {
@@ -92,6 +108,26 @@ func newSSOTestIdPOpts(t *testing.T, keyHasAlg bool) *ssoTestIdP {
 			t.Errorf("encode jwks response: %v", err)
 		}
 	})
+	// /oauth/token: only tests that call setTokenClaims (a full
+	// LoginHandler->CallbackHandler round trip) use this; every other test
+	// posts directly to its own standalone mux and never reaches this one.
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		idp.tokenClaimsMu.Lock()
+		claims := idp.tokenClaims
+		idp.tokenClaimsMu.Unlock()
+		if claims == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		idToken, err := idp.signIDToken(claims)
+		if err != nil {
+			t.Errorf("sign id token for /oauth/token response: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id_token":%q,"access_token":"stub","token_type":"Bearer","expires_in":3600}`, idToken)
+	})
 
 	idp.server = httptest.NewServer(mux)
 	t.Cleanup(idp.server.Close)
@@ -108,20 +144,31 @@ const testNonce = "test-nonce"
 // discovery/JWKS endpoints above actually publish.
 func (idp *ssoTestIdP) issueIDToken(t *testing.T, claims map[string]any) string {
 	t.Helper()
+	signed, err := idp.signIDToken(claims)
+	if err != nil {
+		t.Fatalf("issue id token: %v", err)
+	}
+	return signed
+}
+
+// signIDToken is issueIDToken's error-returning core — needed separately
+// because the /oauth/token handler above runs in its own goroutine, where
+// calling t.Fatalf is unsafe.
+func (idp *ssoTestIdP) signIDToken(claims map[string]any) (string, error) {
 	if _, ok := claims["nonce"]; !ok {
 		claims["nonce"] = testNonce
 	}
 	tok := oidcjwt.New()
 	for k, v := range claims {
 		if err := tok.Set(k, v); err != nil {
-			t.Fatalf("set claim %q: %v", k, err)
+			return "", fmt.Errorf("set claim %q: %w", k, err)
 		}
 	}
 	signed, err := oidcjwt.Sign(tok, oidcjwt.WithKey(jwa.RS256(), idp.signingKey))
 	if err != nil {
-		t.Fatalf("sign token: %v", err)
+		return "", fmt.Errorf("sign token: %w", err)
 	}
-	return string(signed)
+	return string(signed), nil
 }
 
 func testSSOMiddleware(idp *ssoTestIdP, clientID string) *SSOMiddleware {
@@ -144,7 +191,7 @@ func TestVerifyIDTokenAndExtractEmail_ValidTokenSucceeds(t *testing.T) {
 		"exp":   now.Add(time.Hour),
 	})
 
-	email, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
+	email, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -170,7 +217,7 @@ func TestVerifyIDTokenAndExtractEmail_UnsignedForgedTokenRejected(t *testing.T) 
 	)))
 	forged := header + "." + payload + ".not-a-real-signature"
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
 		t.Fatal("a token with a fabricated signature must not verify, even with well-formed, " +
 			"plausible-looking claims — this is exactly the vulnerability class being fixed")
 	}
@@ -204,7 +251,7 @@ func TestVerifyIDTokenAndExtractEmail_WrongSigningKeyRejected(t *testing.T) {
 		t.Fatalf("sign with bogus key: %v", err)
 	}
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), string(signed), testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), string(signed), testNonce); err == nil {
 		t.Fatal("a token signed with a key the issuer never published must not verify")
 	}
 }
@@ -220,7 +267,7 @@ func TestVerifyIDTokenAndExtractEmail_WrongAudienceRejected(t *testing.T) {
 		"exp":   time.Now().Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a token issued for a different client (aud) must not verify")
 	}
 }
@@ -236,7 +283,7 @@ func TestVerifyIDTokenAndExtractEmail_WrongIssuerRejected(t *testing.T) {
 		"exp":   time.Now().Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a token whose iss does not match the configured issuer must not verify")
 	}
 }
@@ -252,7 +299,7 @@ func TestVerifyIDTokenAndExtractEmail_ExpiredTokenRejected(t *testing.T) {
 		"exp":   time.Now().Add(-time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("an expired token must not verify")
 	}
 }
@@ -267,7 +314,7 @@ func TestVerifyIDTokenAndExtractEmail_MissingEmailClaimRejected(t *testing.T) {
 		"exp": time.Now().Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a validly-signed token with no email claim must not resolve to an identity")
 	}
 }
@@ -292,7 +339,7 @@ func TestVerifyIDTokenAndExtractEmail_NonceMismatchRejected(t *testing.T) {
 		"exp":   now.Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a token whose nonce does not match this login attempt's nonce must not verify")
 	}
 }
@@ -319,7 +366,7 @@ func TestVerifyIDTokenAndExtractEmail_MissingNonceRejected(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), string(signed), testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), string(signed), testNonce); err == nil {
 		t.Fatal("a validly-signed token with no nonce claim must not verify once a nonce is expected")
 	}
 }
@@ -344,7 +391,7 @@ func TestVerifyIDTokenAndExtractEmail_UnverifiedEmailRejected(t *testing.T) {
 		"exp":            now.Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a validly-signed token with email_verified=false must not resolve to a trusted identity")
 	}
 }
@@ -363,7 +410,7 @@ func TestVerifyIDTokenAndExtractEmail_EmailVerifiedAsStringFalseRejected(t *test
 		"exp":            now.Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal(`email_verified sent as the string "false" (e.g. AWS Cognito) must be rejected the same as the boolean`)
 	}
 }
@@ -381,7 +428,7 @@ func TestVerifyIDTokenAndExtractEmail_MissingEmailVerifiedAccepted(t *testing.T)
 		"exp":   now.Add(time.Hour),
 	})
 
-	email, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
+	email, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
 	if err != nil {
 		t.Fatalf("an IdP that omits email_verified entirely must still be accepted for compatibility: %v", err)
 	}
@@ -401,7 +448,7 @@ func TestVerifyIDTokenAndExtractEmail_MissingExpRejected(t *testing.T) {
 		"iat":   time.Now(),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a validly-signed token with no exp claim must not verify — exp is a required OIDC ID token claim")
 	}
 }
@@ -417,7 +464,7 @@ func TestVerifyIDTokenAndExtractEmail_MissingIatRejected(t *testing.T) {
 		"exp":   time.Now().Add(time.Hour),
 	})
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce); err == nil {
 		t.Fatal("a validly-signed token with no iat claim must not verify — iat is a required OIDC ID token claim")
 	}
 }
@@ -439,7 +486,7 @@ func TestVerifyIDTokenAndExtractEmail_KeyWithoutAlgFieldStillVerifies(t *testing
 		"exp":   now.Add(time.Hour),
 	})
 
-	email, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
+	email, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
 	if err != nil {
 		t.Fatalf("verify against a JWKS entry with no alg field: %v", err)
 	}
@@ -460,7 +507,7 @@ func TestVerifyIDTokenAndExtractEmail_AlgNoneRejected(t *testing.T) {
 	)))
 	forged := header + "." + payload + "."
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
 		t.Fatal("a token asserting alg=none must not verify — this is the classic 'none algorithm' JWT bypass")
 	}
 }
@@ -491,7 +538,7 @@ func TestVerifyIDTokenAndExtractEmail_HMACAlgConfusionRejected(t *testing.T) {
 		t.Fatalf("sign hmac-confusion token: %v", err)
 	}
 
-	if _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
+	if _, _, err := sso.verifyIDTokenAndExtractEmail(context.Background(), forged, testNonce); err == nil {
 		t.Fatal("an HS256 token HMAC-signed with the RSA public key's own bytes must not verify against that RSA key")
 	}
 }

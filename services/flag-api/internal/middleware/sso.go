@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -62,6 +63,9 @@ type SSOMiddleware struct {
 	config    SSOConfig
 	jwtSecret []byte
 	logger    *zap.Logger
+	// db is used only for the best-effort user_mfa_log write in
+	// CallbackHandler (SEC-5) — never for anything on the auth-decision path.
+	db *sql.DB
 
 	// jwksMu guards the fields below and is held for the FULL duration of a
 	// cold JWKS-cache initialization, not just the read/write of the cached
@@ -84,11 +88,12 @@ type SSOMiddleware struct {
 }
 
 // NewSSOMiddleware creates a new SSOMiddleware.
-func NewSSOMiddleware(config SSOConfig, jwtSecret string, logger *zap.Logger) *SSOMiddleware {
+func NewSSOMiddleware(config SSOConfig, jwtSecret string, logger *zap.Logger, db *sql.DB) *SSOMiddleware {
 	return &SSOMiddleware{
 		config:    config,
 		jwtSecret: []byte(jwtSecret),
 		logger:    logger,
+		db:        db,
 	}
 }
 
@@ -291,7 +296,7 @@ func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	email, err := s.verifyIDTokenAndExtractEmail(r.Context(), tokenResp.IDToken, sess.Nonce)
+	email, amr, err := s.verifyIDTokenAndExtractEmail(r.Context(), tokenResp.IDToken, sess.Nonce)
 	if err != nil {
 		s.logger.Error("sso: id_token verification failed", zap.Error(err))
 		http.Error(w, "invalid id_token", http.StatusBadGateway)
@@ -310,6 +315,19 @@ func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// SEC-5 (SOC 2 CC6 evidence): dispatched in the background, not just
+	// best-effort-but-synchronous — a slow user_mfa_log write must never
+	// delay this response, and one that hangs past the server's
+	// WriteTimeout must not be able to make an already-successful login look
+	// like it failed to the client. context.Background(), not r.Context():
+	// this write is meant to outlive the request. Mirrors
+	// FlagHandler.writeAudit's async Rekor submission goroutine.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.logMFAEvent(ctx, email, amr)
+	}()
 
 	s.logger.Info("sso: login successful", zap.String("email", email))
 
@@ -366,10 +384,10 @@ func (s *SSOMiddleware) exchangeCode(code, codeVerifier string) (*tokenResponse,
 // authenticated. This now cryptographically verifies the token was signed
 // by a key the configured issuer actually publishes, for this exact client
 // (aud) and issuer (iss), before trusting anything in it.
-func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToken, expectedNonce string) (string, error) {
+func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToken, expectedNonce string) (email string, amr []string, err error) {
 	keySet, err := s.jwks(ctx)
 	if err != nil {
-		return "", fmt.Errorf("fetch issuer jwks: %w", err)
+		return "", nil, fmt.Errorf("fetch issuer jwks: %w", err)
 	}
 
 	tok, err := oidcjwt.Parse([]byte(idToken),
@@ -389,12 +407,11 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 		oidcjwt.WithRequiredClaim(oidcjwt.IssuedAtKey),
 	)
 	if err != nil {
-		return "", fmt.Errorf("verify id_token: %w", err)
+		return "", nil, fmt.Errorf("verify id_token: %w", err)
 	}
 
-	var email string
 	if err := tok.Get("email", &email); err != nil || email == "" {
-		return "", fmt.Errorf("id_token missing email claim")
+		return "", nil, fmt.Errorf("id_token missing email claim")
 	}
 
 	// email_verified=false means the IdP itself has not confirmed the user
@@ -404,7 +421,7 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 	// claim is explicitly present and not truthy; many IdPs omit it entirely,
 	// and treating absence as untrusted would break those.
 	if verified, present := emailVerifiedClaim(tok); present && !verified {
-		return "", fmt.Errorf("id_token email is not verified by issuer")
+		return "", nil, fmt.Errorf("id_token email is not verified by issuer")
 	}
 
 	// nonce binds this ID token to the specific authorization request that
@@ -415,13 +432,109 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 	// signature and matching iss/aud.
 	var nonce string
 	if err := tok.Get("nonce", &nonce); err != nil || nonce == "" {
-		return "", fmt.Errorf("id_token missing nonce claim")
+		return "", nil, fmt.Errorf("id_token missing nonce claim")
 	}
 	if !hmac.Equal([]byte(nonce), []byte(expectedNonce)) {
-		return "", fmt.Errorf("id_token nonce does not match this login attempt")
+		return "", nil, fmt.Errorf("id_token nonce does not match this login attempt")
 	}
 
-	return email, nil
+	// amr (Authentication Methods References, RFC 8176) is optional and
+	// IdP-dependent — absence just means no MFA evidence either way, not
+	// that MFA didn't happen. See classifyMFAEvent's own comment for why
+	// this is treated as a best-effort signal, not a guarantee.
+	amr = s.extractAMR(tok)
+
+	return email, amr, nil
+}
+
+// mfaAMRValues are RFC 8176 Authentication Method Reference values (plus
+// common vendor extensions for OTP/WebAuthn/U2F) that indicate a second
+// factor was used, distinct from "pwd" (password) alone. This list is
+// necessarily incomplete — amr values vary across IdPs, and there is no
+// live IdP in this environment to test real-world coverage against. Treat
+// classifyMFAEvent's output as a best-effort signal, not a guarantee.
+var mfaAMRValues = map[string]bool{
+	"mfa": true, "otp": true, "hwk": true, "swk": true, "sms": true,
+	"tel": true, "face": true, "fpt": true, "iris": true, "vbm": true, "u2f": true,
+}
+
+// classifyMFAEvent decides what (if anything) to record in user_mfa_log
+// for this login, based on the ID token's amr claim. Deliberately does NOT
+// invent an event when amr is absent: many IdPs never send it, and
+// fabricating "MFA was/wasn't used" from silence would be exactly the kind
+// of false compliance evidence this project's "make the claims true"
+// mandate exists to eliminate. mfa_required is never emitted here — this
+// codebase has no MFA-required *policy* concept to log against yet (that
+// would be a separate enforcement feature); this only records evidence for
+// logins that assert a first-vs-second-factor makeup.
+func classifyMFAEvent(amr []string) (eventType string, applicable bool) {
+	if len(amr) == 0 {
+		return "", false
+	}
+	for _, method := range amr {
+		if mfaAMRValues[strings.ToLower(method)] {
+			return "mfa_verified", true
+		}
+	}
+	// amr was present and positively asserts a set of methods, none of
+	// which indicate a second factor — e.g. amr=["pwd"]. Distinct from amr
+	// being absent: this is actual evidence, not silence.
+	return "mfa_bypassed", true
+}
+
+// extractAMR reads the ID token's "amr" (Authentication Methods References)
+// claim. RFC 8176 specifies a JSON array of strings, but some IdPs and
+// claim-mapping layers emit a bare string instead when there is exactly one
+// method — accepted here as a single-element list rather than silently
+// dropped. Returns nil when the claim is genuinely absent (expected,
+// unlogged — amr is optional and its absence must never fail the login) and
+// also logs a warning for the residual case where it's present in some
+// other, unrecognized shape: without this, "no evidence either way" and
+// "evidence we failed to parse" were indistinguishable, which is exactly
+// backwards for a feature whose entire point is not fabricating evidence.
+func (s *SSOMiddleware) extractAMR(tok oidcjwt.Token) []string {
+	var raw any
+	if err := tok.Get("amr", &raw); err != nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []any:
+		var amr []string
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				amr = append(amr, str)
+			}
+		}
+		if len(amr) == 0 {
+			s.logger.Warn("sso: amr claim present but contained no string entries — MFA evidence unavailable for this login, not confirmed absent")
+		}
+		return amr
+	case string:
+		return []string{v}
+	default:
+		s.logger.Warn("sso: amr claim present in an unrecognized shape — MFA evidence unavailable for this login, not confirmed absent",
+			zap.String("go_type", fmt.Sprintf("%T", raw)))
+		return nil
+	}
+}
+
+// logMFAEvent writes a best-effort user_mfa_log entry (SOC 2 CC6 evidence).
+// Never returns an error — a failed or skipped write must never affect the
+// login it's describing.
+func (s *SSOMiddleware) logMFAEvent(ctx context.Context, email string, amr []string) {
+	eventType, applicable := classifyMFAEvent(amr)
+	if !applicable {
+		return
+	}
+	if s.db == nil {
+		s.logger.Warn("sso: mfa event log skipped — no db configured", zap.String("event_type", eventType))
+		return
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO user_mfa_log (user_id, event_type) VALUES ($1, $2)
+	`, email, eventType); err != nil {
+		s.logger.Warn("sso: mfa event log write failed", zap.Error(err), zap.String("event_type", eventType))
+	}
 }
 
 // emailVerifiedClaim returns the token's email_verified claim and whether it
