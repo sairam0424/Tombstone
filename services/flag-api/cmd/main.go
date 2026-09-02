@@ -173,11 +173,23 @@ func main() {
 	// Idempotency-key cleanup: purges expired idempotency_keys rows every hour.
 	go idempotencyMw.StartCleanup(bgCtx)
 
+	// OBS-1 (first slice): pull-based, no OTLP_ENDPOINT/collector needed —
+	// unlike InitTracer, there's no "unset means no-op" branch.
+	meter, metricsHandler, err := telemetry.InitMeter("flag-api")
+	if err != nil {
+		logger.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		logger.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(httpMetrics)
 	r.Use(rateMw.RateLimit)
 	// Load shedding runs AFTER rate limiting: rate limiting rejects
 	// over-quota callers first, regardless of system load; load shedding
@@ -197,6 +209,11 @@ func main() {
 
 	healthChecker := &health.Checker{DB: db, RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above. Network-level access control
+	// (not app-level auth) is the expected boundary for scrape endpoints.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 
 	// Redoc interactive API explorer — public, no auth middleware.
 	// Must be registered BEFORE the auth-gated /api/v1 route group.

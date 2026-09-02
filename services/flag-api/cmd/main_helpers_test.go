@@ -59,6 +59,29 @@ func TestSSOConfigWiresAllowedDomains(t *testing.T) {
 	}
 }
 
+// TestOBS1MetricsAreWired is a structural regression guard, mirroring
+// TestSSOConfigWiresAllowedDomains's technique: OBS-1's two new wiring
+// facts (the httpMetrics middleware actually being registered, and
+// GET /metrics actually being routed) can't be exercised without a live
+// server, so this parses main.go's source instead. Without a guard like
+// this, a future refactor of the middleware chain or route block could
+// silently drop either line — RED metrics stop being recorded service-wide,
+// or the Prometheus scrape endpoint starts 404ing — with nothing but a
+// blank dashboard in production to notice.
+func TestOBS1MetricsAreWired(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	if !regexp.MustCompile(`r\.Use\(httpMetrics\)`).MatchString(string(src)) {
+		t.Error("main.go no longer registers r.Use(httpMetrics) — RED metrics would silently stop being recorded for every request")
+	}
+	if !regexp.MustCompile(`r\.Get\("/metrics",\s*metricsHandler\.ServeHTTP\)`).MatchString(string(src)) {
+		t.Error("main.go no longer routes GET /metrics to metricsHandler — the Prometheus scrape endpoint would start 404ing")
+	}
+}
+
 // TestEnvIntOrDefault is the direct regression proof for DATA-2's
 // env-tunable pooling: an unset/empty env var must reproduce today's
 // hardcoded default exactly, and a malformed or non-positive value must
