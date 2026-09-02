@@ -140,7 +140,7 @@ func main() {
 	// as unverifiable, because dropping audit records outright is worse.
 	auditWriter := audit.NewWriter(db, auditKey)
 
-	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher)
+	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher, logger)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
 	rateMw := middleware.NewRateLimitMiddleware(rdb)
 	defer rateMw.Stop()

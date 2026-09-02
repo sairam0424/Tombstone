@@ -214,7 +214,7 @@ func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
 				WillReturnRows(sqlmock.NewRows([]string{"name", "role", "project_id"}).
 					AddRow("gitops-sync", c.dbRole, wantProjectID))
 
-			auth := NewAuthMiddleware(db, "secret", hasher)
+			auth := NewAuthMiddleware(db, "secret", hasher, zap.NewNop())
 			actor, role, projectID, ok := auth.validateServiceToken(context.Background(), "tok-123")
 
 			if !ok {
@@ -248,7 +248,7 @@ func TestValidateServiceTokenRejectsUnknownOrRevoked(t *testing.T) {
 		WithArgs(hasher.Hash("revoked")).
 		WillReturnError(sql.ErrNoRows)
 
-	auth := NewAuthMiddleware(db, "secret", hasher)
+	auth := NewAuthMiddleware(db, "secret", hasher, zap.NewNop())
 	actor, role, projectID, ok := auth.validateServiceToken(context.Background(), "revoked")
 
 	if ok {
