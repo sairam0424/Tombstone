@@ -3,6 +3,8 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -84,6 +86,48 @@ func TestExtractAMR(t *testing.T) {
 			t.Errorf("amr = %v, want nil", amr)
 		}
 	})
+
+	// A bare-string amr (single method, not wrapped in a JSON array) is a
+	// real shape some IdPs and claim-mapping layers actually emit, even
+	// though RFC 8176 specifies an array. Before this fix, extractAMR
+	// silently dropped it and returned nil — indistinguishable from the
+	// "amr absent" case above, even though a genuine amr value WAS present.
+	t.Run("amr present as a bare string", func(t *testing.T) {
+		now := time.Now()
+		token := idp.issueIDToken(t, map[string]any{
+			"iss": idp.server.URL, "aud": []string{"test-client"}, "email": "alice@example.com",
+			"iat": now, "exp": now.Add(time.Hour), "amr": "pwd",
+		})
+		_, amr, err := (&SSOMiddleware{config: SSOConfig{OIDCIssuer: idp.server.URL, OIDCClientID: "test-client"}, logger: zap.NewNop()}).
+			verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if len(amr) != 1 || amr[0] != "pwd" {
+			t.Errorf("amr = %v, want [pwd]", amr)
+		}
+	})
+
+	// An amr claim present in some other unrecognized shape (e.g. a bare
+	// number) must not panic and must not be treated as evidence — it's
+	// neither "absent" nor a parseable claim, so extractAMR falls back to
+	// nil the same as absence, only louder (a logged warning, not asserted
+	// here, distinguishes the two internally).
+	t.Run("amr present in an unrecognized shape returns nil without panicking", func(t *testing.T) {
+		now := time.Now()
+		token := idp.issueIDToken(t, map[string]any{
+			"iss": idp.server.URL, "aud": []string{"test-client"}, "email": "alice@example.com",
+			"iat": now, "exp": now.Add(time.Hour), "amr": 42,
+		})
+		_, amr, err := (&SSOMiddleware{config: SSOConfig{OIDCIssuer: idp.server.URL, OIDCClientID: "test-client"}, logger: zap.NewNop()}).
+			verifyIDTokenAndExtractEmail(context.Background(), token, testNonce)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if amr != nil {
+			t.Errorf("amr = %v, want nil", amr)
+		}
+	})
 }
 
 // TestLogMFAEvent is the executable gate for SEC-5's MFA-logging fix — it
@@ -121,6 +165,31 @@ func TestLogMFAEvent(t *testing.T) {
 		return n
 	}
 
+	// assertRowShape checks the columns countEventsFor doesn't: a login
+	// event isn't scoped to any flag/environment (unlike every other
+	// audit_log-style write in this codebase, which usually is one), and its
+	// timestamp should be genuinely fresh, not some stale or future value.
+	assertRowShape := func(t *testing.T, userID, eventType string) {
+		t.Helper()
+		var flagKey, environment sql.NullString
+		var createdAt time.Time
+		if err := database.QueryRowContext(ctx,
+			`SELECT flag_key, environment, created_at FROM user_mfa_log WHERE user_id = $1 AND event_type = $2`,
+			userID, eventType,
+		).Scan(&flagKey, &environment, &createdAt); err != nil {
+			t.Fatalf("scan user_mfa_log row: %v", err)
+		}
+		if flagKey.Valid {
+			t.Errorf("flag_key = %q, want NULL — an MFA login event is not scoped to any flag", flagKey.String)
+		}
+		if environment.Valid {
+			t.Errorf("environment = %q, want NULL — an MFA login event is not scoped to any environment", environment.String)
+		}
+		if age := time.Since(createdAt); age < 0 || age > time.Minute {
+			t.Errorf("created_at = %s (%s ago), want a recent timestamp", createdAt, age)
+		}
+	}
+
 	t.Run("amr with a second factor writes mfa_verified", func(t *testing.T) {
 		s := &SSOMiddleware{logger: zap.NewNop(), db: database}
 		s.logMFAEvent(ctx, "mfa-verified@example.com", []string{"pwd", "otp"})
@@ -128,6 +197,7 @@ func TestLogMFAEvent(t *testing.T) {
 		if got := countEventsFor(t, "mfa-verified@example.com", "mfa_verified"); got != 1 {
 			t.Errorf("mfa_verified rows = %d, want 1", got)
 		}
+		assertRowShape(t, "mfa-verified@example.com", "mfa_verified")
 	})
 
 	t.Run("amr with only a single factor writes mfa_bypassed", func(t *testing.T) {
@@ -137,6 +207,68 @@ func TestLogMFAEvent(t *testing.T) {
 		if got := countEventsFor(t, "mfa-bypassed@example.com", "mfa_bypassed"); got != 1 {
 			t.Errorf("mfa_bypassed rows = %d, want 1", got)
 		}
+		assertRowShape(t, "mfa-bypassed@example.com", "mfa_bypassed")
+	})
+
+	// TestCallbackHandler_MissingSessionCookieRejected et al. (sso_test.go)
+	// prove CallbackHandler's CSRF/PKCE/verification plumbing in isolation
+	// from logMFAEvent; TestExtractAMR and the classify/write tests above
+	// prove amr extraction, classification, and the DB write in isolation
+	// from each other. Nothing before this proved the actual glue: that
+	// CallbackHandler passes the REAL amr it just verified into logMFAEvent,
+	// not e.g. a stale or empty value.
+	t.Run("real CallbackHandler wiring writes the correct event from a real verified token", func(t *testing.T) {
+		idp := newSSOTestIdP(t)
+		sso := &SSOMiddleware{
+			config: SSOConfig{
+				OIDCIssuer:   idp.server.URL,
+				OIDCClientID: "test-client",
+				CallbackURL:  "https://tombstone.example/auth/callback",
+			},
+			logger: zap.NewNop(),
+			db:     database,
+		}
+
+		loginRec := httptest.NewRecorder()
+		sso.LoginHandler(loginRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+		state := redirectParam(t, loginRec, "state")
+		nonce := redirectParam(t, loginRec, "nonce")
+		cookies := loginRec.Result().Cookies()
+
+		const email = "e2e-mfa@example.com"
+		idp.setTokenClaims(map[string]any{
+			"iss": idp.server.URL, "aud": []string{"test-client"}, "email": email,
+			"iat": time.Now(), "exp": time.Now().Add(time.Hour),
+			"nonce": nonce, "amr": []string{"pwd", "otp"},
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+state, nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		sso.CallbackHandler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+
+		// logMFAEvent now runs in its own goroutine (Finding 2's async-
+		// dispatch fix), so the write can legitimately land a few
+		// milliseconds after CallbackHandler's response — poll instead of
+		// asserting immediately, to avoid a test race against that
+		// goroutine.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if countEventsFor(t, email, "mfa_verified") == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("mfa_verified row for %s never appeared — CallbackHandler's real amr->logMFAEvent wiring is broken", email)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		assertRowShape(t, email, "mfa_verified")
 	})
 
 	t.Run("absent amr writes nothing", func(t *testing.T) {

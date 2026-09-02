@@ -316,10 +316,18 @@ func (s *SSOMiddleware) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// SEC-5 (SOC 2 CC6 evidence): best-effort, never blocks or delays the
-	// login response — a failed compliance-log write must not be able to
-	// deny a legitimate login.
-	s.logMFAEvent(r.Context(), email, amr)
+	// SEC-5 (SOC 2 CC6 evidence): dispatched in the background, not just
+	// best-effort-but-synchronous — a slow user_mfa_log write must never
+	// delay this response, and one that hangs past the server's
+	// WriteTimeout must not be able to make an already-successful login look
+	// like it failed to the client. context.Background(), not r.Context():
+	// this write is meant to outlive the request. Mirrors
+	// FlagHandler.writeAudit's async Rekor submission goroutine.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.logMFAEvent(ctx, email, amr)
+	}()
 
 	s.logger.Info("sso: login successful", zap.String("email", email))
 
@@ -434,7 +442,7 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 	// IdP-dependent — absence just means no MFA evidence either way, not
 	// that MFA didn't happen. See classifyMFAEvent's own comment for why
 	// this is treated as a best-effort signal, not a guarantee.
-	amr = extractAMR(tok)
+	amr = s.extractAMR(tok)
 
 	return email, amr, nil
 }
@@ -475,25 +483,39 @@ func classifyMFAEvent(amr []string) (eventType string, applicable bool) {
 }
 
 // extractAMR reads the ID token's "amr" (Authentication Methods References)
-// claim — a JSON array of strings per RFC 8176 — returning nil if absent or
-// malformed rather than erroring: amr is optional and its absence must
-// never fail the login.
-func extractAMR(tok oidcjwt.Token) []string {
+// claim. RFC 8176 specifies a JSON array of strings, but some IdPs and
+// claim-mapping layers emit a bare string instead when there is exactly one
+// method — accepted here as a single-element list rather than silently
+// dropped. Returns nil when the claim is genuinely absent (expected,
+// unlogged — amr is optional and its absence must never fail the login) and
+// also logs a warning for the residual case where it's present in some
+// other, unrecognized shape: without this, "no evidence either way" and
+// "evidence we failed to parse" were indistinguishable, which is exactly
+// backwards for a feature whose entire point is not fabricating evidence.
+func (s *SSOMiddleware) extractAMR(tok oidcjwt.Token) []string {
 	var raw any
 	if err := tok.Get("amr", &raw); err != nil {
 		return nil
 	}
-	list, ok := raw.([]any)
-	if !ok {
+	switch v := raw.(type) {
+	case []any:
+		var amr []string
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				amr = append(amr, str)
+			}
+		}
+		if len(amr) == 0 {
+			s.logger.Warn("sso: amr claim present but contained no string entries — MFA evidence unavailable for this login, not confirmed absent")
+		}
+		return amr
+	case string:
+		return []string{v}
+	default:
+		s.logger.Warn("sso: amr claim present in an unrecognized shape — MFA evidence unavailable for this login, not confirmed absent",
+			zap.String("go_type", fmt.Sprintf("%T", raw)))
 		return nil
 	}
-	var amr []string
-	for _, v := range list {
-		if s, ok := v.(string); ok {
-			amr = append(amr, s)
-		}
-	}
-	return amr
 }
 
 // logMFAEvent writes a best-effort user_mfa_log entry (SOC 2 CC6 evidence).

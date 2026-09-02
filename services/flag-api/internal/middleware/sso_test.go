@@ -35,6 +35,22 @@ type ssoTestIdP struct {
 	rsaPub         *rsa.PublicKey
 	discoveryCalls atomic.Int32
 	failDiscovery  atomic.Bool
+
+	// tokenClaimsMu guards tokenClaims: set by the test goroutine (once it
+	// knows the nonce LoginHandler generated), read by /oauth/token's
+	// handler goroutine when a test drives a real LoginHandler->CallbackHandler
+	// round trip.
+	tokenClaimsMu sync.Mutex
+	tokenClaims   map[string]any
+}
+
+// setTokenClaims makes /oauth/token respond with a real ID token signed
+// with these claims. Needed only by tests that exercise a full
+// LoginHandler->CallbackHandler round trip against this fake IdP.
+func (idp *ssoTestIdP) setTokenClaims(claims map[string]any) {
+	idp.tokenClaimsMu.Lock()
+	defer idp.tokenClaimsMu.Unlock()
+	idp.tokenClaims = claims
 }
 
 func newSSOTestIdP(t *testing.T) *ssoTestIdP {
@@ -92,6 +108,26 @@ func newSSOTestIdPOpts(t *testing.T, keyHasAlg bool) *ssoTestIdP {
 			t.Errorf("encode jwks response: %v", err)
 		}
 	})
+	// /oauth/token: only tests that call setTokenClaims (a full
+	// LoginHandler->CallbackHandler round trip) use this; every other test
+	// posts directly to its own standalone mux and never reaches this one.
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		idp.tokenClaimsMu.Lock()
+		claims := idp.tokenClaims
+		idp.tokenClaimsMu.Unlock()
+		if claims == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		idToken, err := idp.signIDToken(claims)
+		if err != nil {
+			t.Errorf("sign id token for /oauth/token response: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id_token":%q,"access_token":"stub","token_type":"Bearer","expires_in":3600}`, idToken)
+	})
 
 	idp.server = httptest.NewServer(mux)
 	t.Cleanup(idp.server.Close)
@@ -108,20 +144,31 @@ const testNonce = "test-nonce"
 // discovery/JWKS endpoints above actually publish.
 func (idp *ssoTestIdP) issueIDToken(t *testing.T, claims map[string]any) string {
 	t.Helper()
+	signed, err := idp.signIDToken(claims)
+	if err != nil {
+		t.Fatalf("issue id token: %v", err)
+	}
+	return signed
+}
+
+// signIDToken is issueIDToken's error-returning core — needed separately
+// because the /oauth/token handler above runs in its own goroutine, where
+// calling t.Fatalf is unsafe.
+func (idp *ssoTestIdP) signIDToken(claims map[string]any) (string, error) {
 	if _, ok := claims["nonce"]; !ok {
 		claims["nonce"] = testNonce
 	}
 	tok := oidcjwt.New()
 	for k, v := range claims {
 		if err := tok.Set(k, v); err != nil {
-			t.Fatalf("set claim %q: %v", k, err)
+			return "", fmt.Errorf("set claim %q: %w", k, err)
 		}
 	}
 	signed, err := oidcjwt.Sign(tok, oidcjwt.WithKey(jwa.RS256(), idp.signingKey))
 	if err != nil {
-		t.Fatalf("sign token: %v", err)
+		return "", fmt.Errorf("sign token: %w", err)
 	}
-	return string(signed)
+	return string(signed), nil
 }
 
 func testSSOMiddleware(idp *ssoTestIdP, clientID string) *SSOMiddleware {
