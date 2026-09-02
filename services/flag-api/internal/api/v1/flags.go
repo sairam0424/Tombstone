@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/middleware"
+	"github.com/tombstone/flag-api/internal/secrets"
 	"github.com/tombstone/flag-api/internal/transparency"
 )
 
@@ -26,10 +28,14 @@ type FlagHandler struct {
 	rekor  *transparency.RekorClient
 	// audit is the single writer for the hash-chained audit log (AUD-1).
 	audit *audit.Writer
+	// hasher validates break-glass tokens presented to bypass the
+	// require_approval gate (SEC-3b part 2) — the same hasher BreakGlassHandler
+	// uses, so a token created there validates here too.
+	hasher *secrets.TokenHasher
 }
 
-func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient, auditW *audit.Writer) *FlagHandler {
-	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor, audit: auditW}
+func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient, auditW *audit.Writer, hasher *secrets.TokenHasher) *FlagHandler {
+	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor, audit: auditW, hasher: hasher}
 }
 
 type Flag struct {
@@ -252,6 +258,16 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// SEC-3b (part 2): a project with require_approval=true must not have
+	// this endpoint write flag_environments directly at all — the whole
+	// point of the gate is that routine changes go through
+	// POST /change-requests instead. A valid, unused break-glass token is
+	// the documented emergency escape hatch.
+	bypassedViaBreakGlass, ok := h.checkRequireApprovalGate(w, r, projectID)
+	if !ok {
+		return
+	}
+
 	// Inject flag state into the active trace span.
 	span := trace.SpanFromContext(r.Context())
 
@@ -300,7 +316,11 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		FlagKey: key, Environment: env,
 		Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 	}
-	h.writeAudit(r.Context(), projectID, key, env, actor, "flag_environment_updated", &prev, &curr, ipFromRequest(r))
+	eventType := "flag_environment_updated"
+	if bypassedViaBreakGlass {
+		eventType = "flag_environment_updated_via_breakglass"
+	}
+	h.writeAudit(r.Context(), projectID, key, env, actor, eventType, &prev, &curr, ipFromRequest(r))
 	h.publishEvent(r.Context(), env, FlagEvent{
 		FlagKey: key, Enabled: req.Enabled, RolloutPct: req.RolloutPct,
 		Reason: "manual", Ts: time.Now().Unix(), Environment: env,
@@ -575,6 +595,59 @@ func requireProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return projectID, true
+}
+
+// breakGlassHeader carries a break-glass token that bypasses the
+// require_approval gate below. A header, not a body field or query param,
+// since it is out-of-band authorization for the request, not part of what
+// the request is asking for.
+const breakGlassHeader = "X-Break-Glass-Token"
+
+// checkRequireApprovalGate enforces SEC-3b's require_approval gate on
+// UpdateEnvironment: if the caller's project has it enabled, this endpoint
+// must not write flag_environments directly — the caller either goes
+// through POST /change-requests, or supplies a valid, unused break-glass
+// token to bypass the gate for a genuine emergency. Returns bypassed=true
+// only when a token was actually presented and consumed; the caller uses
+// that to label the resulting audit entry distinctly from a normal write.
+func (h *FlagHandler) checkRequireApprovalGate(w http.ResponseWriter, r *http.Request, projectID string) (bypassed bool, ok bool) {
+	var requireApproval bool
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT require_approval FROM projects WHERE id = $1`, projectID,
+	).Scan(&requireApproval); err != nil {
+		h.logger.Error("read require_approval", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "query failed")
+		return false, false
+	}
+	if !requireApproval {
+		return false, true
+	}
+
+	token := r.Header.Get(breakGlassHeader)
+	if token == "" {
+		writeError(w, http.StatusForbidden,
+			"this project requires approval for environment changes — submit via POST /api/v1/change-requests, "+
+				"or supply a valid "+breakGlassHeader+" header for an emergency bypass")
+		return false, false
+	}
+
+	actor := actorFromContext(r.Context())
+	scope, tokenID, err := consumeBreakGlassToken(r.Context(), h.db, h.hasher, h.audit, h.logger,
+		ipFromRequest(r), token, actor, "bypassed require_approval on "+r.URL.Path)
+	if err != nil {
+		switch {
+		case errors.Is(err, errBreakGlassTokenUsed):
+			writeError(w, http.StatusGone, err.Error())
+		default:
+			writeError(w, http.StatusUnauthorized, err.Error())
+		}
+		return false, false
+	}
+
+	h.logger.Warn("require_approval bypassed via break-glass token",
+		zap.String("project_id", projectID), zap.String("actor", actor),
+		zap.String("scope", scope), zap.String("token_id", tokenID), zap.String("path", r.URL.Path))
+	return true, true
 }
 
 func ipFromRequest(r *http.Request) string {

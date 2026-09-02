@@ -1,10 +1,13 @@
 package v1
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -14,6 +17,66 @@ import (
 	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
+
+// Sentinel errors from consumeBreakGlassToken — callers map these to the
+// appropriate HTTP status (a used token is 410 Gone, not 401, since it once
+// existed and worked; invalid/expired are both 401).
+var (
+	errBreakGlassTokenInvalid = errors.New("invalid break-glass token")
+	errBreakGlassTokenUsed    = errors.New("break-glass token already used")
+	errBreakGlassTokenExpired = errors.New("break-glass token expired")
+)
+
+// consumeBreakGlassToken validates a break-glass token, marks it used, and
+// writes an audit entry — shared by BreakGlassHandler.UseToken (the
+// standalone "burn my emergency token" ceremony) and FlagHandler's
+// require_approval gate (SEC-3b part 2), which lets a valid token bypass
+// the gate during an incident. A used token cannot bypass anything twice.
+func consumeBreakGlassToken(ctx context.Context, db *sql.DB, hasher *secrets.TokenHasher, auditW *audit.Writer, logger *zap.Logger, ip, token, usedBy, actionDesc string) (scope, tokenID string, err error) {
+	if hasher == nil {
+		return "", "", fmt.Errorf("token hashing is not configured")
+	}
+
+	var id, tokenScope string
+	var expiresAt time.Time
+	var used bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT id, scope, expires_at, used FROM break_glass_tokens WHERE token_hash = $1
+	`, hasher.Hash(token)).Scan(&id, &tokenScope, &expiresAt, &used); err != nil {
+		return "", "", errBreakGlassTokenInvalid
+	}
+	if used {
+		return "", "", errBreakGlassTokenUsed
+	}
+	if time.Now().After(expiresAt) {
+		return "", "", errBreakGlassTokenExpired
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		UPDATE break_glass_tokens SET used = true, used_at = now(), used_by = $1 WHERE id = $2
+	`, usedBy, id); err != nil {
+		return "", "", fmt.Errorf("mark token used: %w", err)
+	}
+
+	if auditW == nil {
+		logger.Warn("break-glass audit write skipped — no audit writer configured")
+	} else {
+		detailsJSON, _ := json.Marshal(map[string]any{"scope": tokenScope, "action": actionDesc, "token_id": id})
+		if _, _, err := auditW.Append(ctx, audit.Entry{
+			Actor:     usedBy,
+			EventType: "break_glass_token_used",
+			NewState:  detailsJSON,
+			IPAddress: ip,
+		}); err != nil {
+			// Best-effort, matching every other audit write in this codebase —
+			// a failed audit write must not undo an already-consumed token or
+			// block the emergency action it just authorized.
+			logger.Warn("break-glass audit write failed", zap.Error(err))
+		}
+	}
+
+	return tokenScope, id, nil
+}
 
 type BreakGlassHandler struct {
 	db     *sql.DB
@@ -30,7 +93,7 @@ func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, has
 }
 
 type CreateBreakGlassTokenRequest struct {
-	Scope       string `json:"scope"`            // "all-flags" | "payment-flags" | "auth-flags"
+	Scope       string `json:"scope"` // "all-flags" | "payment-flags" | "auth-flags"
 	CreatedBy   string `json:"created_by"`
 	ExpiresInH  int    `json:"expires_in_hours"` // default 4
 	IncidentRef string `json:"incident_ref"`
@@ -110,43 +173,27 @@ func (h *BreakGlassHandler) UseToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var id, scope string
-	var expiresAt time.Time
-	var used bool
-	if h.hasher == nil {
-		writeError(w, http.StatusInternalServerError, "token hashing is not configured")
-		return
-	}
-	err := h.db.QueryRowContext(r.Context(), `
-		SELECT id, scope, expires_at, used FROM break_glass_tokens WHERE token_hash = $1
-	`, h.hasher.Hash(req.Token)).Scan(&id, &scope, &expiresAt, &used)
+	scope, tokenID, err := consumeBreakGlassToken(r.Context(), h.db, h.hasher, h.audit, h.logger,
+		ipFromRequest(r), req.Token, req.UsedBy, req.ActionDesc)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid break-glass token")
-		return
-	}
-	if used {
-		writeError(w, http.StatusGone, "break-glass token already used")
-		return
-	}
-	if time.Now().After(expiresAt) {
-		writeError(w, http.StatusUnauthorized, "break-glass token expired")
+		switch {
+		case errors.Is(err, errBreakGlassTokenUsed):
+			writeError(w, http.StatusGone, err.Error())
+		case errors.Is(err, errBreakGlassTokenInvalid), errors.Is(err, errBreakGlassTokenExpired):
+			writeError(w, http.StatusUnauthorized, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
-	_, _ = h.db.ExecContext(r.Context(), `
-		UPDATE break_glass_tokens SET used = true, used_at = now(), used_by = $1 WHERE id = $2
-	`, req.UsedBy, id)
-
-	h.writeAuditBreakGlass(r, req.UsedBy, "break_glass_token_used", map[string]any{
-		"scope": scope, "action": req.ActionDesc, "token_id": id,
-	})
 	h.logger.Warn("break-glass token used",
 		zap.String("scope", scope),
 		zap.String("used_by", req.UsedBy),
 		zap.String("action", req.ActionDesc))
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"valid": true, "scope": scope, "token_id": id,
+		"valid": true, "scope": scope, "token_id": tokenID,
 	})
 }
 
