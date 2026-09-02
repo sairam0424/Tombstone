@@ -4,42 +4,112 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 const rekorURL = "https://rekor.sigstore.dev/api/v1/log/entries"
 
+// rekorSigner is the subset of *secrets.RekorSigner's behavior RekorClient
+// needs, declared as an interface here (not in internal/secrets) purely so
+// tests in this package can inject a signer whose Sign/PublicKeyPEM calls
+// fail on demand. secrets.RekorSigner's real implementation can't
+// realistically be driven into either error path in a test (Sign's only
+// failure mode is crypto/rand entropy exhaustion; PublicKeyPEM never fails
+// for the *ecdsa.PublicKey NewRekorSigner ever produces), so without this
+// seam those fail-open branches would have zero coverage.
+type rekorSigner interface {
+	Sign(digest []byte) ([]byte, error)
+	PublicKeyPEM() ([]byte, error)
+}
+
 // RekorClient submits audit entry hashes to the Sigstore Rekor transparency log.
 // All operations fail-open: a Rekor failure never blocks flag API operations.
 type RekorClient struct {
-	enabled    bool
-	httpClient *http.Client
+	enabled      bool
+	httpClient   *http.Client
+	signer       rekorSigner
+	publicKeyPEM []byte
+	// url defaults to rekorURL; overridable only within this package, so
+	// tests can point SubmitAuditEntry at a local httptest.Server instead of
+	// the real Rekor endpoint.
+	url string
 }
 
-// NewRekorClient constructs a RekorClient. REKOR_ENABLED=true enables submissions.
-func NewRekorClient() *RekorClient {
+// NewRekorClient constructs a RekorClient. REKOR_ENABLED=true enables
+// submissions, but only when signer is also non-nil — a hashedrekord entry
+// cannot be submitted without a real signature and public key (AUD-1b: the
+// PREVIOUS version of this client attempted submission with neither, which
+// Rekor's server-side validation would have rejected outright — every
+// REKOR_ENABLED=true deployment had been silently submitting nothing that
+// ever actually landed in the log).
+func NewRekorClient(signer *secrets.RekorSigner) *RekorClient {
+	// A nil *secrets.RekorSigner assigned directly into a rekorSigner
+	// interface variable would produce a NON-nil interface value (a typed
+	// nil) — the classic Go footgun. This explicit nil check is what makes
+	// newRekorClient's own `signer == nil` comparison below actually work.
+	var sigIface rekorSigner
+	if signer != nil {
+		sigIface = signer
+	}
+	return newRekorClient(sigIface, os.Getenv("REKOR_ENABLED") == "true", rekorURL)
+}
+
+// newRekorClient is NewRekorClient's testable core: it takes the interface
+// and every external input directly, so tests can exercise it with a fake
+// signer and a local server URL without going through env vars or the real
+// Rekor endpoint constant.
+func newRekorClient(signer rekorSigner, envEnabled bool, url string) *RekorClient {
+	enabled := envEnabled
+
+	var pubKeyPEM []byte
+	if enabled {
+		if signer == nil {
+			log.Printf("[rekor] warn: REKOR_ENABLED=true but %s is not configured — Rekor submissions disabled", secrets.RekorSigningKeyEnvVar)
+			enabled = false
+		} else {
+			var err error
+			pubKeyPEM, err = signer.PublicKeyPEM()
+			if err != nil {
+				log.Printf("[rekor] warn: marshal rekor public key: %v — Rekor submissions disabled", err)
+				enabled = false
+			}
+		}
+	}
+
 	return &RekorClient{
-		enabled:    os.Getenv("REKOR_ENABLED") == "true",
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		enabled:      enabled,
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		signer:       signer,
+		publicKeyPEM: pubKeyPEM,
+		url:          url,
 	}
 }
 
-// rekorEntry is the JSON payload shape expected by Rekor's rekord type.
-type rekorEntry struct {
-	Kind       string         `json:"kind"`
-	APIVersion string         `json:"apiVersion"`
-	Spec       rekorEntrySpec `json:"spec"`
+// hashedRekordEntry is the JSON payload shape for Rekor's hashedrekord type
+// (schema verified live against github.com/sigstore/rekor's
+// pkg/types/hashedrekord/v0.0.1). Chosen over the "rekord" type this client
+// used previously because hashedrekord submits only a hash of the audit
+// entry (never the entry's own prev_state/new_state content), matching this
+// integration's actual purpose: prove a hash existed at a point in time,
+// not publish the underlying data to a public log.
+type hashedRekordEntry struct {
+	Kind       string                `json:"kind"`
+	APIVersion string                `json:"apiVersion"`
+	Spec       hashedRekordEntrySpec `json:"spec"`
 }
 
-type rekorEntrySpec struct {
-	Data      rekorDataSpec      `json:"data"`
-	Signature rekorSignatureSpec `json:"signature"`
+type hashedRekordEntrySpec struct {
+	Data      rekorDataSpec         `json:"data"`
+	Signature hashedRekordSignature `json:"signature"`
 }
 
 type rekorDataSpec struct {
@@ -51,14 +121,24 @@ type rekorHashSpec struct {
 	Value     string `json:"value"`
 }
 
-type rekorSignatureSpec struct {
-	Format string `json:"format"`
+// hashedRekordSignature carries the DER-encoded ECDSA signature (base64)
+// over the digest below, plus the PEM-encoded public key (base64) needed to
+// verify it — hashedrekord entries are self-verifying: a verifier checks
+// the signature against the public key embedded in THIS entry, never
+// against whatever key the submitting server currently holds.
+type hashedRekordSignature struct {
+	Content   string                   `json:"content"`
+	PublicKey hashedRekordSignaturePub `json:"publicKey"`
+}
+
+type hashedRekordSignaturePub struct {
+	Content string `json:"content"`
 }
 
 // rekorResponse is the shape of a successful Rekor POST response.
 // The response is a map[logID]entryObject; we only care about the first entry.
 type rekorEntryResponse struct {
-	LogIndex      int64  `json:"logIndex"`
+	LogIndex       int64 `json:"logIndex"`
 	IntegratedTime int64 `json:"integratedTime"`
 }
 
@@ -75,19 +155,32 @@ func (r *RekorClient) SubmitAuditEntry(ctx context.Context, entryJSON []byte) (l
 		return "", 0, nil
 	}
 
-	hash := sha256.Sum256(entryJSON)
-	payload := rekorEntry{
-		Kind:       "rekord",
+	digest := sha256.Sum256(entryJSON)
+
+	// The signature must cover exactly the digest bytes — Rekor's
+	// hashedrekord verifier calls Verify(..., options.WithDigest(digest),
+	// ...), not Verify over entryJSON itself.
+	sig, signErr := r.signer.Sign(digest[:])
+	if signErr != nil {
+		log.Printf("[rekor] warn: sign entry: %v", signErr)
+		return "", 0, nil
+	}
+
+	payload := hashedRekordEntry{
+		Kind:       "hashedrekord",
 		APIVersion: "0.0.1",
-		Spec: rekorEntrySpec{
+		Spec: hashedRekordEntrySpec{
 			Data: rekorDataSpec{
 				Hash: rekorHashSpec{
 					Algorithm: "sha256",
-					Value:     fmt.Sprintf("%x", hash),
+					Value:     hex.EncodeToString(digest[:]),
 				},
 			},
-			Signature: rekorSignatureSpec{
-				Format: "x509",
+			Signature: hashedRekordSignature{
+				Content: base64.StdEncoding.EncodeToString(sig),
+				PublicKey: hashedRekordSignaturePub{
+					Content: base64.StdEncoding.EncodeToString(r.publicKeyPEM),
+				},
 			},
 		},
 	}
@@ -98,7 +191,7 @@ func (r *RekorClient) SubmitAuditEntry(ctx context.Context, entryJSON []byte) (l
 		return "", 0, nil
 	}
 
-	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, rekorURL, bytes.NewReader(body))
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(body))
 	if reqErr != nil {
 		log.Printf("[rekor] warn: build request: %v", reqErr)
 		return "", 0, nil
