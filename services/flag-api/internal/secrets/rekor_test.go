@@ -38,6 +38,32 @@ func TestNewRekorSignerRejectsInvalidPEM(t *testing.T) {
 	}
 }
 
+// TestNewRekorSignerRejectsNonP256Curve is the direct regression proof: a
+// key on any OTHER ECDSA curve (weaker, like P-224, or just non-standard for
+// this control) would parse and sign/verify fine on its own terms — the bug
+// this pins down is that nothing checked the curve at all before this fix,
+// so a misconfigured REKOR_SIGNING_KEY could silently downgrade the
+// control's strength with no error and no warning anywhere.
+func TestNewRekorSignerRejectsNonP256Curve(t *testing.T) {
+	for _, curve := range []elliptic.Curve{elliptic.P384(), elliptic.P521()} {
+		t.Run(curve.Params().Name, func(t *testing.T) {
+			key, err := ecdsa.GenerateKey(curve, rand.Reader)
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			der, err := x509.MarshalPKCS8PrivateKey(key)
+			if err != nil {
+				t.Fatalf("marshal pkcs8: %v", err)
+			}
+			pemKey := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+			if _, err := NewRekorSigner(pemKey); err == nil {
+				t.Fatalf("expected an error for a %s key — only P-256 must be accepted", curve.Params().Name)
+			}
+		})
+	}
+}
+
 func TestNewRekorSignerRejectsNonECDSAKey(t *testing.T) {
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

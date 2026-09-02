@@ -204,6 +204,102 @@ func TestSubmitAuditEntry_MalformedResponseFailsOpen(t *testing.T) {
 	}
 }
 
+// fakeSigner lets tests drive Sign/PublicKeyPEM into their error paths on
+// demand — secrets.RekorSigner's real implementation can't realistically be
+// forced to fail either call (Sign's only failure mode is crypto/rand
+// entropy exhaustion; PublicKeyPEM never fails for the key type
+// NewRekorSigner produces), so those fail-open branches have no other way
+// to be exercised.
+type fakeSigner struct {
+	signErr   error
+	pubKeyErr error
+}
+
+func (f fakeSigner) Sign(digest []byte) ([]byte, error) {
+	if f.signErr != nil {
+		return nil, f.signErr
+	}
+	return []byte("fake-signature"), nil
+}
+
+func (f fakeSigner) PublicKeyPEM() ([]byte, error) {
+	if f.pubKeyErr != nil {
+		return nil, f.pubKeyErr
+	}
+	return []byte("fake-pem"), nil
+}
+
+// TestNewRekorClient_PublicKeyPEMErrorDisables is the direct regression
+// proof that a PublicKeyPEM() failure at construction time actually
+// disables submission (rather than, say, leaving enabled=true with an empty
+// publicKeyPEM that would then be silently embedded in every entry) — a
+// branch secrets.RekorSigner's real implementation can never actually
+// trigger, so without fakeSigner this path has zero coverage.
+func TestNewRekorClient_PublicKeyPEMErrorDisables(t *testing.T) {
+	hit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+	}))
+	defer server.Close()
+
+	client := newRekorClient(fakeSigner{pubKeyErr: fmt.Errorf("boom")}, true, server.URL)
+
+	logID, logIndex, err := client.SubmitAuditEntry(context.Background(), []byte(`{"a":1}`))
+	if err != nil || logID != "" || logIndex != 0 {
+		t.Fatalf("got (%q, %d, %v), want (\"\", 0, nil)", logID, logIndex, err)
+	}
+	if hit {
+		t.Error("SubmitAuditEntry made an HTTP call despite PublicKeyPEM() failing at construction")
+	}
+}
+
+// TestSubmitAuditEntry_SignErrorFailsOpenWithoutHTTPCall is the direct
+// regression proof that a Sign() failure returns before ever attempting the
+// HTTP POST — the actual signing operation AUD-1b exists to add, and (like
+// the test above) unreachable through secrets.RekorSigner's real
+// implementation.
+func TestSubmitAuditEntry_SignErrorFailsOpenWithoutHTTPCall(t *testing.T) {
+	hit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+	}))
+	defer server.Close()
+
+	client := newRekorClient(fakeSigner{signErr: fmt.Errorf("boom")}, true, server.URL)
+
+	logID, logIndex, err := client.SubmitAuditEntry(context.Background(), []byte(`{"a":1}`))
+	if err != nil || logID != "" || logIndex != 0 {
+		t.Fatalf("got (%q, %d, %v), want (\"\", 0, nil)", logID, logIndex, err)
+	}
+	if hit {
+		t.Error("SubmitAuditEntry made an HTTP call despite Sign() failing")
+	}
+}
+
+// TestSubmitAuditEntry_EmptyEntriesMapFailsOpen covers the response being
+// SYNTACTICALLY VALID JSON that just contains no entries (e.g. "{}") — a
+// distinct code path from TestSubmitAuditEntry_MalformedResponseFailsOpen's
+// invalid-JSON case. Both currently fail open identically, but a future
+// change to the entries-loop fallback (rekor.go's `for id, entry := range
+// entries` block) could silently start returning a fabricated id/logIndex
+// on this specific path without this test, corrupting audit_log's
+// rekor_log_id/rekor_log_index columns with a confirmation that was never
+// actually issued.
+func TestSubmitAuditEntry_EmptyEntriesMapFailsOpen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	client := newRekorClient(genTestSigner(t), true, server.URL)
+
+	logID, logIndex, err := client.SubmitAuditEntry(context.Background(), []byte(`{"a":1}`))
+	if err != nil || logID != "" || logIndex != 0 {
+		t.Fatalf("got (%q, %d, %v), want (\"\", 0, nil) — a syntactically valid but empty response must fail open, not fabricate a confirmation", logID, logIndex, err)
+	}
+}
+
 func TestSubmitAuditEntry_NetworkFailureFailsOpen(t *testing.T) {
 	t.Setenv("REKOR_ENABLED", "true")
 

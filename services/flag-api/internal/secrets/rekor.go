@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -64,6 +65,12 @@ func NewRekorSigner(pemKey string) (*RekorSigner, error) {
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
 		return nil, fmt.Errorf("%s must be a PKCS#8-encoded ECDSA private key, got %T", RekorSigningKeyEnvVar, parsed)
+	}
+	// P-256 specifically, not "any ECDSA curve" — a weaker curve (P-224) or
+	// an unusual one would parse and sign/verify just fine on its own terms,
+	// silently downgrading this control's strength with no signal anywhere.
+	if key.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("%s must use the P-256 curve, got %s", RekorSigningKeyEnvVar, key.Curve.Params().Name)
 	}
 	return &RekorSigner{key: key}, nil
 }

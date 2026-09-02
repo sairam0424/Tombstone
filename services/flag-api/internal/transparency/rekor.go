@@ -18,12 +18,25 @@ import (
 
 const rekorURL = "https://rekor.sigstore.dev/api/v1/log/entries"
 
+// rekorSigner is the subset of *secrets.RekorSigner's behavior RekorClient
+// needs, declared as an interface here (not in internal/secrets) purely so
+// tests in this package can inject a signer whose Sign/PublicKeyPEM calls
+// fail on demand. secrets.RekorSigner's real implementation can't
+// realistically be driven into either error path in a test (Sign's only
+// failure mode is crypto/rand entropy exhaustion; PublicKeyPEM never fails
+// for the *ecdsa.PublicKey NewRekorSigner ever produces), so without this
+// seam those fail-open branches would have zero coverage.
+type rekorSigner interface {
+	Sign(digest []byte) ([]byte, error)
+	PublicKeyPEM() ([]byte, error)
+}
+
 // RekorClient submits audit entry hashes to the Sigstore Rekor transparency log.
 // All operations fail-open: a Rekor failure never blocks flag API operations.
 type RekorClient struct {
 	enabled      bool
 	httpClient   *http.Client
-	signer       *secrets.RekorSigner
+	signer       rekorSigner
 	publicKeyPEM []byte
 	// url defaults to rekorURL; overridable only within this package, so
 	// tests can point SubmitAuditEntry at a local httptest.Server instead of
@@ -39,7 +52,23 @@ type RekorClient struct {
 // REKOR_ENABLED=true deployment had been silently submitting nothing that
 // ever actually landed in the log).
 func NewRekorClient(signer *secrets.RekorSigner) *RekorClient {
-	enabled := os.Getenv("REKOR_ENABLED") == "true"
+	// A nil *secrets.RekorSigner assigned directly into a rekorSigner
+	// interface variable would produce a NON-nil interface value (a typed
+	// nil) — the classic Go footgun. This explicit nil check is what makes
+	// newRekorClient's own `signer == nil` comparison below actually work.
+	var sigIface rekorSigner
+	if signer != nil {
+		sigIface = signer
+	}
+	return newRekorClient(sigIface, os.Getenv("REKOR_ENABLED") == "true", rekorURL)
+}
+
+// newRekorClient is NewRekorClient's testable core: it takes the interface
+// and every external input directly, so tests can exercise it with a fake
+// signer and a local server URL without going through env vars or the real
+// Rekor endpoint constant.
+func newRekorClient(signer rekorSigner, envEnabled bool, url string) *RekorClient {
+	enabled := envEnabled
 
 	var pubKeyPEM []byte
 	if enabled {
@@ -61,7 +90,7 @@ func NewRekorClient(signer *secrets.RekorSigner) *RekorClient {
 		httpClient:   &http.Client{Timeout: 5 * time.Second},
 		signer:       signer,
 		publicKeyPEM: pubKeyPEM,
-		url:          rekorURL,
+		url:          url,
 	}
 }
 
