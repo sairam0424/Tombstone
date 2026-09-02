@@ -30,20 +30,42 @@ type SSOConfig struct {
 	AllowedDomains  []string
 }
 
+// oidcDiscoveryTimeout bounds the /.well-known/openid-configuration fetch —
+// without it, a stalled discovery endpoint blocks the (unauthenticated)
+// /auth/callback handler indefinitely, since neither http.DefaultClient nor
+// the incoming request's context enforces any deadline here on its own.
+const oidcDiscoveryTimeout = 10 * time.Second
+
+// jwksInitCooldown bounds how often a failed JWKS cache initialization is
+// retried. Without it, every concurrent or repeated login attempt during an
+// IdP outage independently re-hits the (already struggling) discovery and
+// JWKS endpoints with no backoff at all.
+const jwksInitCooldown = 5 * time.Second
+
 // SSOMiddleware handles OIDC/SAML SSO flows.
 type SSOMiddleware struct {
 	config    SSOConfig
 	jwtSecret []byte
 	logger    *zap.Logger
 
-	// jwksMu guards jwksCache/jwksURL, lazily initialized on first ID-token
-	// verification rather than in the constructor — a constructor that
-	// blocks (or fails outright) on the IdP being reachable at Tombstone's
-	// own startup would make an unrelated network hiccup an availability
-	// incident for the whole service, not just login.
-	jwksMu    sync.Mutex
-	jwksCache *jwk.Cache
-	jwksURL   string
+	// jwksMu guards the fields below and is held for the FULL duration of a
+	// cold JWKS-cache initialization, not just the read/write of the cached
+	// pointer — a deliberate, minimal "poor man's singleflight". Without
+	// holding the lock across the whole init, concurrent cold-start callers
+	// would each independently spin up their own jwk.Cache/httprc.Client, and
+	// every loser's cache would be discarded without ever being shut down,
+	// permanently leaking its background goroutines and an
+	// indefinitely-running JWKS refresh subscription against the real IdP.
+	//
+	// Lazy (not constructor-time) initialization avoids blocking Tombstone's
+	// own startup on IdP reachability — an unrelated network hiccup at boot
+	// must not become an availability incident for the whole service, not
+	// just login.
+	jwksMu          sync.Mutex
+	jwksCache       *jwk.Cache
+	jwksURL         string
+	jwksLastFailAt  time.Time
+	jwksLastFailErr error
 }
 
 // NewSSOMiddleware creates a new SSOMiddleware.
@@ -201,6 +223,12 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 		oidcjwt.WithKeySet(keySet, jws.WithInferAlgorithmFromKey(true)),
 		oidcjwt.WithIssuer(s.config.OIDCIssuer),
 		oidcjwt.WithAudience(s.config.OIDCClientID),
+		// OIDC Core 1.0 §2 lists both exp and iat as REQUIRED ID Token
+		// claims. jwt.Parse's default time-claim validators only check
+		// exp/iat *if present* — a token that omits them entirely would
+		// otherwise pass with no expiration enforced at all.
+		oidcjwt.WithRequiredClaim(oidcjwt.ExpirationKey),
+		oidcjwt.WithRequiredClaim(oidcjwt.IssuedAtKey),
 	)
 	if err != nil {
 		return "", fmt.Errorf("verify id_token: %w", err)
@@ -210,44 +238,97 @@ func (s *SSOMiddleware) verifyIDTokenAndExtractEmail(ctx context.Context, idToke
 	if err := tok.Get("email", &email); err != nil || email == "" {
 		return "", fmt.Errorf("id_token missing email claim")
 	}
+
+	// email_verified=false means the IdP itself has not confirmed the user
+	// controls this address — trusting it anyway would let anyone who can
+	// self-assert an unconfirmed email at the IdP impersonate that address in
+	// Tombstone once it clears the AllowedDomains check. Only reject when the
+	// claim is explicitly present and not truthy; many IdPs omit it entirely,
+	// and treating absence as untrusted would break those.
+	if verified, present := emailVerifiedClaim(tok); present && !verified {
+		return "", fmt.Errorf("id_token email is not verified by issuer")
+	}
+
 	return email, nil
+}
+
+// emailVerifiedClaim returns the token's email_verified claim and whether it
+// was present at all. Both bool and string ("true"/"false") representations
+// are handled — some IdPs (e.g. AWS Cognito) send it as a string.
+func emailVerifiedClaim(tok oidcjwt.Token) (verified bool, present bool) {
+	var raw any
+	if err := tok.Get("email_verified", &raw); err != nil {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		return v == "true", true
+	default:
+		return false, true
+	}
 }
 
 // jwks returns the issuer's current JSON Web Key Set, fetching and caching
 // it (via OIDC discovery of the issuer's jwks_uri) on first use. A failed
-// attempt is never cached — an early transient failure must not wedge SSO
-// for the lifetime of the process.
+// attempt is never cached beyond jwksInitCooldown — an early transient
+// failure must not wedge SSO for the lifetime of the process, but repeated
+// failures must not retry unboundedly fast either.
 func (s *SSOMiddleware) jwks(ctx context.Context) (jwk.Set, error) {
 	s.jwksMu.Lock()
-	cache, jwksURL := s.jwksCache, s.jwksURL
-	s.jwksMu.Unlock()
+	defer s.jwksMu.Unlock()
 
-	if cache == nil {
-		discoveredURL, err := discoverJWKSURL(ctx, s.config.OIDCIssuer)
+	if s.jwksCache == nil {
+		if !s.jwksLastFailAt.IsZero() && time.Since(s.jwksLastFailAt) < jwksInitCooldown {
+			return nil, fmt.Errorf("jwks initialization failed recently, not retrying yet: %w", s.jwksLastFailErr)
+		}
+
+		cache, discoveredURL, err := initJWKSCache(ctx, s.config.OIDCIssuer)
 		if err != nil {
-			return nil, fmt.Errorf("discover jwks_uri: %w", err)
+			s.jwksLastFailAt = time.Now()
+			s.jwksLastFailErr = err
+			return nil, err
 		}
-
-		newCache, err := jwk.NewCache(context.Background(), httprc.NewClient())
-		if err != nil {
-			return nil, fmt.Errorf("create jwks cache: %w", err)
-		}
-		if err := newCache.Register(ctx, discoveredURL); err != nil {
-			return nil, fmt.Errorf("register jwks endpoint: %w", err)
-		}
-
-		s.jwksMu.Lock()
-		s.jwksCache, s.jwksURL = newCache, discoveredURL
-		cache, jwksURL = newCache, discoveredURL
-		s.jwksMu.Unlock()
+		s.jwksCache, s.jwksURL = cache, discoveredURL
+		s.jwksLastFailAt = time.Time{}
+		s.jwksLastFailErr = nil
 	}
 
-	return cache.Lookup(ctx, jwksURL)
+	return s.jwksCache.Lookup(ctx, s.jwksURL)
+}
+
+// initJWKSCache performs OIDC discovery and registers the resulting
+// jwks_uri with a fresh jwk.Cache. If Register fails, the already-started
+// cache is shut down before returning — otherwise its background
+// httprc.Client goroutines would leak for the remaining process lifetime.
+func initJWKSCache(ctx context.Context, issuer string) (*jwk.Cache, string, error) {
+	discoveredURL, err := discoverJWKSURL(ctx, issuer)
+	if err != nil {
+		return nil, "", fmt.Errorf("discover jwks_uri: %w", err)
+	}
+
+	cache, err := jwk.NewCache(context.Background(), httprc.NewClient())
+	if err != nil {
+		return nil, "", fmt.Errorf("create jwks cache: %w", err)
+	}
+	if err := cache.Register(ctx, discoveredURL); err != nil {
+		_ = cache.Shutdown(context.Background())
+		return nil, "", fmt.Errorf("register jwks endpoint: %w", err)
+	}
+	return cache, discoveredURL, nil
 }
 
 // discoverJWKSURL fetches the issuer's OIDC discovery document and returns
 // its jwks_uri, per the standard /.well-known/openid-configuration convention.
 func discoverJWKSURL(ctx context.Context, issuer string) (string, error) {
+	if !isAllowedDiscoveryScheme(issuer) {
+		return "", fmt.Errorf("issuer %q must use https (plain http is only allowed for loopback testing)", issuer)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, oidcDiscoveryTimeout)
+	defer cancel()
+
 	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
@@ -271,7 +352,30 @@ func discoverJWKSURL(ctx context.Context, issuer string) (string, error) {
 	if doc.JWKSURI == "" {
 		return "", fmt.Errorf("discovery document missing jwks_uri")
 	}
+	if !isAllowedDiscoveryScheme(doc.JWKSURI) {
+		return "", fmt.Errorf("discovery document's jwks_uri %q must use https (plain http is only allowed for loopback testing)", doc.JWKSURI)
+	}
 	return doc.JWKSURI, nil
+}
+
+// isAllowedDiscoveryScheme requires https — the entire cryptographic
+// guarantee this file adds depends on the JWKS being fetched over a channel
+// an attacker cannot tamper with — with a narrow loopback exception so
+// local/CI tests (and genuinely local dev IdPs) can use plain http.
+func isAllowedDiscoveryScheme(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := u.Hostname()
+		return host == "127.0.0.1" || host == "::1" || host == "localhost"
+	default:
+		return false
+	}
 }
 
 // issueTombstoneJWT creates a signed HS256 JWT containing sub=email valid for
