@@ -46,10 +46,15 @@ const oidcDiscoveryTimeout = 10 * time.Second
 const jwksInitCooldown = 5 * time.Second
 
 // oauthSessionCookieName/oauthSessionMaxAge bound the lifetime of a single
-// in-flight login attempt's CSRF state, OIDC nonce, and PKCE verifier.
+// in-flight login attempt's CSRF state, OIDC nonce, and PKCE verifier. 15m
+// (matching oauth2-proxy's --cookie-csrf-expire and next-auth's OAuth
+// state/PKCE cookie default) rather than a tighter window, since the clock
+// has to cover the IdP's own login/consent/step-up flow too — push-MFA
+// approval, first-time device enrollment, or a delayed SMS OTP can each
+// eat several minutes on their own before the user even gets back here.
 const (
 	oauthSessionCookieName = "tombstone_oauth_session"
-	oauthSessionMaxAge     = 10 * time.Minute
+	oauthSessionMaxAge     = 15 * time.Minute
 )
 
 // SSOMiddleware handles OIDC/SAML SSO flows.

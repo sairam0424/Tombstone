@@ -712,6 +712,9 @@ func TestLoginHandler_SetsSessionCookieAndAuthorizeParams(t *testing.T) {
 	if cookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("SameSite = %v, want Lax (Strict would drop the cookie on the IdP's cross-site redirect back)", cookie.SameSite)
 	}
+	if got, want := cookie.MaxAge, int(oauthSessionMaxAge.Seconds()); got != want {
+		t.Errorf("MaxAge = %d, want %d (oauthSessionMaxAge)", got, want)
+	}
 
 	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
 	if err != nil {
@@ -815,7 +818,132 @@ func TestCallbackHandler_ClearsSessionCookie(t *testing.T) {
 		t.Fatalf("got %d Set-Cookie headers on the callback response, want exactly 1 (clearing the session cookie)", len(respCookies))
 	}
 	if respCookies[0].MaxAge >= 0 {
-		t.Errorf("MaxAge = %d, want negative (cookie must be cleared, not left to expire on its original 10-minute schedule)", respCookies[0].MaxAge)
+		t.Errorf("MaxAge = %d, want negative (cookie must be cleared, not left to expire on its original schedule)", respCookies[0].MaxAge)
+	}
+}
+
+// TestCallbackHandler_MissingStateParamRejected covers state being entirely
+// ABSENT from the callback query, distinct from TestCallbackHandler_
+// StateMismatchRejected's wrong-value case — an absent query param and a
+// present-but-wrong one take different code paths through url.Values.Get,
+// and both must be rejected.
+func TestCallbackHandler_MissingStateParamRejected(t *testing.T) {
+	sso := newCallbackTestSSOMiddleware()
+
+	loginRec := httptest.NewRecorder()
+	sso.LoginHandler(loginRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	cookies := loginRec.Result().Cookies()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	sso.CallbackHandler(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a callback with no state param at all must be rejected the same as a wrong one); body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestConsumeOAuthSessionCookie_MalformedValuesRejected drives CallbackHandler
+// with a present-but-tampered/corrupted session cookie — distinct from
+// TestCallbackHandler_MissingSessionCookieRejected's no-cookie-at-all case —
+// and pins down that every decode failure mode fails cleanly (400), not
+// with a panic or a bypass.
+func TestConsumeOAuthSessionCookie_MalformedValuesRejected(t *testing.T) {
+	incompleteSession, err := json.Marshal(oauthSession{State: "s", Nonce: "", Verifier: "v"})
+	if err != nil {
+		t.Fatalf("marshal incomplete session: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"not valid base64", "not-valid-base64!!!"},
+		{"valid base64, not valid JSON", base64.RawURLEncoding.EncodeToString([]byte("not json"))},
+		{"valid JSON but wrong shape (array)", base64.RawURLEncoding.EncodeToString([]byte("[1,2,3]"))},
+		{"valid JSON but incomplete fields", base64.RawURLEncoding.EncodeToString(incompleteSession)},
+		{"empty value", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sso := newCallbackTestSSOMiddleware()
+
+			req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state=whatever", nil)
+			req.AddCookie(&http.Cookie{Name: oauthSessionCookieName, Value: tc.value})
+			rec := httptest.NewRecorder()
+
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("CallbackHandler panicked on a malformed session cookie: %v", r)
+					}
+				}()
+				sso.CallbackHandler(rec, req)
+			}()
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestOAuthLoginToCallback_PKCEChallengeMatchesVerifierAtTokenEndpoint is the
+// end-to-end proof that PKCE is wired correctly across the whole flow: the
+// code_challenge LoginHandler advertises to the IdP is the S256 hash of
+// exactly the code_verifier that later gets POSTed to the token endpoint
+// for THIS SAME login attempt — not two independently-correct halves that
+// happen to agree in isolated unit tests.
+func TestOAuthLoginToCallback_PKCEChallengeMatchesVerifierAtTokenEndpoint(t *testing.T) {
+	var gotVerifier string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotVerifier = r.PostForm.Get("code_verifier")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id_token":"stub-id-token","access_token":"stub","token_type":"Bearer","expires_in":3600}`)
+	})
+	tokenServer := httptest.NewServer(mux)
+	defer tokenServer.Close()
+
+	sso := &SSOMiddleware{
+		config: SSOConfig{
+			OIDCIssuer:   tokenServer.URL,
+			OIDCClientID: "test-client",
+			CallbackURL:  "https://tombstone.example/auth/callback",
+		},
+		logger: zap.NewNop(),
+	}
+
+	loginRec := httptest.NewRecorder()
+	sso.LoginHandler(loginRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	codeChallenge := redirectParam(t, loginRec, "code_challenge")
+	state := redirectParam(t, loginRec, "state")
+	cookies := loginRec.Result().Cookies()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+state, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	sso.CallbackHandler(rec, req)
+
+	// The id_token itself will still fail verification (it's an unsigned
+	// stub against a real jwks() lookup that will fail against tokenServer,
+	// which serves no discovery document) — that's fine, the token exchange
+	// step this test cares about has already happened by then.
+	if gotVerifier == "" {
+		t.Fatal("token endpoint never received a code_verifier — PKCE wiring is broken somewhere between LoginHandler and exchangeCode")
+	}
+	if got := pkceChallengeS256(gotVerifier); got != codeChallenge {
+		t.Errorf("S256(verifier sent to token endpoint) = %q, want %q (code_challenge advertised to the IdP) — PKCE binding does not hold across the real login->callback flow", got, codeChallenge)
 	}
 }
 
