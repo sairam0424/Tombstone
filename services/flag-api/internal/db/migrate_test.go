@@ -68,7 +68,7 @@ func TestMigrationRunner(t *testing.T) {
 			"idx_flag_environments_environment",
 			"idx_change_requests_status_created_at",
 			"idx_flags_project_id_state",
-			"idx_audit_log_created_at",
+			"idx_audit_log_project_id_created_at",
 			"idx_scim_users_email",
 		} {
 			if !tableExists(ctx, t, database, idx) {
