@@ -129,10 +129,32 @@ func TestHTTPMetrics_RecordsDuration(t *testing.T) {
 	}
 }
 
-// TestHTTPMetrics_FallsBackToRawPathOutsideChi proves the middleware
-// doesn't panic or misbehave when used without a chi route context at all
-// (e.g. wrapping a bare http.Handler in a test or a non-chi caller).
-func TestHTTPMetrics_FallsBackToRawPathOutsideChi(t *testing.T) {
+// routeAttr returns the "route" attribute value recorded against
+// http_server_requests_total, or "" if the metric was never recorded.
+func routeAttr(t *testing.T, rm *metricdata.ResourceMetrics) string {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "http_server_requests_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok || len(sum.DataPoints) == 0 {
+				continue
+			}
+			if v, ok := sum.DataPoints[0].Attributes.Value("route"); ok {
+				return v.AsString()
+			}
+		}
+	}
+	return ""
+}
+
+// TestHTTPMetrics_FallsBackToFixedLabelOutsideChi proves the middleware
+// doesn't panic when used without a chi route context at all (e.g.
+// wrapping a bare http.Handler in a test or a non-chi caller), and that
+// the fallback is the FIXED "unmatched" label, never the raw request path.
+func TestHTTPMetrics_FallsBackToFixedLabelOutsideChi(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	meter := provider.Meter("test")
@@ -151,7 +173,149 @@ func TestHTTPMetrics_FallsBackToRawPathOutsideChi(t *testing.T) {
 	if err := reader.Collect(context.Background(), &got); err != nil {
 		t.Fatalf("collect: %v", err)
 	}
-	if len(got.ScopeMetrics) == 0 {
-		t.Fatal("no metrics recorded when used outside a chi router")
+	if route := routeAttr(t, &got); route != "unmatched" {
+		t.Errorf("route = %q, want the fixed label \"unmatched\"", route)
+	}
+}
+
+// TestHTTPMetrics_UnmatchedChiRouteUsesFixedLabelNotRawPath is the direct
+// regression proof for the confirmed high-severity finding: a genuinely
+// unmatched route (a 404 inside a real chi router) must record the fixed
+// "unmatched" label, not the raw, caller-controlled request path — that
+// path is exactly what an unauthenticated internet scanner controls, and
+// the OTel SDK's shared, non-evicting cardinality budget (2000 by default)
+// would otherwise be permanently exhaustible by routine probing, silently
+// collapsing ALL future labels (including legitimate ones) into one opaque
+// overflow bucket for the rest of the process's life.
+func TestHTTPMetrics_UnmatchedChiRouteUsesFixedLabelNotRawPath(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := provider.Meter("test")
+
+	mw, err := HTTPMetrics(meter)
+	if err != nil {
+		t.Fatalf("HTTPMetrics: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(mw)
+	r.Get("/flags/{key}", func(w http.ResponseWriter, req *http.Request) {})
+
+	req := httptest.NewRequest(http.MethodGet, "/wp-admin/setup-config.php", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (sanity check that the route genuinely didn't match)", rec.Code)
+	}
+
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if route := routeAttr(t, &got); route != "unmatched" {
+		t.Errorf("route = %q, want the fixed label \"unmatched\" — recording the raw path leaks attacker-controlled cardinality and, for a matched-but-different endpoint, could leak a real flag key", route)
+	}
+}
+
+// TestHTTPMetrics_ShortCircuitBeforeChiRoutingUsesFixedLabel simulates the
+// confirmed CORS-preflight/rate-limit/load-shed failure mode: a middleware
+// registered BETWEEN this one and chi's tree router that returns without
+// calling next — so the tree router, and therefore route-pattern
+// population, never runs at all, even though the real path (which could
+// embed a genuine flag key) is fully formed on the request.
+func TestHTTPMetrics_ShortCircuitBeforeChiRoutingUsesFixedLabel(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := provider.Meter("test")
+
+	mw, err := HTTPMetrics(meter)
+	if err != nil {
+		t.Fatalf("HTTPMetrics: %v", err)
+	}
+
+	shortCircuit := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests) // never calls next — mirrors ratelimit.go/loadshed.go
+		})
+	}
+
+	r := chi.NewRouter()
+	r.Use(mw)
+	r.Use(shortCircuit)
+	r.Get("/flags/{key}", func(w http.ResponseWriter, req *http.Request) {})
+
+	req := httptest.NewRequest(http.MethodGet, "/flags/my-secret-flag-key-12345", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (sanity check that the short-circuit actually ran)", rec.Code)
+	}
+
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if route := routeAttr(t, &got); route != "unmatched" {
+		t.Errorf("route = %q, want the fixed label \"unmatched\" — the real request path (containing a real flag key here) must never leak into a metric label", route)
+	}
+}
+
+// TestHTTPMetrics_PanicRecordedAndRePanicked is the direct regression proof
+// for the confirmed high-severity finding: a panicking handler must still
+// be recorded (as a 5xx) and the panic must still propagate so an outer
+// recoverer (chi's Recoverer, registered outside this middleware in
+// cmd/main.go) still produces the actual error response.
+func TestHTTPMetrics_PanicRecordedAndRePanicked(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := provider.Meter("test")
+
+	mw, err := HTTPMetrics(meter)
+	if err != nil {
+		t.Fatalf("HTTPMetrics: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(mw)
+	r.Get("/flags/{key}", func(w http.ResponseWriter, req *http.Request) {
+		panic("boom")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/flags/some-key", nil)
+	rec := httptest.NewRecorder()
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		r.ServeHTTP(rec, req)
+	}()
+
+	if recovered == nil {
+		t.Fatal("the panic did not propagate out of HTTPMetrics — an outer recoverer would never see it")
+	}
+
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if route := routeAttr(t, &got); route != "/flags/{key}" {
+		t.Errorf("route = %q, want /flags/{key} — the route pattern was already resolved before the panic, so it should still be captured", route)
+	}
+	for _, sm := range got.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "http_server_requests_total" {
+				continue
+			}
+			sum := m.Data.(metricdata.Sum[int64])
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+			}
+			status, _ := sum.DataPoints[0].Attributes.Value("status")
+			if status.AsString() != "5xx" {
+				t.Errorf("status = %q, want 5xx for a panicking request", status.AsString())
+			}
+		}
 	}
 }

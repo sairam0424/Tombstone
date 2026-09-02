@@ -32,26 +32,65 @@ func HTTPMetrics(meter metric.Meter) (func(http.Handler) http.Handler, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-			next.ServeHTTP(rec, r)
 
-			// Read AFTER ServeHTTP: chi populates the route pattern into the
-			// request's RouteContext as it matches the route, so it's only
-			// available once routing (which happens inside next.ServeHTTP)
-			// has actually run.
-			route := r.URL.Path
-			if rctx := chi.RouteContext(r.Context()); rctx != nil {
-				if pattern := rctx.RoutePattern(); pattern != "" {
-					route = pattern
+			// A defer, not plain post-call statements: a panic in next
+			// unwinds straight through this frame, skipping any code after
+			// next.ServeHTTP below — only deferred functions run during
+			// that unwind. Without this, the exact requests RED metrics
+			// most need to surface (application panics, caught and turned
+			// into a 500 by chi's Recoverer further up the stack) would be
+			// silently invisible: not mis-recorded, simply never counted.
+			defer func() {
+				p := recover()
+
+				// Read AFTER ServeHTTP returns or panics: chi populates the
+				// route pattern into the request's RouteContext as it
+				// matches the route, deep inside next.ServeHTTP's call
+				// chain. If ANY middleware between this one and chi's tree
+				// router short-circuits without calling its own next
+				// (rate limiting's 429, load shedding's 503, or a CORS
+				// preflight's early 200), the tree router never runs at
+				// all and no pattern is ever populated — and a genuinely
+				// unmatched path (a 404, including anything an
+				// unauthenticated caller cares to probe) never populates
+				// one either. In every one of those cases this falls back
+				// to a single FIXED label, "unmatched", never the raw
+				// r.URL.Path — the path can contain a real flag key
+				// (leaking it via this deliberately public,
+				// unauthenticated endpoint) and, more importantly, an
+				// unauthenticated caller could otherwise mint unlimited
+				// distinct path values, each consuming one slot of the
+				// OTel SDK's shared, non-evicting cardinality budget
+				// (2000 by default) until it fills — permanently
+				// collapsing ALL future new labels, including legitimate
+				// ones added by a later deploy, into one opaque overflow
+				// series for the rest of the process's life.
+				route := "unmatched"
+				if rctx := chi.RouteContext(r.Context()); rctx != nil {
+					if pattern := rctx.RoutePattern(); pattern != "" {
+						route = pattern
+					}
 				}
-			}
 
-			attrs := metric.WithAttributes(
-				attribute.String("route", route),
-				attribute.String("method", r.Method),
-				attribute.String("status", strconv.Itoa(rec.status/100)+"xx"),
-			)
-			requestCount.Add(r.Context(), 1, attrs)
-			requestDuration.Record(r.Context(), time.Since(start).Seconds(), attrs)
+				status := rec.status
+				if p != nil {
+					status = http.StatusInternalServerError
+				}
+
+				attrs := metric.WithAttributes(
+					attribute.String("route", route),
+					attribute.String("method", r.Method),
+					attribute.String("status", strconv.Itoa(status/100)+"xx"),
+				)
+				requestCount.Add(r.Context(), 1, attrs)
+				requestDuration.Record(r.Context(), time.Since(start).Seconds(), attrs)
+
+				if p != nil {
+					panic(p) // re-panic so Recoverer (registered outside this middleware) still handles it
+				}
+			}()
+
+			next.ServeHTTP(rec, r)
 		})
 	}, nil
 }
