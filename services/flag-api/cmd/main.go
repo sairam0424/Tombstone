@@ -319,7 +319,7 @@ func main() {
 			OIDCClientID:   os.Getenv("OIDC_CLIENT_ID"),
 			CallbackURL:    os.Getenv("SSO_CALLBACK_URL"),
 			AllowedDomains: allowedDomains,
-		}, jwtSecret, logger)
+		}, jwtSecret, logger, db)
 		r.Get("/auth/login", ssoMw.LoginHandler)
 		r.Get("/auth/callback", ssoMw.CallbackHandler)
 	}
