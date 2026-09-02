@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -117,7 +118,21 @@ func main() {
 		logger.Fatal("ping redis", zap.Error(err))
 	}
 
-	rekorClient := transparency.NewRekorClient()
+	// AUD-1b: absent/invalid is NOT fatal — Rekor submission has always been
+	// optional and fail-open (REKOR_ENABLED gates it); NewRekorClient itself
+	// warns and disables submission if REKOR_ENABLED=true but no signer is
+	// available, rather than pretending to submit signature-less entries.
+	// A configured-but-INVALID key (distinct from simply unset) is worth its
+	// own warning here regardless of REKOR_ENABLED, since that's a real
+	// operator mistake, not an intentionally-disabled feature.
+	rekorSigner, rekorSignerErr := secrets.NewRekorSignerFromEnv()
+	if rekorSignerErr != nil {
+		rekorSigner = nil
+		if !errors.Is(rekorSignerErr, secrets.ErrNoRekorSigningKey) {
+			logger.Warn("REKOR_SIGNING_KEY is set but invalid — Rekor submissions disabled", zap.Error(rekorSignerErr))
+		}
+	}
+	rekorClient := transparency.NewRekorClient(rekorSigner)
 
 	// The single audit writer — one canonical keyed hash, one advisory-locked
 	// transactional append path for every call site (AUD-1). Always constructed:
