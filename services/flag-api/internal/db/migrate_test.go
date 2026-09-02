@@ -13,7 +13,7 @@ import (
 // expectedVersions is the full set the runner must apply: 1 = schema.sql
 // baseline, then each migrations/NNN_*.sql prefix. Update this alongside any
 // new migration so the runner test stays a real regression gate.
-var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
+var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
 
 // TestMigrationRunner exercises the runner against a REAL Postgres. It is the
 // executable gate for DATA-1 and runs in CI (the flag-api-migrations job sets
@@ -58,6 +58,21 @@ func TestMigrationRunner(t *testing.T) {
 		for _, table := range []string{"flags", "flag_environments", "audit_log", "schema_migrations"} {
 			if !tableExists(ctx, t, database, table) {
 				t.Fatalf("expected table %q to exist after migrate", table)
+			}
+		}
+		// DATA-2 (migration 023): a passing Migrate() call proves the SQL
+		// ran without error, not that the indexes it claims to create
+		// actually exist under the names the app assumes — to_regclass
+		// resolves indexes the same way it resolves tables above.
+		for _, idx := range []string{
+			"idx_flag_environments_environment",
+			"idx_change_requests_status_created_at",
+			"idx_flags_project_id_state",
+			"idx_audit_log_project_id_created_at",
+			"idx_scim_users_email",
+		} {
+			if !tableExists(ctx, t, database, idx) {
+				t.Fatalf("expected index %q to exist after migrate", idx)
 			}
 		}
 	})
