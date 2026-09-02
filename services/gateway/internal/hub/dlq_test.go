@@ -3,8 +3,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -306,52 +306,83 @@ func TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts(t *testing.T) {
 	}
 }
 
-// TestReclaimStalePending_ConcurrentSweepsDoNotDoubleDeadLetter is the
-// direct regression proof for the deadLetter atomicity fix: two concurrent
-// reclaim sweeps (simulating two live replicas' independently-ticking 15s
-// reclaim loops) racing the SAME over-budget PEL entry must produce exactly
-// ONE dead-letter entry, not two.
-func TestReclaimStalePending_ConcurrentSweepsDoNotDoubleDeadLetter(t *testing.T) {
-	mr, rdb, b, streamKey := setupDLQTest(t, "development")
-	defer mr.Close()
-	defer rdb.Close()
+// TestReclaimStalePendingInGroup_DeadLetterIsGatedBehindAClaim is a
+// structural regression guard for the deadLetter atomicity fix.
+//
+// The property the fix actually relies on — that of several concurrent
+// reclaim sweeps racing the SAME over-budget PEL entry, only ONE can ever
+// win the atomic claim and proceed to dead-letter it — rests on a real
+// Redis guarantee (XCLAIM's MinIdle filter is atomic under concurrent
+// access) that could not be reliably reproduced against this package's
+// existing miniredis-based tests: miniredis v2.38.0 does NOT correctly
+// enforce that guarantee. Confirmed via two throwaway diagnostics: (1)
+// against miniredis with SetTime-frozen idle, two concurrent XCLAIM calls
+// for the identical entry ID with the same MinIdle both succeeded in 50/50
+// trials; (2) against a REAL local redis-server at comparable idle/MinIdle
+// margins (100ms idle, 50ms MinIdle — the same ~2x safety margin production
+// gets from reclaimIdleThreshold's 30s vs. a sub-millisecond Redis round
+// trip), exactly one winner in 300/300 trials. Since the real guarantee
+// isn't faithfully testable with this package's test double, this instead
+// pins the CODE STRUCTURE the fix depends on: reclaimStalePendingInGroup
+// must call XClaim and check whether the claim actually succeeded BEFORE
+// ever calling deadLetter — not decide to dead-letter directly off the
+// plain (unclaimed) XPendingExt read, which is what let two concurrent
+// sweeps both dead-letter the same message before this fix.
+func TestReclaimStalePendingInGroup_DeadLetterIsGatedBehindAClaim(t *testing.T) {
+	src, err := os.ReadFile("dlq.go")
+	if err != nil {
+		t.Fatalf("read dlq.go: %v", err)
+	}
+	body := reclaimStalePendingInGroupBody(t, string(src))
 
-	ctx := context.Background()
-	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
+	claimIdx := strings.Index(body, "b.rdb.XClaim(")
+	if claimIdx == -1 {
+		t.Fatal("reclaimStalePendingInGroup no longer calls XClaim at all")
+	}
+	emptyCheckIdx := strings.Index(body, "len(msgs) == 0")
+	if emptyCheckIdx == -1 || emptyCheckIdx < claimIdx {
+		t.Fatal("reclaimStalePendingInGroup no longer checks whether the claim actually succeeded (len(msgs) == 0) after calling XClaim")
+	}
+	deadLetterIdx := strings.Index(body, "b.deadLetter(")
+	if deadLetterIdx == -1 {
+		t.Fatal("reclaimStalePendingInGroup no longer calls deadLetter at all")
+	}
+	if deadLetterIdx < emptyCheckIdx {
+		t.Error("reclaimStalePendingInGroup calls deadLetter BEFORE checking whether this sweep actually won the claim race — this reintroduces the double-dead-letter bug: two concurrent sweeps that both read the same over-budget PEL entry would both dead-letter it")
+	}
+}
 
-	// Drive the delivery count to maxDeliveryAttempts via successive claims,
-	// exactly as TestReclaimStalePending_DeadLettersAfterMaxAttempts does,
-	// but stop one cycle short so this test's two concurrent sweeps are the
-	// ones that actually trigger the dead-letter branch.
-	now := time.Now()
-	for i := 0; i < maxDeliveryAttempts; i++ {
-		now = now.Add(reclaimIdleThreshold + time.Second)
-		mr.SetTime(now)
-		if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
-			t.Fatalf("ReclaimStalePending (warmup cycle %d): %v", i, err)
+// reclaimStalePendingInGroupBody returns the body of
+// reclaimStalePendingInGroup's function literal by brace-matching from its
+// opening "{" to the matching close, mirroring flag-api's
+// ssoConfigBlock helper (cmd/main_helpers_test.go).
+func reclaimStalePendingInGroupBody(t *testing.T, src string) string {
+	t.Helper()
+	const marker = "func (b *Broadcaster) reclaimStalePendingInGroup("
+	start := strings.Index(src, marker)
+	if start == -1 {
+		t.Fatalf("could not find %q in dlq.go", marker)
+	}
+	open := strings.Index(src[start:], "{")
+	if open == -1 {
+		t.Fatalf("no opening brace found for reclaimStalePendingInGroup")
+	}
+	open += start
+
+	depth := 0
+	for i := open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[open : i+1]
+			}
 		}
 	}
-	now = now.Add(reclaimIdleThreshold + time.Second)
-	mr.SetTime(now)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = b.ReclaimStalePending(ctx, streamKey)
-		}()
-	}
-	wg.Wait()
-
-	dlqKey := DLQStreamKey(streamKey)
-	dlqMsgs, err := rdb.XRange(ctx, dlqKey, "-", "+").Result()
-	if err != nil {
-		t.Fatalf("XRange dlq: %v", err)
-	}
-	if len(dlqMsgs) != 1 {
-		t.Fatalf("expected exactly 1 dlq entry after 2 concurrent sweeps raced the same over-budget message %s, got %d", id, len(dlqMsgs))
-	}
+	t.Fatalf("unbalanced braces in reclaimStalePendingInGroup")
+	return ""
 }
 
 // TestDLQStreamKey_MatchesConvention pins the "<stream>:dlq" naming

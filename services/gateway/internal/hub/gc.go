@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -38,6 +39,16 @@ func GCIdleGroups(ctx context.Context, rdb *redis.Client, streamKey string, logg
 	}
 
 	for _, g := range groups {
+		// tombstone:stream:{env} is NOT exclusive to gateway — the Python
+		// intelligence service maintains its own, differently-named
+		// long-lived group ("intelligence-worker") against the same stream
+		// keys. GC must never even consider destroying a group it doesn't
+		// own; anything not matching gateway's own naming convention is
+		// somebody else's, and its liveness is not this function's call.
+		if !strings.HasPrefix(g.Name, replicaGroupPrefix) {
+			continue
+		}
+
 		consumers, err := rdb.XInfoConsumers(ctx, streamKey, g.Name).Result()
 		if err != nil {
 			logger.Warn("gc: xinfo consumers failed",

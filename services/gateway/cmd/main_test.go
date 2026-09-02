@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -54,7 +55,43 @@ func TestMainWiresConsumerGroupLifecycle(t *testing.T) {
 	// back to a plain `for` loop with no `go func` would reintroduce up to
 	// 5s of pure sequential delay ahead of connection draining, contrary to
 	// its own "must never block or delay the rest of shutdown" intent.
-	if !regexp.MustCompile(`go func\(\)\s*\{[\s\S]*?XGroupDestroy`).MatchString(body) {
+	//
+	// This must be scoped to ONLY the destroy block's own text, not searched
+	// across the whole file: main.go has an earlier, unrelated
+	// `go func() { ... srv.ListenAndServe() ... }()` (the HTTP server-start
+	// goroutine) that a loose `go func\(\)...XGroupDestroy` search spanning
+	// the entire file would also match, regardless of whether the destroy
+	// loop itself is wrapped in its own goroutine or not — which would make
+	// this check pass even after reverting exactly the regression it exists
+	// to catch. shutdownDestroyBlock isolates the substring between
+	// streamConsumersWG.Wait() and srv.Shutdown's own setup, so only text
+	// belonging to the destroy step itself is searched.
+	destroyBlock := shutdownDestroyBlock(t, body)
+	if !regexp.MustCompile(`go func\(\)\s*\{[\s\S]*?XGroupDestroy`).MatchString(destroyBlock) {
 		t.Error("main.go's consumer-group destroy loop no longer runs inside its own goroutine — this must stay concurrent with srv.Shutdown, not ahead of it")
 	}
+}
+
+// shutdownDestroyBlock returns the substring of main.go's source between
+// streamConsumersWG.Wait() (the end of the stream-consumer shutdown
+// synchronization) and the srv.Shutdown setup (shutdownCtx, shutdownCancel
+// := ...) — i.e. just the graceful-shutdown consumer-group destroy step,
+// with nothing from earlier in the file (like the unrelated HTTP
+// server-start goroutine) included.
+func shutdownDestroyBlock(t *testing.T, src string) string {
+	t.Helper()
+	const startMarker = "streamConsumersWG.Wait()"
+	const endMarker = "shutdownCtx, shutdownCancel :="
+
+	start := strings.Index(src, startMarker)
+	if start == -1 {
+		t.Fatalf("could not find %q in main.go", startMarker)
+	}
+	start += len(startMarker)
+
+	end := strings.Index(src[start:], endMarker)
+	if end == -1 {
+		t.Fatalf("could not find %q in main.go after streamConsumersWG.Wait()", endMarker)
+	}
+	return src[start : start+end]
 }

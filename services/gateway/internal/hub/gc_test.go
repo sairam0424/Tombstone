@@ -194,6 +194,34 @@ func TestGCIdleGroups_ForeignReclaimConsumerDoesNotSpareADeadGroup(t *testing.T)
 	}
 }
 
+// TestGCIdleGroups_ForeignServiceGroupIsNeverTouched is the direct
+// regression proof for the cross-service-group-destruction bug: a consumer
+// group belonging to a DIFFERENT service (e.g. services/intelligence's
+// Python RedisStreamsEventConsumer, group name "intelligence-worker",
+// consumer names like "intelligence-<machine-id>" — never "primary" and
+// never prefixed "gateway-workers-") must be left alone entirely, regardless
+// of its consumer's idle time or name. GC must not even evaluate a group it
+// doesn't own for staleness.
+func TestGCIdleGroups_ForeignServiceGroupIsNeverTouched(t *testing.T) {
+	mr, rdb, streamKey := setupGCTest(t)
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	// No clock advance at all — this consumer is maximally "fresh". If GC
+	// evaluated this group at all under the old (pre-fix) unscoped
+	// "primary"-only filter, it would still be destroyed immediately, since
+	// its consumer is never named "primary". The prefix filter must exclude
+	// it before that check ever runs.
+	touchGroup(t, ctx, rdb, streamKey, "intelligence-worker", "intelligence-abc123")
+
+	GCIdleGroups(ctx, rdb, streamKey, zap.NewNop())
+
+	if !groupExists(t, ctx, rdb, streamKey, "intelligence-worker") {
+		t.Error("REGRESSION: a foreign service's own consumer group was destroyed by GCIdleGroups — GC must only ever act on gateway's own replicaGroupPrefix-named groups")
+	}
+}
+
 // TestGCIdleGroups_NoStreamIsNoop proves calling GCIdleGroups against a
 // stream that doesn't exist yet doesn't panic or log spuriously.
 func TestGCIdleGroups_NoStreamIsNoop(t *testing.T) {

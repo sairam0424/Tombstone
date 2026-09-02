@@ -21,6 +21,16 @@ const (
 	// discriminates between replicas.
 	replicaConsumerName = "primary"
 
+	// replicaGroupPrefix identifies a consumer group as one of gateway's OWN
+	// per-replica groups (see ReplicaGroupName). tombstone:stream:{env} is
+	// NOT exclusive to gateway — services/intelligence's Python
+	// RedisStreamsEventConsumer maintains its own, differently-named
+	// long-lived group ("intelligence-worker") against the same stream keys.
+	// Anything gateway does that enumerates/manages consumer groups on this
+	// stream (GCIdleGroups) must filter to this prefix first, or it will act
+	// on a group it doesn't own.
+	replicaGroupPrefix = "gateway-workers-"
+
 	streamReadCount = 10
 	streamBlockDur  = time.Second // 1 s block per XREADGROUP call
 )
@@ -46,7 +56,7 @@ func StreamKey(environment string) string {
 // for how the two transports both being active without double-broadcasting
 // to a replica's own clients is handled.
 func ReplicaGroupName(hostname string) string {
-	return fmt.Sprintf("gateway-workers-%s", hostname)
+	return replicaGroupPrefix + hostname
 }
 
 // CreateConsumerGroups creates groupName on each environment's stream,

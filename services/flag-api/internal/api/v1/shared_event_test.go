@@ -36,6 +36,7 @@ func TestMutationHandlersShareOneFlagEventAcrossBothTransports(t *testing.T) {
 	cases := []struct {
 		name    string
 		src     string
+		varName string
 		declare string
 		pubsub  string
 		stream  string
@@ -43,6 +44,7 @@ func TestMutationHandlersShareOneFlagEventAcrossBothTransports(t *testing.T) {
 		{
 			name:    "UpdateEnvironment",
 			src:     string(flagsSrc),
+			varName: "event",
 			declare: `event\s*:=\s*FlagEvent\{`,
 			pubsub:  `h\.publishEvent\(r\.Context\(\),\s*env,\s*event\)`,
 			stream:  `h\.publishToStream\(r\.Context\(\),\s*env,\s*event\)`,
@@ -50,6 +52,7 @@ func TestMutationHandlersShareOneFlagEventAcrossBothTransports(t *testing.T) {
 		{
 			name:    "KillSwitch",
 			src:     string(flagsSrc),
+			varName: "killEvent",
 			declare: `killEvent\s*:=\s*FlagEvent\{`,
 			pubsub:  `h\.publishEvent\(r\.Context\(\),\s*req\.Environment,\s*killEvent\)`,
 			stream:  `h\.publishToStream\(r\.Context\(\),\s*req\.Environment,\s*killEvent\)`,
@@ -57,6 +60,7 @@ func TestMutationHandlersShareOneFlagEventAcrossBothTransports(t *testing.T) {
 		{
 			name:    "ApproveChangeRequest",
 			src:     string(changeRequestsSrc),
+			varName: "applyEvent",
 			declare: `applyEvent\s*:=\s*FlagEvent\{`,
 			pubsub:  `publishFlagEvent\(r\.Context\(\),\s*h\.rdb,\s*h\.logger,\s*cr\.Environment,\s*applyEvent\)`,
 			stream:  `publishFlagEventToStream\(r\.Context\(\),\s*h\.rdb,\s*h\.logger,\s*cr\.Environment,\s*applyEvent\)`,
@@ -65,14 +69,37 @@ func TestMutationHandlersShareOneFlagEventAcrossBothTransports(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if !regexp.MustCompile(c.declare).MatchString(c.src) {
+			declareLoc := regexp.MustCompile(c.declare).FindStringIndex(c.src)
+			if declareLoc == nil {
 				t.Fatalf("%s no longer declares a single shared FlagEvent value (pattern: %s)", c.name, c.declare)
 			}
-			if !regexp.MustCompile(c.pubsub).MatchString(c.src) {
-				t.Errorf("%s no longer publishes the shared event value via pub/sub (pattern: %s)", c.name, c.pubsub)
+			pubsubLoc := regexp.MustCompile(c.pubsub).FindStringIndex(c.src)
+			if pubsubLoc == nil {
+				t.Fatalf("%s no longer publishes the shared event value via pub/sub (pattern: %s)", c.name, c.pubsub)
 			}
-			if !regexp.MustCompile(c.stream).MatchString(c.src) {
-				t.Errorf("%s no longer publishes the shared event value via Streams (pattern: %s)", c.name, c.stream)
+			streamLoc := regexp.MustCompile(c.stream).FindStringIndex(c.src)
+			if streamLoc == nil {
+				t.Fatalf("%s no longer publishes the shared event value via Streams (pattern: %s)", c.name, c.stream)
+			}
+
+			// The three independent matches above only prove a declaration
+			// and two publish calls referencing the same variable NAME all
+			// exist somewhere in the source — they say nothing about whether
+			// that variable was REASSIGNED to a new (re-timestamped)
+			// FlagEvent{...} in between, which would defeat the whole point
+			// of sharing one value. Check the region between the
+			// declaration and the later of the two publish calls for any
+			// such reassignment (`=`, not the declaration's own `:=`).
+			regionEnd := pubsubLoc[1]
+			if streamLoc[1] > regionEnd {
+				regionEnd = streamLoc[1]
+			}
+			region := c.src[declareLoc[1]:regionEnd]
+			reassign := regexp.MustCompile(regexp.QuoteMeta(c.varName) + `\s*=\s*FlagEvent\{`)
+			if reassign.MatchString(region) {
+				t.Errorf("%s reassigns %s to a new FlagEvent{...} between its declaration and the second publish call — "+
+					"this gives the two transports different Ts values, exactly the race this shared-value fix was meant to close",
+					c.name, c.varName)
 			}
 		})
 	}
