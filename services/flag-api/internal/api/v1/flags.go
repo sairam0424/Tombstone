@@ -427,26 +427,38 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 
 // publishEvent publishes a flag change event to Redis pub/sub
 func (h *FlagHandler) publishEvent(ctx context.Context, environment string, event FlagEvent) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
-	channel := fmt.Sprintf("stream:%s:updates", environment)
-	if err := h.rdb.Publish(ctx, channel, payload).Err(); err != nil {
-		h.logger.Warn("redis publish failed", zap.Error(err), zap.String("channel", channel))
-	}
+	publishFlagEvent(ctx, h.rdb, h.logger, environment, event)
 }
 
 // publishToStream publishes a flag change event to a Redis Stream (XADD).
 // Runs alongside publishEvent for one release cycle (legacy pub/sub removed in v2.1).
 // Stream key: tombstone:stream:{environment}, MaxLen: 10000 (approximate trim).
 func (h *FlagHandler) publishToStream(ctx context.Context, environment string, event FlagEvent) {
+	publishFlagEventToStream(ctx, h.rdb, h.logger, environment, event)
+}
+
+// publishFlagEvent/publishFlagEventToStream are standalone so ChangeRequestHandler
+// (SEC-3b: applying an approved change_payload is the same kind of mutation
+// UpdateEnvironment makes) can notify the same channels without holding a
+// reference to FlagHandler.
+func publishFlagEvent(ctx context.Context, rdb *redis.Client, logger *zap.Logger, environment string, event FlagEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	channel := fmt.Sprintf("stream:%s:updates", environment)
+	if err := rdb.Publish(ctx, channel, payload).Err(); err != nil {
+		logger.Warn("redis publish failed", zap.Error(err), zap.String("channel", channel))
+	}
+}
+
+func publishFlagEventToStream(ctx context.Context, rdb *redis.Client, logger *zap.Logger, environment string, event FlagEvent) {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
 	streamKey := fmt.Sprintf("tombstone:stream:%s", environment)
-	if err := h.rdb.XAdd(ctx, &redis.XAddArgs{
+	if err := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey,
 		MaxLen: 10000,
 		Approx: true,
@@ -457,7 +469,7 @@ func (h *FlagHandler) publishToStream(ctx context.Context, environment string, e
 			"payload":     string(payload),
 		},
 	}).Err(); err != nil {
-		h.logger.Warn("redis xadd failed", zap.Error(err), zap.String("stream", streamKey))
+		logger.Warn("redis xadd failed", zap.Error(err), zap.String("stream", streamKey))
 	}
 }
 
