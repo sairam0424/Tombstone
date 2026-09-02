@@ -36,7 +36,7 @@ func setupGCTest(t *testing.T) (mr *miniredis.Miniredis, rdb *redis.Client, stre
 // the test tool, not something GCIdleGroups itself needs to special-case.
 func touchGroup(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey, group, consumer string) {
 	t.Helper()
-	if err := rdb.XGroupCreateMkStream(ctx, streamKey, group, "0").Err(); err != nil {
+	if err := rdb.XGroupCreateMkStream(ctx, streamKey, group, "0").Err(); err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
 		t.Fatalf("XGroupCreateMkStream(%s): %v", group, err)
 	}
 	id, err := rdb.XAdd(ctx, &redis.XAddArgs{
@@ -162,6 +162,35 @@ func TestGCIdleGroups_GroupWithNoConsumersIsTreatedAsStale(t *testing.T) {
 
 	if groupExists(t, ctx, rdb, streamKey, "gateway-workers-never-read") {
 		t.Error("a group with zero registered consumers must be treated as stale and destroyed")
+	}
+}
+
+// TestGCIdleGroups_ForeignReclaimConsumerDoesNotSpareADeadGroup is the direct
+// regression proof for the GC-defeat fix: a group whose ONLY fresh consumer
+// is a cross-group DLQ-reclaim identity (dlq.go's "gateway-reclaim-*", not
+// this group's own "primary" consumer) must still be treated as stale and
+// destroyed — the reclaim consumer's mere presence must not indefinitely
+// spare an otherwise-abandoned group from GC just because it still has
+// reclaimable backlog.
+func TestGCIdleGroups_ForeignReclaimConsumerDoesNotSpareADeadGroup(t *testing.T) {
+	mr, rdb, streamKey := setupGCTest(t)
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-dead-host", "primary")
+
+	mr.SetTime(time.Now().Add(groupIdleGCThreshold + time.Second))
+	// A live replica's cross-group reclaim sweep just XCLAIMed something out
+	// of the dead group, registering a fresh "gateway-reclaim-*" consumer
+	// inside it — this must NOT count toward liveness the way a "primary"
+	// consumer touch does.
+	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-dead-host", "gateway-reclaim-live-host")
+
+	GCIdleGroups(ctx, rdb, streamKey, zap.NewNop())
+
+	if groupExists(t, ctx, rdb, streamKey, "gateway-workers-dead-host") {
+		t.Error("a group whose only fresh consumer is a foreign reclaim identity must still be destroyed")
 	}
 }
 

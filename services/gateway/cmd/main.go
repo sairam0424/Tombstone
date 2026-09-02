@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -78,9 +79,14 @@ func main() {
 	// Start one stream reader per environment.
 	knownEnvs := []string{"development", "staging", "production"}
 	hub.CreateConsumerGroups(ctx, rdb, knownEnvs, broadcaster.Group(), logger)
+	var streamConsumersWG sync.WaitGroup
 	for _, env := range knownEnvs {
 		env := env // capture loop variable
-		go broadcaster.RunStreamConsumer(ctx, env)
+		streamConsumersWG.Add(1)
+		go func() {
+			defer streamConsumersWG.Done()
+			broadcaster.RunStreamConsumer(ctx, env)
+		}()
 	}
 	logger.Info("Redis Streams consumers started",
 		zap.Strings("environments", knownEnvs), zap.String("group", broadcaster.Group()))
@@ -188,25 +194,48 @@ func main() {
 	cancel() // stop broadcaster
 	logger.Info("shutting down gateway")
 
+	// Wait for the per-environment RunStreamConsumer goroutines to actually
+	// observe cancellation and return before destroying their own consumer
+	// group below. go-redis has no ctx.Done()-driven abort for an in-flight
+	// blocking XREADGROUP — a goroutine can still be blocked reading against
+	// this exact group for up to streamBlockDur (1s) after cancel() fires.
+	// Destroying the group while that read is still in flight wakes it with
+	// a NOGROUP error instead of a clean cancellation exit, and any message
+	// published in that narrow window is never delivered via Streams to
+	// this replica. Bounded by streamBlockDur per goroutine — not a
+	// meaningful shutdown delay.
+	streamConsumersWG.Wait()
+
 	// GW-1: destroy this replica's own consumer group on every known
 	// environment's stream — the fast, common-case path for a graceful
 	// shutdown (rolling deploy, deliberate scale-down), so an abandoned
 	// group and its PEL don't have to wait for the much slower idle-GC
 	// backstop (groupIdleGCThreshold, 5m) to notice. Best-effort: a failure
-	// here just means the backstop handles it instead, so this must never
-	// block or delay the rest of shutdown.
-	shutdownDestroyCtx, shutdownDestroyCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	for _, env := range knownEnvs {
-		if err := rdb.XGroupDestroy(shutdownDestroyCtx, hub.StreamKey(env), broadcaster.Group()).Err(); err != nil {
-			logger.Warn("shutdown: failed to destroy own consumer group",
-				zap.String("stream", hub.StreamKey(env)), zap.String("group", broadcaster.Group()), zap.Error(err))
+	// here just means the backstop handles it instead. Runs in its own
+	// goroutine, CONCURRENTLY with srv.Shutdown below rather than before
+	// it, so it genuinely cannot delay when connection draining starts —
+	// only shutdownWG.Wait() at the very end bounds how long main() waits
+	// for it to finish, capped at 5s and normally fully absorbed by
+	// srv.Shutdown's own (longer) grace period below.
+	var shutdownWG sync.WaitGroup
+	shutdownWG.Add(1)
+	go func() {
+		defer shutdownWG.Done()
+		shutdownDestroyCtx, shutdownDestroyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownDestroyCancel()
+		for _, env := range knownEnvs {
+			if err := rdb.XGroupDestroy(shutdownDestroyCtx, hub.StreamKey(env), broadcaster.Group()).Err(); err != nil {
+				logger.Warn("shutdown: failed to destroy own consumer group",
+					zap.String("stream", hub.StreamKey(env)), zap.String("group", broadcaster.Group()), zap.Error(err))
+			}
 		}
-	}
-	shutdownDestroyCancel()
+	}()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+
+	shutdownWG.Wait()
 }
 
 // reclaimTickInterval controls how often ReclaimStalePending sweeps each

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -97,5 +98,43 @@ func TestEventDeduper_EvictsExpiredEntriesPastSizeThreshold(t *testing.T) {
 
 	if size > 1000 {
 		t.Errorf("deduper map grew to %d entries, want <= 1000 after opportunistic eviction", size)
+	}
+}
+
+// TestEventDeduper_ConcurrentClaimsAreRace_Safe drives claim() from multiple
+// goroutines at once — matching production, where one Broadcaster's single
+// deduper is shared across handleMessage's pub/sub callback, one
+// RunStreamConsumer goroutine per known environment, and the reclaim-sweep
+// goroutine (up to 5 concurrent callers in a 3-environment deployment). Every
+// prior test in this file called claim() sequentially from one goroutine,
+// so `go test -race` had nothing concurrent to actually detect a race on —
+// this gives it something. Also asserts the concurrency-safety invariant
+// itself: across N claims of the SAME event racing simultaneously, exactly
+// one must win.
+func TestEventDeduper_ConcurrentClaimsAreRaceSafe(t *testing.T) {
+	d := newEventDeduper(time.Minute)
+	event := testEvent()
+
+	const goroutines = 20
+	results := make([]bool, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = d.claim(event)
+		}()
+	}
+	wg.Wait()
+
+	wins := 0
+	for _, r := range results {
+		if r {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("expected exactly 1 of %d concurrent claims of the identical event to succeed, got %d", goroutines, wins)
 	}
 }

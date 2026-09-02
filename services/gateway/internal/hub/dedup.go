@@ -33,6 +33,16 @@ const dedupWindow = 5 * time.Second
 // Redis-shared — deduplication is about what this specific replica has
 // already pushed to its own locally-connected clients, the same scope
 // Hub's client registry already has.
+//
+// This window is intentionally short relative to reclaimIdleThreshold
+// (dlq.go, 30s) — it is NOT meant to, and cannot, guard the cross-group DLQ
+// reclaim path (a live replica reclaiming a DIFFERENT, dead replica's
+// abandoned PEL entry): that path never calls claim() at all, because it
+// never broadcasts in the first place (see reprocessClaimedMessage's doc
+// comment). This deduper only ever needs to cover the pub/sub-vs-own-stream
+// race (near-instant) and a self-reclaim racing a fresh delivery of its own
+// group's entry — both resolve well within a few seconds, never anywhere
+// near reclaimIdleThreshold's 30s.
 type eventDeduper struct {
 	mu     sync.Mutex
 	seen   map[FlagEvent]time.Time

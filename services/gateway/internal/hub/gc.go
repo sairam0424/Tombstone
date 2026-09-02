@@ -45,8 +45,19 @@ func GCIdleGroups(ctx context.Context, rdb *redis.Client, streamKey string, logg
 			continue
 		}
 
+		// Only the group's own "primary" consumer (streams.go's
+		// replicaConsumerName) counts as a liveness signal. dlq.go's
+		// cross-group reclaim registers a DIFFERENT consumer identity
+		// ("gateway-reclaim-{hostname}") inside foreign groups every time it
+		// successfully XCLAIMs an entry out of one — that consumer's fresh
+		// idle time must not spare an otherwise-abandoned group from GC just
+		// because it still has reclaimable backlog; only its actual owning
+		// replica's own continued activity should.
 		stale := true
 		for _, c := range consumers {
+			if c.Name != replicaConsumerName {
+				continue
+			}
 			if c.Idle < groupIdleGCThreshold {
 				stale = false
 				break

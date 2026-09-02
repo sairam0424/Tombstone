@@ -63,10 +63,13 @@ func DLQStreamKey(streamKey string) string {
 // GW-1: each replica now has its OWN consumer group, so a stream can have
 // several groups' PELs to sweep, not one shared PEL. This enumerates every
 // group on streamKey (via XINFO GROUPS) and reclaims within each — an
-// entry stuck in a DEAD replica's group's PEL is exactly what needs
-// reclaiming, and any live replica's sweep can XCLAIM/dead-letter within
-// ANY group, not just its own (Redis Streams consumer groups aren't tied
-// to a specific client connection).
+// entry stuck in a DEAD replica's group's PEL still needs draining (acked
+// or dead-lettered) so it doesn't linger forever, and any live replica's
+// sweep can XCLAIM within ANY group, not just its own (Redis Streams
+// consumer groups aren't tied to a specific client connection). Draining a
+// FOREIGN group's entry never re-broadcasts it, though — see
+// reprocessClaimedMessage's doc comment for why redelivering a dead
+// replica's abandoned copy would be a pure duplicate, not a recovery.
 func (b *Broadcaster) ReclaimStalePending(ctx context.Context, streamKey string) error {
 	groups, err := b.rdb.XInfoGroups(ctx, streamKey).Result()
 	if err != nil {
@@ -106,20 +109,20 @@ func (b *Broadcaster) reclaimStalePendingInGroup(ctx context.Context, streamKey,
 	}
 
 	for _, entry := range pending {
-		if entry.RetryCount >= maxDeliveryAttempts {
-			if err := b.deadLetter(ctx, streamKey, group, dlqKey, entry.ID); err != nil {
-				b.logger.Warn("dlq: failed to dead-letter message",
-					zap.String("stream", streamKey),
-					zap.String("group", group),
-					zap.String("id", entry.ID),
-					zap.Error(err))
-			}
-			continue
-		}
-
-		// Still under the attempt budget — reclaim ownership and re-process
-		// immediately. XClaim returns the claimed messages' values directly,
-		// so no second read call is needed to get the payload back.
+		// Claim ownership FIRST, before acting on the entry either way.
+		// XCLAIM's MinIdle filter is atomic — once one caller claims an ID
+		// its idle time resets to 0, so a second concurrent caller's claim
+		// for the same ID (same MinIdle filter) returns nothing for it. This
+		// used to guard only the retry branch below; the dead-letter branch
+		// acted directly off this plain XPendingExt read with no claim step
+		// in between, so two live replicas' independently-ticking reclaim
+		// sweeps (or this replica's own sweep racing another's, since GW-1
+		// makes cross-group reclaim routine — see ReclaimStalePending's doc
+		// comment) could both see the same over-budget entry and both
+		// dead-letter it, producing a duplicate DLQ entry for one poison
+		// message. Claiming first, uniformly, closes that gap: whichever
+		// sweep loses the claim race gets zero messages back and does
+		// nothing further for this ID.
 		msgs, err := b.rdb.XClaim(ctx, &redis.XClaimArgs{
 			Stream:   streamKey,
 			Group:    group,
@@ -135,9 +138,25 @@ func (b *Broadcaster) reclaimStalePendingInGroup(ctx context.Context, streamKey,
 				zap.Error(err))
 			continue
 		}
+		if len(msgs) == 0 {
+			// Lost the claim race to a concurrent sweep, or the message was
+			// trimmed off the stream — nothing left for this sweep to do.
+			continue
+		}
+
+		if entry.RetryCount >= maxDeliveryAttempts {
+			if err := b.deadLetter(ctx, streamKey, group, dlqKey, entry.ID); err != nil {
+				b.logger.Warn("dlq: failed to dead-letter message",
+					zap.String("stream", streamKey),
+					zap.String("group", group),
+					zap.String("id", entry.ID),
+					zap.Error(err))
+			}
+			continue
+		}
 
 		for _, msg := range msgs {
-			b.reprocessClaimedMessage(ctx, streamKey, group, msg)
+			b.reprocessClaimedMessage(ctx, streamKey, group, group == b.group, msg)
 		}
 	}
 
@@ -188,7 +207,25 @@ func (b *Broadcaster) deadLetter(ctx context.Context, streamKey, group, dlqKey, 
 // deliberately does NOT ack — the entry stays in the PEL, idle again, with
 // delivery-count already incremented by XCLAIM, until a future sweep finds
 // it over maxDeliveryAttempts and dead-letters it above.
-func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, group string, msg redis.XMessage) {
+//
+// isOwnGroup distinguishes reclaiming THIS replica's own group (group ==
+// b.group) from a FOREIGN group belonging to some other replica.
+// Under GW-1's per-replica fan-out, a message published to the stream is
+// independently delivered to EVERY live replica's own group — so if a
+// DIFFERENT replica dies after XReadGroup but before broadcasting/acking,
+// THIS replica's own group has almost certainly already delivered and
+// broadcast the identical event to this replica's own clients within ~1s of
+// publish, via the normal RunStreamConsumer path. Re-broadcasting a foreign
+// group's stuck entry would therefore be a genuine duplicate to this
+// replica's already-served clients, not a recovery of anything: the dead
+// replica that owned that group has no SSE clients left to redeliver to —
+// they disconnected when it died. Foreign-group reclaim exists purely to
+// drain that group's PEL (ack or dead-letter) so it doesn't linger forever;
+// it must never redeliver. Only a self-reclaim (this replica's OWN group
+// stuck on itself — e.g. a transient ack failure, not a crash) still needs
+// to broadcast, since in that case THIS replica's clients may genuinely
+// never have received it.
+func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, group string, isOwnGroup bool, msg redis.XMessage) {
 	payload, ok := msg.Values["payload"].(string)
 	if !ok {
 		b.logger.Warn("dlq: reclaimed message missing payload field, leaving pending",
@@ -203,14 +240,16 @@ func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, gr
 		return
 	}
 
-	environment, _ := msg.Values["environment"].(string)
-	if environment == "" {
-		environment = event.Environment
-	}
-	// GW-1 (dedup.go): a reclaimed message may still race a fresh delivery
-	// of the same logical event via pub/sub or another replica's group.
-	if b.deduper.claim(event) {
-		b.hub.Broadcast(environment, event)
+	if isOwnGroup {
+		environment, _ := msg.Values["environment"].(string)
+		if environment == "" {
+			environment = event.Environment
+		}
+		// GW-1 (dedup.go): a self-reclaimed message may still race a fresh
+		// delivery of the same logical event via pub/sub.
+		if b.deduper.claim(event) {
+			b.hub.Broadcast(environment, event)
+		}
 	}
 	AckStreamMessage(ctx, b.rdb, streamKey, group, msg.ID)
 }

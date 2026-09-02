@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +196,161 @@ func TestReclaimStalePending_NoPendingIsNoop(t *testing.T) {
 	}
 	if dlqLen != 0 {
 		t.Errorf("expected no dlq entries when PEL was empty, got %d", dlqLen)
+	}
+}
+
+// TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast is the direct
+// regression proof for the dedup/reclaim-window fix: reclaiming a stuck
+// entry from a DIFFERENT (dead) replica's group must drain it (ack) but must
+// NEVER broadcast it. Under GW-1's per-replica fan-out, this replica's own
+// group has already independently delivered the identical event via the
+// normal RunStreamConsumer path, so redelivering a dead replica's abandoned
+// copy would be a pure duplicate to this replica's own already-served
+// clients, not a recovery of anything — see reprocessClaimedMessage's doc
+// comment.
+func TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	// A second, foreign group on the SAME stream — standing in for a dead
+	// replica that read this message into its own PEL but never acked or
+	// broadcast it before crashing.
+	deadGroup := ReplicaGroupName("dead-replica")
+	if err := rdb.XGroupCreateMkStream(ctx, streamKey, deadGroup, "0").Err(); err != nil {
+		t.Fatalf("XGroupCreateMkStream(dead): %v", err)
+	}
+
+	event := FlagEvent{FlagKey: "cross-group-flag", Enabled: true, RolloutPct: 100, Reason: "manual", Ts: 1_700_000_020, Environment: "production"}
+	payload, _ := json.Marshal(event)
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{"payload": string(payload), "environment": "production"},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	// The dead group reads (and never acks) the message — simulating its
+	// consumer crashing mid-processing, before it could broadcast or ack.
+	// b's OWN group never reads this message in this test — standing in for
+	// the (near-certain, in production) case where b's own group's
+	// RunStreamConsumer already independently delivered and acked its own
+	// copy moments after publish, well before this reclaim sweep runs.
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: deadGroup, Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(dead): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	assertNoFrame(t, ch, 200*time.Millisecond, "cross-group reclaim of a dead replica's abandoned entry")
+
+	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: streamKey, Group: deadGroup, Start: "-", End: "+", Count: 10,
+	}).Result()
+	if err != nil {
+		t.Fatalf("XPendingExt(dead): %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected the dead group's PEL entry to be drained by the reclaim sweep, got %+v", pending)
+	}
+}
+
+// TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts proves the
+// complement of the cross-group test above: reclaiming a stuck entry from
+// THIS replica's OWN group (e.g. recovering from a transient ack failure,
+// not a crash) still goes through the normal broadcast+dedup path — the
+// cross-group fix must only suppress broadcast for FOREIGN groups, never
+// for a replica's own.
+func TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	event := FlagEvent{FlagKey: "self-reclaim-flag", Enabled: true, RolloutPct: 100, Reason: "manual", Ts: 1_700_000_021, Environment: "production"}
+	payload, _ := json.Marshal(event)
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{"payload": string(payload), "environment": "production"},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	// Deliver into b's OWN group but never ack, simulating a stuck consumer.
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: b.Group(), Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(own): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	if !strings.Contains(string(frame), "self-reclaim-flag") {
+		t.Errorf("own-group reclaim must still broadcast: %s", frame)
+	}
+}
+
+// TestReclaimStalePending_ConcurrentSweepsDoNotDoubleDeadLetter is the
+// direct regression proof for the deadLetter atomicity fix: two concurrent
+// reclaim sweeps (simulating two live replicas' independently-ticking 15s
+// reclaim loops) racing the SAME over-budget PEL entry must produce exactly
+// ONE dead-letter entry, not two.
+func TestReclaimStalePending_ConcurrentSweepsDoNotDoubleDeadLetter(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "development")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
+
+	// Drive the delivery count to maxDeliveryAttempts via successive claims,
+	// exactly as TestReclaimStalePending_DeadLettersAfterMaxAttempts does,
+	// but stop one cycle short so this test's two concurrent sweeps are the
+	// ones that actually trigger the dead-letter branch.
+	now := time.Now()
+	for i := 0; i < maxDeliveryAttempts; i++ {
+		now = now.Add(reclaimIdleThreshold + time.Second)
+		mr.SetTime(now)
+		if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+			t.Fatalf("ReclaimStalePending (warmup cycle %d): %v", i, err)
+		}
+	}
+	now = now.Add(reclaimIdleThreshold + time.Second)
+	mr.SetTime(now)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = b.ReclaimStalePending(ctx, streamKey)
+		}()
+	}
+	wg.Wait()
+
+	dlqKey := DLQStreamKey(streamKey)
+	dlqMsgs, err := rdb.XRange(ctx, dlqKey, "-", "+").Result()
+	if err != nil {
+		t.Fatalf("XRange dlq: %v", err)
+	}
+	if len(dlqMsgs) != 1 {
+		t.Fatalf("expected exactly 1 dlq entry after 2 concurrent sweeps raced the same over-budget message %s, got %d", id, len(dlqMsgs))
 	}
 }
 
