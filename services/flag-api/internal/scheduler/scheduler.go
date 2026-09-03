@@ -107,7 +107,11 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 			flagKey:       r.FlagKey,
 			environment:   r.Environment,
 			changePayload: r.ChangePayload,
-			projectID:     r.ProjectID,
+			// project_id is nullable (legacy pre-migration-016 rows are left
+			// NULL, never backfilled) -- sql.NullString.String is "" when
+			// NULL, matching this field's "" == "no project" convention.
+			// applyChange's own check refuses to execute such a row.
+			projectID: r.ProjectID.String,
 		})
 	}
 	// Commit the lock-acquisition transaction before executing changes

@@ -82,10 +82,13 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 		}
 		payloadJSON, _ := json.Marshal(payload)
 
+		// change_requests.project_id is nullable (TEN-1a-3: legacy rows), so
+		// sqlc infers this parameter as sql.NullString too -- o.projectID
+		// here always came from flags.project_id, which is NOT NULL.
 		err := q.CreateOrphanChangeRequest(ctx, sqlcgen.CreateOrphanChangeRequestParams{
 			FlagKey:       o.flagKey,
 			ChangePayload: payloadJSON,
-			ProjectID:     o.projectID,
+			ProjectID:     sql.NullString{String: o.projectID, Valid: true},
 		})
 		if err != nil {
 			od.logger.Error("orphan detector create change_request",

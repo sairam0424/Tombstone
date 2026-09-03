@@ -163,7 +163,7 @@ type SelectDueScheduledChangesRow struct {
 	FlagKey       string
 	Environment   string
 	ChangePayload json.RawMessage
-	ProjectID     string
+	ProjectID     sql.NullString
 }
 
 func (q *Queries) SelectDueScheduledChanges(ctx context.Context) ([]SelectDueScheduledChangesRow, error) {

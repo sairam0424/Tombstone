@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 )
 
@@ -19,7 +20,7 @@ VALUES ($1, 'production', 'system-orphan-detector', 'PENDING', $2, $3)
 type CreateOrphanChangeRequestParams struct {
 	FlagKey       string
 	ChangePayload json.RawMessage
-	ProjectID     string
+	ProjectID     sql.NullString
 }
 
 func (q *Queries) CreateOrphanChangeRequest(ctx context.Context, arg CreateOrphanChangeRequestParams) error {

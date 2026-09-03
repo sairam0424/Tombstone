@@ -20,12 +20,9 @@ SELECT COUNT(*) FROM service_tokens WHERE revoked_at IS NULL;
 -- name: CountRoleAssignments :one
 SELECT COUNT(*) FROM user_roles;
 
--- name: ExportAuditLogForProject :many
-SELECT id, COALESCE(flag_key,'') AS flag_key, COALESCE(environment,'') AS environment, actor, event_type,
-       COALESCE(prev_state::text,'null')::text AS prev_state, COALESCE(new_state::text,'null')::text AS new_state,
-       COALESCE(ip_address,'') AS ip_address, COALESCE(prev_hash,'') AS prev_hash,
-       EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
-       COALESCE(rekor_log_id,'') AS rekor_log_id, rekor_log_index
-FROM audit_log
-WHERE project_id = $1
-ORDER BY created_at ASC;
+-- ExportAuditLog (ComplianceHandler.ExportAuditLog) is deliberately NOT
+-- converted here -- see the doc comment at its call site in compliance.go.
+-- sqlc's generated :many methods always fully materialize the result set
+-- into a slice, which would regress this handler from O(1)-memory streaming
+-- to O(rows)-memory buffering for what can be a large, unbounded per-project
+-- audit history.

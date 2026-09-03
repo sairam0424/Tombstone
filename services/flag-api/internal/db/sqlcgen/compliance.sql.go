@@ -7,7 +7,6 @@ package sqlcgen
 
 import (
 	"context"
-	"database/sql"
 )
 
 const changeRequestApprovalStats = `-- name: ChangeRequestApprovalStats :one
@@ -75,66 +74,4 @@ func (q *Queries) CountRoleAssignments(ctx context.Context) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
-}
-
-const exportAuditLogForProject = `-- name: ExportAuditLogForProject :many
-SELECT id, COALESCE(flag_key,'') AS flag_key, COALESCE(environment,'') AS environment, actor, event_type,
-       COALESCE(prev_state::text,'null')::text AS prev_state, COALESCE(new_state::text,'null')::text AS new_state,
-       COALESCE(ip_address,'') AS ip_address, COALESCE(prev_hash,'') AS prev_hash,
-       EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
-       COALESCE(rekor_log_id,'') AS rekor_log_id, rekor_log_index
-FROM audit_log
-WHERE project_id = $1
-ORDER BY created_at ASC
-`
-
-type ExportAuditLogForProjectRow struct {
-	ID            string
-	FlagKey       string
-	Environment   string
-	Actor         string
-	EventType     string
-	PrevState     string
-	NewState      string
-	IpAddress     string
-	PrevHash      string
-	CreatedAt     int64
-	RekorLogID    string
-	RekorLogIndex sql.NullInt64
-}
-
-func (q *Queries) ExportAuditLogForProject(ctx context.Context, projectID string) ([]ExportAuditLogForProjectRow, error) {
-	rows, err := q.db.QueryContext(ctx, exportAuditLogForProject, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ExportAuditLogForProjectRow
-	for rows.Next() {
-		var i ExportAuditLogForProjectRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.FlagKey,
-			&i.Environment,
-			&i.Actor,
-			&i.EventType,
-			&i.PrevState,
-			&i.NewState,
-			&i.IpAddress,
-			&i.PrevHash,
-			&i.CreatedAt,
-			&i.RekorLogID,
-			&i.RekorLogIndex,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }

@@ -14,7 +14,7 @@ import (
 
 type AuditLog struct {
 	ID            string
-	ProjectID     string
+	ProjectID     sql.NullString
 	FlagKey       sql.NullString
 	Environment   sql.NullString
 	Actor         string
@@ -31,7 +31,7 @@ type AuditLog struct {
 
 type AuditLogDefault struct {
 	ID            string
-	ProjectID     string
+	ProjectID     sql.NullString
 	FlagKey       sql.NullString
 	Environment   sql.NullString
 	Actor         string
@@ -48,7 +48,7 @@ type AuditLogDefault struct {
 
 type AuditRetentionCheckpoint struct {
 	ID                     string
-	ProjectID              string
+	ProjectID              sql.NullString
 	FlagKey                string
 	PrunedThroughHash      string
 	PrunedThroughCreatedAt time.Time
@@ -68,7 +68,7 @@ type BreakGlassToken struct {
 	IncidentRef sql.NullString
 	CreatedAt   time.Time
 	TokenHash   sql.NullString
-	ProjectID   string
+	ProjectID   sql.NullString
 }
 
 type ChangeRequest struct {
@@ -83,7 +83,7 @@ type ChangeRequest struct {
 	RejectionReason   sql.NullString
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
-	ProjectID         string
+	ProjectID         sql.NullString
 	RequiredApprovals int32
 }
 
@@ -202,7 +202,7 @@ type ScheduledChange struct {
 	RetryCount    int32
 	MaxRetries    int32
 	NextRetryAt   sql.NullTime
-	ProjectID     string
+	ProjectID     sql.NullString
 }
 
 type ScimUser struct {

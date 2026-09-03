@@ -19,7 +19,6 @@ type Querier interface {
 	CountRoleAssignments(ctx context.Context) (int64, error)
 	CreateOrphanChangeRequest(ctx context.Context, arg CreateOrphanChangeRequestParams) error
 	DeletePrerequisite(ctx context.Context, arg DeletePrerequisiteParams) (int64, error)
-	ExportAuditLogForProject(ctx context.Context, projectID string) ([]ExportAuditLogForProjectRow, error)
 	FlagExistsInProject(ctx context.Context, arg FlagExistsInProjectParams) (bool, error)
 	GetCurrentFlagEnvironmentState(ctx context.Context, arg GetCurrentFlagEnvironmentStateParams) (GetCurrentFlagEnvironmentStateRow, error)
 	GetEnvironmentSnapshot(ctx context.Context, arg GetEnvironmentSnapshotParams) ([]GetEnvironmentSnapshotRow, error)

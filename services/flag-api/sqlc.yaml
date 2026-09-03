@@ -22,6 +22,20 @@ sql:
           # would need converting at every call site for no behavioral gain.
           - db_type: "uuid"
             go_type: "string"
+          # NOT string for the nullable case: scanning a NULL value into a
+          # plain (non-pointer, non-Scanner) string destination is a hard
+          # database/sql error ("converting NULL to string is unsupported"),
+          # not a silent "". An adversarial review confirmed this: a legacy
+          # scheduled_changes row with NULL project_id (migration 016 leaves
+          # these unbackfilled by design) made the `:many` batch query for
+          # ALL due scheduled changes fail outright on that one row, and
+          # since sqlc's generated batch scan aborts and discards the whole
+          # result set on any row's Scan error, that turned "refuse this one
+          # legacy row" into "refuse every due change, forever, every tick."
+          # sql.NullString is a database/sql.Scanner, so it handles NULL
+          # correctly, and every read site converts .String to the plain
+          # string this codebase's callers already expect (NULL -> "",
+          # matching the existing "" == "no project" convention).
           - db_type: "uuid"
-            go_type: "string"
+            go_type: "database/sql.NullString"
             nullable: true

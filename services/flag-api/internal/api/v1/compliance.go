@@ -295,12 +295,32 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	rows, err := sqlcgen.New(h.db).ExportAuditLogForProject(r.Context(), projectID)
+	// Deliberately NOT converted to sqlc (DATA-1b adversarial review): sqlc's
+	// generated :many methods always fully materialize the whole result set
+	// into a slice before returning, but this handler is written to STREAM —
+	// scan and write one row at a time so memory use is O(1) regardless of
+	// how large a project's audit history has grown (retention/DATA-2 prunes
+	// the hot table on its own schedule, not on every export call) and so the
+	// client starts receiving bytes immediately rather than waiting for the
+	// entire history to be fetched first. Going through sqlc here would have
+	// silently regressed both properties for no benefit, since the whole
+	// point of streaming is bypassed by a method that returns []Row.
+	rows, err := h.db.QueryContext(r.Context(), `
+		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
+		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
+		       COALESCE(ip_address,''), COALESCE(prev_hash,''),
+		       EXTRACT(EPOCH FROM created_at)::bigint,
+		       COALESCE(rekor_log_id,''), rekor_log_index
+		FROM audit_log
+		WHERE project_id = $1
+		ORDER BY created_at ASC
+	`, projectID)
 	if err != nil {
 		h.logger.Error("audit export query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
+	defer func() { _ = rows.Close() }()
 
 	mac := h.signer.New()
 
@@ -309,21 +329,17 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 
 	lineCount := 0
-	for _, row := range rows {
-		e := AuditEntry{
-			ID:            row.ID,
-			FlagKey:       row.FlagKey,
-			Environment:   row.Environment,
-			Actor:         row.Actor,
-			EventType:     row.EventType,
-			PrevState:     json.RawMessage(row.PrevState),
-			NewState:      json.RawMessage(row.NewState),
-			IPAddress:     row.IpAddress,
-			PrevHash:      row.PrevHash,
-			CreatedAt:     row.CreatedAt,
-			RekorLogID:    row.RekorLogID,
-			RekorLogIndex: nullInt64ToPtr(row.RekorLogIndex),
+	for rows.Next() {
+		var e AuditEntry
+		var prevRaw, newRaw string
+		if err := rows.Scan(&e.ID, &e.FlagKey, &e.Environment, &e.Actor, &e.EventType,
+			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt,
+			&e.RekorLogID, &e.RekorLogIndex); err != nil {
+			h.logger.Error("audit export scan", zap.Error(err))
+			return
 		}
+		e.PrevState = json.RawMessage(prevRaw)
+		e.NewState = json.RawMessage(newRaw)
 
 		line, err := json.Marshal(e)
 		if err != nil {
@@ -335,6 +351,18 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		_, _ = fmt.Fprintf(w, "%s\n", line)
 		lineCount++
 	}
+	// A stream that failed mid-iteration (connection blip, context
+	// cancellation) must NOT get a signature line: the HTTP status is
+	// already committed to 200 by this point, so the only available signal
+	// that the export is truncated is the ABSENCE of the trailing signature
+	// -- a signature covering only the partial data already written would
+	// otherwise validate as a complete, authentic export to any consumer
+	// checking it, which is worse than no signature at all for a
+	// cryptographically-signed compliance artifact.
+	if err := rows.Err(); err != nil {
+		h.logger.Error("audit export: stream failed before completion, omitting signature", zap.Error(err))
+		return
+	}
 
 	sig := secrets.Sum(mac)
 	sigLine, _ := json.Marshal(map[string]any{
@@ -345,14 +373,4 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		"exported_at": time.Now().Unix(),
 	})
 	_, _ = fmt.Fprintf(w, "%s\n", sigLine)
-}
-
-// nullInt64ToPtr converts a sqlc-generated sql.NullInt64 (used for nullable
-// bigint columns) to the *int64 shape AuditEntry.RekorLogIndex already uses
-// for its "omitempty" JSON encoding.
-func nullInt64ToPtr(n sql.NullInt64) *int64 {
-	if !n.Valid {
-		return nil
-	}
-	return &n.Int64
 }
