@@ -232,6 +232,65 @@ func TestChainAgainstPostgres(t *testing.T) {
 		}
 	})
 
+	// DATA-1b PR 3/4's adversarial review found that no test drove a real
+	// Append() call through InsertAuditEntry's NULL-vs-literal-empty-string
+	// branches at all: every sampleEntry()-based call above hardcodes a
+	// non-empty FlagKey/Environment/IPAddress and non-nil PrevState/NewState,
+	// and appendAtForTest (retention_db_test.go) bypasses Append/
+	// InsertAuditEntry entirely with its own hand-written INSERT. FlagKey=""
+	// is a real, documented value (e.g. break-glass events aren't scoped to
+	// any flag) and nil PrevState/NewState is the single most common
+	// real-world case — most audit events have no prior/next state.
+	t.Run("an entry with FlagKey/Environment/IPAddress empty and nil states appends and verifies", func(t *testing.T) {
+		e := Entry{
+			Actor:     "bob",
+			EventType: "break_glass_token_used",
+			// FlagKey, Environment, IPAddress, PrevState, NewState all left zero.
+		}
+		id, hash, err := w.Append(ctx, e)
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if id == "" || hash == "" {
+			t.Fatalf("append returned empty id/hash: id=%q hash=%q", id, hash)
+		}
+
+		// The stored row must have flag_key/prev_state/new_state genuinely
+		// NULL (not the literal empty string) but environment/ip_address as
+		// the literal "" — the exact per-field convention InsertAuditEntry's
+		// sqlc conversion had to preserve byte-for-byte.
+		var flagKey, environment, ipAddress, prevState, newState sql.NullString
+		if err := database.QueryRowContext(ctx, `
+			SELECT flag_key, environment, ip_address, prev_state::text, new_state::text
+			FROM audit_log WHERE id = $1
+		`, id).Scan(&flagKey, &environment, &ipAddress, &prevState, &newState); err != nil {
+			t.Fatalf("read back row: %v", err)
+		}
+		if flagKey.Valid {
+			t.Errorf("flag_key = %q, want NULL for an unscoped entry", flagKey.String)
+		}
+		if !environment.Valid || environment.String != "" {
+			t.Errorf("environment = (valid=%v, %q), want the literal empty string, not NULL", environment.Valid, environment.String)
+		}
+		if !ipAddress.Valid || ipAddress.String != "" {
+			t.Errorf("ip_address = (valid=%v, %q), want the literal empty string, not NULL", ipAddress.Valid, ipAddress.String)
+		}
+		if prevState.Valid {
+			t.Errorf("prev_state = %q, want NULL for a nil PrevState", prevState.String)
+		}
+		if newState.Valid {
+			t.Errorf("new_state = %q, want NULL for a nil NewState", newState.String)
+		}
+
+		report, err := w.Verify(ctx, "")
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 {
+			t.Fatalf("an empty-field entry must verify cleanly: %+v", report.Failures)
+		}
+	})
+
 	t.Run("legacy rows are reported unverifiable rather than intact", func(t *testing.T) {
 		// A pre-AUD-1 row: no entry_hash. Nobody can recompute it.
 		if _, err := database.ExecContext(ctx, `
