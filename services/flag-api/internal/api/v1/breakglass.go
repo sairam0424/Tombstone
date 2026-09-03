@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -56,30 +57,17 @@ func consumeBreakGlassTokenTx(ctx context.Context, tx *sql.Tx, hasher *secrets.T
 
 	tokenHash := hasher.Hash(token)
 
-	// Built conditionally, not as "$3 = '' OR ... OR project_id = $3::uuid"
-	// in one static query: a bare '' cast to ::uuid is exactly the kind of
-	// parameter-type ambiguity that has bitten this codebase before (AUD-1's
-	// "could not determine data type of parameter" — lib/pq's extended
-	// protocol can't always infer a parameter's type across mixed uses).
-	// Omitting the clause and the parameter entirely when unscoped sidesteps
-	// that ambiguity rather than relying on OR short-circuiting to avoid it.
-	query := `
-		UPDATE break_glass_tokens
-		SET used = true, used_at = now(), used_by = $1
-		WHERE token_hash = $2
-		  AND used = false
-		  AND expires_at > now()
-	`
-	args := []any{usedBy, tokenHash}
-	if projectID != "" {
-		query += ` AND (project_id IS NULL OR project_id = $3::uuid)`
-		args = append(args, projectID)
-	}
-	query += ` RETURNING id, scope`
-
-	err = tx.QueryRowContext(ctx, query, args...).Scan(&tokenID, &scope)
+	// A single static query using an empty-string sentinel for "no project
+	// scope requested" (project_id = ""), not a bare "" cast to ::uuid — see
+	// queries/breakglass.sql's ConsumeBreakGlassToken doc comment for why
+	// that specific pattern (which bit AUD-1 before) is avoided here.
+	row, err := sqlcgen.New(tx).ConsumeBreakGlassToken(ctx, sqlcgen.ConsumeBreakGlassTokenParams{
+		UsedBy:    sql.NullString{String: usedBy, Valid: true},
+		TokenHash: sql.NullString{String: tokenHash, Valid: true},
+		ProjectID: projectID,
+	})
 	if err == nil {
-		return scope, tokenID, nil
+		return row.Scope, row.ID, nil
 	}
 	if err != sql.ErrNoRows {
 		return "", "", fmt.Errorf("consume break-glass token: %w", err)
@@ -88,12 +76,8 @@ func consumeBreakGlassTokenTx(ctx context.Context, tx *sql.Tx, hasher *secrets.T
 	// The atomic UPDATE matched nothing — a read-only follow-up to explain
 	// why. This SELECT cannot itself be raced into a bypass: it never sets
 	// used, so it grants nothing regardless of what it observes.
-	var used bool
-	var expiresAt time.Time
-	var tokenProjectID sql.NullString
-	selErr := tx.QueryRowContext(ctx, `
-		SELECT used, expires_at, project_id FROM break_glass_tokens WHERE token_hash = $1
-	`, tokenHash).Scan(&used, &expiresAt, &tokenProjectID)
+	diag, selErr := sqlcgen.New(tx).GetBreakGlassTokenDiagnostics(ctx, sql.NullString{String: tokenHash, Valid: true})
+	used, expiresAt, tokenProjectID := diag.Used, diag.ExpiresAt, diag.ProjectID
 	switch {
 	case selErr == sql.ErrNoRows:
 		return "", "", errBreakGlassTokenInvalid
@@ -241,10 +225,14 @@ func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "token hashing is not configured")
 		return
 	}
-	_, err := h.db.ExecContext(r.Context(), `
-		INSERT INTO break_glass_tokens (token_hash, scope, created_by, expires_at, incident_ref, project_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, h.hasher.Hash(token), req.Scope, req.CreatedBy, expiresAt, req.IncidentRef, projectID)
+	err := sqlcgen.New(h.db).CreateBreakGlassToken(r.Context(), sqlcgen.CreateBreakGlassTokenParams{
+		TokenHash:   sql.NullString{String: h.hasher.Hash(token), Valid: true},
+		Scope:       req.Scope,
+		CreatedBy:   req.CreatedBy,
+		ExpiresAt:   expiresAt,
+		IncidentRef: sql.NullString{String: req.IncidentRef, Valid: true},
+		ProjectID:   sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -313,17 +301,11 @@ func (h *BreakGlassHandler) ListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT id, scope, created_by, expires_at, used, COALESCE(used_by,''), COALESCE(incident_ref,'')
-		FROM break_glass_tokens
-		WHERE project_id = $1 OR project_id IS NULL
-		ORDER BY created_at DESC LIMIT 50
-	`, projectID)
+	rows, err := sqlcgen.New(h.db).ListBreakGlassTokens(r.Context(), sql.NullString{String: projectID, Valid: true})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	type tokenRow struct {
 		ID          string `json:"id"`
@@ -335,14 +317,16 @@ func (h *BreakGlassHandler) ListTokens(w http.ResponseWriter, r *http.Request) {
 		IncidentRef string `json:"incident_ref,omitempty"`
 	}
 	tokens := []tokenRow{}
-	for rows.Next() {
-		var t tokenRow
-		var expiresAt time.Time
-		if err := rows.Scan(&t.ID, &t.Scope, &t.CreatedBy, &expiresAt, &t.Used, &t.UsedBy, &t.IncidentRef); err != nil {
-			continue
-		}
-		t.ExpiresAt = expiresAt.Unix()
-		tokens = append(tokens, t)
+	for _, r := range rows {
+		tokens = append(tokens, tokenRow{
+			ID:          r.ID,
+			Scope:       r.Scope,
+			CreatedBy:   r.CreatedBy,
+			ExpiresAt:   r.ExpiresAt.Unix(),
+			Used:        r.Used,
+			UsedBy:      r.UsedBy,
+			IncidentRef: r.IncidentRef,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens, "total": len(tokens)})
 }

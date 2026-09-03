@@ -12,28 +12,49 @@ import (
 
 type Querier interface {
 	ApplyScheduledFlagEnvironmentUpdate(ctx context.Context, arg ApplyScheduledFlagEnvironmentUpdateParams) (int64, error)
+	CancelScheduledChange(ctx context.Context, arg CancelScheduledChangeParams) (int64, error)
 	ChangeRequestApprovalStats(ctx context.Context) (ChangeRequestApprovalStatsRow, error)
+	// $3 is always a plain string, "" meaning "no project scope requested" — a
+	// single static query using an empty-string sentinel, not "$3=''" alongside
+	// a same-parameter ::uuid cast in another branch: AUD-1 found that mixing
+	// two type contexts for one parameter within one statement is exactly what
+	// confuses lib/pq's extended-protocol type inference. Casting the COLUMN to
+	// text (not the parameter to uuid) keeps $3 in a single, consistent type
+	// context throughout.
+	ConsumeBreakGlassToken(ctx context.Context, arg ConsumeBreakGlassTokenParams) (ConsumeBreakGlassTokenRow, error)
 	CountActiveServiceTokens(ctx context.Context) (int64, error)
 	CountAuditLogEntries(ctx context.Context) (int64, error)
 	CountRecentBreakGlassUses(ctx context.Context) (int64, error)
 	CountRoleAssignments(ctx context.Context) (int64, error)
+	CreateBreakGlassToken(ctx context.Context, arg CreateBreakGlassTokenParams) error
 	CreateOrphanChangeRequest(ctx context.Context, arg CreateOrphanChangeRequestParams) error
+	CreateScheduledChange(ctx context.Context, arg CreateScheduledChangeParams) (CreateScheduledChangeRow, error)
 	DeletePrerequisite(ctx context.Context, arg DeletePrerequisiteParams) (int64, error)
 	FlagExistsInProject(ctx context.Context, arg FlagExistsInProjectParams) (bool, error)
+	FlagExistsInProjectNotArchived(ctx context.Context, arg FlagExistsInProjectNotArchivedParams) (bool, error)
+	GetBreakGlassTokenDiagnostics(ctx context.Context, tokenHash sql.NullString) (GetBreakGlassTokenDiagnosticsRow, error)
 	GetCurrentFlagEnvironmentState(ctx context.Context, arg GetCurrentFlagEnvironmentStateParams) (GetCurrentFlagEnvironmentStateRow, error)
 	GetEnvironmentSnapshot(ctx context.Context, arg GetEnvironmentSnapshotParams) ([]GetEnvironmentSnapshotRow, error)
 	GetEnvironmentSnapshotPrerequisites(ctx context.Context, arg GetEnvironmentSnapshotPrerequisitesParams) ([]GetEnvironmentSnapshotPrerequisitesRow, error)
 	GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (GetIdempotencyKeyRow, error)
 	GetScheduledChangeRetryState(ctx context.Context, id string) (GetScheduledChangeRetryStateRow, error)
+	GetScheduledChangeStatus(ctx context.Context, arg GetScheduledChangeStatusParams) (string, error)
 	GetTokenWatermark(ctx context.Context, lower string) (time.Time, error)
 	GetUserRole(ctx context.Context, arg GetUserRoleParams) (string, error)
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (string, error)
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
+	ListBreakGlassTokens(ctx context.Context, projectID sql.NullString) ([]ListBreakGlassTokensRow, error)
 	ListOrphanedFlags(ctx context.Context) ([]ListOrphanedFlagsRow, error)
 	ListPrereqFlagKeysForFlag(ctx context.Context, arg ListPrereqFlagKeysForFlagParams) ([]string, error)
 	ListPrerequisitesForFlag(ctx context.Context, arg ListPrerequisitesForFlagParams) ([]ListPrerequisitesForFlagRow, error)
+	// $3/$4 are always plain strings, "" meaning "no filter" — a single static
+	// query using an empty-string sentinel instead of conditionally appending
+	// clauses with a variable placeholder count. environment/status are both
+	// plain TEXT columns compared to a TEXT parameter, so (unlike a uuid column)
+	// there is no cast-direction ambiguity to worry about here at all.
+	ListScheduledChanges(ctx context.Context, arg ListScheduledChangesParams) ([]ListScheduledChangesRow, error)
 	MarkScheduledChangeExecuted(ctx context.Context, id string) error
 	MarkScheduledChangeFailedNoRetryState(ctx context.Context, arg MarkScheduledChangeFailedNoRetryStateParams) error
 	MarkScheduledChangeFailedRetryPending(ctx context.Context, arg MarkScheduledChangeFailedRetryPendingParams) error
