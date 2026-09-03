@@ -34,6 +34,7 @@ import (
 	"github.com/failsafe-go/failsafe-go"
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 )
 
@@ -90,6 +91,17 @@ func NewResilientClient(cfg ResilientClientConfig, httpClient *http.Client, logg
 	} else if httpClient.Timeout == 0 {
 		httpClient.Timeout = cfg.Timeout
 	}
+	// Every outbound call through this client previously started a
+	// disconnected root span at the callee instead of continuing the
+	// caller's trace — this client never touched Transport at all, so
+	// inbound requests' spans (every service already creates one via
+	// otelhttp.NewHandler) died at the first inter-service hop. Wraps
+	// whatever is ALREADY on httpClient.Transport (a caller-supplied mTLS
+	// transport, or nil) as otelhttp.NewTransport's base — nil is handled
+	// by otelhttp itself (defaults to http.DefaultTransport), so this is
+	// safe regardless of which case applies, and never discards a
+	// caller-supplied custom transport.
+	httpClient.Transport = otelhttp.NewTransport(httpClient.Transport)
 	if logger == nil {
 		logger = zap.NewNop()
 	}
