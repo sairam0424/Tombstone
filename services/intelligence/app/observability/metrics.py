@@ -125,6 +125,14 @@ def _new_instruments(registry: CollectorRegistry) -> tuple[Counter, Histogram]:
 # default registry — created once at import time, exactly like the Go
 # services' meter/counter/histogram construction happening once in
 # InitMeter/HTTPMetrics.
+#
+# This is correct ONLY under a single worker process (the Dockerfile pins
+# --workers 1 for exactly this reason). No prometheus_client multiprocess
+# mode is configured here — under multiple workers, each would get its own
+# independent in-memory registry, so a /metrics scrape would only ever see
+# whichever one worker happened to answer it, silently under-reporting by
+# roughly (N-1)/N. If this service is ever scaled to multiple workers,
+# prometheus_client's multiprocess support needs to be wired in first.
 _REQUEST_COUNT, _REQUEST_DURATION = _new_instruments(REGISTRY)
 
 

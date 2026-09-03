@@ -18,4 +18,13 @@ RUN uv pip install --system --refresh .
 RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('Model cached.')"
 
 EXPOSE 8083
+# --workers 1 is load-bearing for OBS-1's RED metrics (app/observability/
+# metrics.py): the Counter/Histogram are built once against
+# prometheus_client's process-wide default registry, with NO multiprocess
+# mode configured (no PROMETHEUS_MULTIPROC_DIR / MultiProcessCollector).
+# Raising this would silently split each worker's own request counts into
+# its own registry, so a /metrics scrape would only ever see ~1/N of real
+# traffic depending on which worker answered it — with no error or warning.
+# If this ever needs to scale to multiple workers, add prometheus_client's
+# multiprocess support first.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8083", "--workers", "1"]
