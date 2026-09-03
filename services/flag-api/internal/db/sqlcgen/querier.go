@@ -28,6 +28,7 @@ type Querier interface {
 	// "project_id = $3::uuid" clause had.
 	ConsumeBreakGlassToken(ctx context.Context, arg ConsumeBreakGlassTokenParams) (ConsumeBreakGlassTokenRow, error)
 	CountActiveServiceTokens(ctx context.Context) (int64, error)
+	CountAuditEntries(ctx context.Context) (int64, error)
 	CountAuditLogEntries(ctx context.Context) (int64, error)
 	CountRecentBreakGlassUses(ctx context.Context) (int64, error)
 	CountRoleAssignments(ctx context.Context) (int64, error)
@@ -46,10 +47,36 @@ type Querier interface {
 	GetScheduledChangeStatus(ctx context.Context, arg GetScheduledChangeStatusParams) (string, error)
 	GetTokenWatermark(ctx context.Context, lower string) (time.Time, error)
 	GetUserRole(ctx context.Context, arg GetUserRoleParams) (string, error)
+	// Deliberately NOT converted to sqlc: the combined "render prev_state/
+	// new_state exactly as Postgres will store them, and read the chain tip's
+	// entry_hash, in one round-trip" query in audit.go's Append. Empirically
+	// confirmed (a throwaway probe against real Postgres) that sqlc infers a
+	// NON-nullable Go output type for a bare `sqlc.narg(x)::jsonb[::text]`
+	// computed column no matter how the cast is wrapped (CAST(...AS text),
+	// an extra dummy column, a standalone SELECT with no FROM) — even though
+	// the parameter is genuinely nullable and IS null on most Append calls
+	// (most audit events have an empty PrevState or NewState). Scanning that
+	// NULL into the generated non-nullable string/json.RawMessage destination
+	// is a hard database/sql error, reproduced live: "unsupported Scan, storing
+	// driver.Value type <nil> into type *json.RawMessage". This is the same
+	// CRITICAL bug class DATA-1b PR 1/4 found for NULL-into-plain-string, just
+	// for a computed expression sqlc has no override mechanism for. Matches
+	// PR 1's precedent for ExportAuditLog: not every query safely fits sqlc's
+	// generated shape, and this is the audit hash chain — the wrong call here
+	// is not worth whatever uniformity converting it would buy.
+	InsertAuditEntry(ctx context.Context, arg InsertAuditEntryParams) error
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (string, error)
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
+	// The project_id parameter is cast to ::uuid (never the column to text) on
+	// both sides of the OR — casting a uuid column to text to compare it against
+	// a bare parameter silently turns a case-insensitive uuid comparison into a
+	// case-sensitive text one (DATA-1b PR 2/4 found and fixed exactly this bug
+	// in breakglass.sql's ConsumeBreakGlassToken). This query already followed
+	// the safe pattern before any sqlc conversion — preserved as-is.
+	ListAuditLogForVerification(ctx context.Context, projectID sql.NullString) ([]ListAuditLogForVerificationRow, error)
+	ListAuditRetentionCheckpoints(ctx context.Context, projectID sql.NullString) ([]ListAuditRetentionCheckpointsRow, error)
 	ListBreakGlassTokens(ctx context.Context, projectID sql.NullString) ([]ListBreakGlassTokensRow, error)
 	ListOrphanedFlags(ctx context.Context) ([]ListOrphanedFlagsRow, error)
 	ListPrereqFlagKeysForFlag(ctx context.Context, arg ListPrereqFlagKeysForFlagParams) ([]string, error)
@@ -60,6 +87,11 @@ type Querier interface {
 	// plain TEXT columns compared to a TEXT parameter, so (unlike a uuid column)
 	// there is no cast-direction ambiguity to worry about here at all.
 	ListScheduledChanges(ctx context.Context, arg ListScheduledChangesParams) ([]ListScheduledChangesRow, error)
+	// Serializes appends to one chain. pg_advisory_xact_lock releases
+	// automatically at commit/rollback, so a crashed writer cannot wedge it.
+	// flag_key is the plain (possibly empty) string, not a NULL sentinel — "" is
+	// a perfectly valid hashtext() input and locks by it consistently.
+	LockAuditChain(ctx context.Context, arg LockAuditChainParams) error
 	MarkScheduledChangeExecuted(ctx context.Context, id string) error
 	MarkScheduledChangeFailedNoRetryState(ctx context.Context, arg MarkScheduledChangeFailedNoRetryStateParams) error
 	MarkScheduledChangeFailedRetryPending(ctx context.Context, arg MarkScheduledChangeFailedRetryPendingParams) error

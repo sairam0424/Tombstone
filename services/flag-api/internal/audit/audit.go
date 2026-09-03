@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sqlc-dev/pqtype"
 
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -87,8 +89,10 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 
 	// Serialize appends to THIS chain. pg_advisory_xact_lock releases
 	// automatically at commit/rollback, so a crashed writer cannot wedge it.
-	if _, err := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock($1, hashtext($2))`, advisoryNamespace, e.FlagKey); err != nil {
+	if err := sqlcgen.New(tx).LockAuditChain(ctx, sqlcgen.LockAuditChainParams{
+		Namespace: advisoryNamespace,
+		FlagKey:   e.FlagKey,
+	}); err != nil {
 		return "", "", fmt.Errorf("lock audit chain: %w", err)
 	}
 
@@ -114,6 +118,13 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 	//     produce a hash Verify could never reproduce, and EVERY row would
 	//     report as forged. jsonb's text rendering does not depend on any
 	//     session setting, so asking Postgres for it is deterministic.
+	//
+	// DATA-1b PR 3/4: deliberately kept as raw SQL, not sqlc — empirically
+	// confirmed sqlc infers a non-nullable Go type for this computed
+	// cast-of-a-parameter column no matter how it's wrapped, and prev_state/
+	// new_state are genuinely NULL on most calls (see queries/audit.sql's
+	// doc comment for the reproduction). A wrong conversion here would crash
+	// on the common case, not just an edge case.
 	var prevStateText, newStateText, prevHash sql.NullString
 	if err := tx.QueryRowContext(ctx, `
 		SELECT $2::jsonb::text, $3::jsonb::text,
@@ -157,14 +168,24 @@ func (w *Writer) Append(ctx context.Context, e Entry) (string, string, error) {
 		entryHash = w.key.Sum(canonical(id, stored, createdAt, prevHash.String))
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO audit_log
-		    (id, flag_key, environment, actor, event_type, prev_state, new_state,
-		     ip_address, prev_hash, entry_hash, created_at, project_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	`, id, nullIfEmpty(e.FlagKey), e.Environment, e.Actor, e.EventType,
-		jsonOrNull(stored.PrevState), jsonOrNull(stored.NewState), e.IPAddress,
-		nullIfEmpty(prevHash.String), nullIfEmpty(entryHash), createdAt, nullIfEmpty(e.ProjectID)); err != nil {
+	// environment/ip_address are ALWAYS stored as the literal value (even ""),
+	// never NULL — matching the original behavior exactly. Only flag_key/
+	// prev_state/new_state/prev_hash/entry_hash/project_id use the
+	// empty-means-NULL convention nullString/nullRawMessage apply below.
+	if err := sqlcgen.New(tx).InsertAuditEntry(ctx, sqlcgen.InsertAuditEntryParams{
+		ID:          id,
+		FlagKey:     nullString(e.FlagKey),
+		Environment: sql.NullString{String: e.Environment, Valid: true},
+		Actor:       e.Actor,
+		EventType:   e.EventType,
+		PrevState:   nullRawMessage(stored.PrevState),
+		NewState:    nullRawMessage(stored.NewState),
+		IpAddress:   sql.NullString{String: e.IPAddress, Valid: true},
+		PrevHash:    nullString(prevHash.String),
+		EntryHash:   nullString(entryHash),
+		CreatedAt:   createdAt,
+		ProjectID:   nullString(e.ProjectID),
+	}); err != nil {
 		return "", "", fmt.Errorf("insert audit entry: %w", err)
 	}
 
@@ -228,4 +249,20 @@ func jsonOrNull(b []byte) any {
 		return nil
 	}
 	return string(b)
+}
+
+// nullString converts "" to SQL NULL, matching nullIfEmpty's convention but
+// typed for a sqlc-generated sql.NullString param field instead of a plain
+// ...any ExecContext argument.
+func nullString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
+
+// nullRawMessage converts an empty/nil byte slice to SQL NULL, matching
+// jsonOrNull's convention but typed for a sqlc-generated jsonb param field.
+func nullRawMessage(b []byte) pqtype.NullRawMessage {
+	if len(b) == 0 {
+		return pqtype.NullRawMessage{Valid: false}
+	}
+	return pqtype.NullRawMessage{RawMessage: b, Valid: true}
 }

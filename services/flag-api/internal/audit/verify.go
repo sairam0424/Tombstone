@@ -2,8 +2,11 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // VerifyReport is the computed integrity result for the audit log.
@@ -65,48 +68,37 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 	// Ordered by (project_id, flag_key), then position within the chain, so a
 	// single pass can walk each chain in sequence.
 	//
-	// The filter passes projectID through nullIfEmpty rather than comparing
-	// "$1 = '' OR project_id::text = $1": casting project_id to text and
-	// comparing it against the raw request string is sensitive to UUID
-	// formatting (case, e.g.) that the native uuid `=` operator normalizes
-	// away — a caller whose resolved project_id differs only in case from the
-	// stored value would silently see zero rows instead of their own. The
-	// explicit ::uuid cast is required, not cosmetic: without it, lib/pq
-	// cannot determine $1's type from a bare NULL parameter and Postgres
-	// rejects the query outright ("could not determine data type of
-	// parameter $1") — found by CI, not reproducible with a non-NULL value,
-	// which is exactly why an explicit type is safer than relying on
-	// inference from context.
+	// The filter passes projectID through as a NULLABLE parameter rather than
+	// comparing "$1 = '' OR project_id::text = $1": casting project_id to
+	// text and comparing it against the raw request string is sensitive to
+	// UUID formatting (case, e.g.) that the native uuid `=` operator
+	// normalizes away — a caller whose resolved project_id differs only in
+	// case from the stored value would silently see zero rows instead of
+	// their own (DATA-1b PR 2/4 found and fixed exactly this regression in
+	// breakglass.sql's ConsumeBreakGlassToken). The explicit ::uuid cast is
+	// required, not cosmetic: without it, lib/pq cannot determine $1's type
+	// from a bare NULL parameter and Postgres rejects the query outright
+	// ("could not determine data type of parameter $1") — found by CI, not
+	// reproducible with a non-NULL value, which is exactly why an explicit
+	// type is safer than relying on inference from context.
 	checkpoints, err := w.loadCheckpoints(ctx, projectID)
 	if err != nil {
 		return report, fmt.Errorf("read retention checkpoints: %w", err)
 	}
 
-	rows, err := w.db.QueryContext(ctx, `
-		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
-		       COALESCE(prev_state::text,''), COALESCE(new_state::text,''),
-		       COALESCE(ip_address,''), COALESCE(prev_hash,''), COALESCE(entry_hash,''),
-		       created_at, COALESCE(project_id::text,'')
-		FROM audit_log
-		WHERE $1::uuid IS NULL OR project_id = $1::uuid
-		ORDER BY COALESCE(project_id::text,''), COALESCE(flag_key,''), created_at ASC, id ASC
-	`, nullIfEmpty(projectID))
+	rows, err := sqlcgen.New(w.db).ListAuditLogForVerification(ctx, sql.NullString{String: projectID, Valid: projectID != ""})
 	if err != nil {
 		return report, fmt.Errorf("read audit log: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	var currentChain string
 	var expectedPrev string
 	first := true
 
-	for rows.Next() {
-		var id, flagKey, env, actor, eventType, prevState, newState, ip, prevHash, entryHash, rowProjectID string
-		var createdAt time.Time
-		if err := rows.Scan(&id, &flagKey, &env, &actor, &eventType,
-			&prevState, &newState, &ip, &prevHash, &entryHash, &createdAt, &rowProjectID); err != nil {
-			return report, err
-		}
+	for _, row := range rows {
+		id, flagKey, env, actor, eventType := row.ID, row.FlagKey, row.Environment, row.Actor, row.EventType
+		prevState, newState, ip, prevHash, entryHash, rowProjectID := row.PrevStateText, row.NewStateText, row.IpAddress, row.PrevHash, row.EntryHash, row.ProjectIDText
+		createdAt := row.CreatedAt
 		report.TotalEntries++
 
 		// Chain identity is (project_id, flag_key) — see chainKey's doc
@@ -171,9 +163,6 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 		report.VerifiedEntries++
 		expectedPrev = entryHash
 	}
-	if err := rows.Err(); err != nil {
-		return report, err
-	}
 
 	report.Intact = report.FailureCount == 0 && report.VerifiedEntries > 0
 
@@ -218,27 +207,23 @@ type checkpointRecord struct {
 // (TEN-1a-2): a project must never learn about, or be affected by, another
 // project's checkpoints.
 func (w *Writer) loadCheckpoints(ctx context.Context, projectID string) (map[string]checkpointRecord, error) {
-	rows, err := w.db.QueryContext(ctx, `
-		SELECT COALESCE(project_id::text,''), flag_key, pruned_through_hash,
-		       pruned_through_created_at, signature
-		FROM audit_retention_checkpoints
-		WHERE $1::uuid IS NULL OR project_id = $1::uuid
-	`, nullIfEmpty(projectID))
+	rows, err := sqlcgen.New(w.db).ListAuditRetentionCheckpoints(ctx, sql.NullString{String: projectID, Valid: projectID != ""})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 
 	out := map[string]checkpointRecord{}
-	for rows.Next() {
-		var c checkpointRecord
-		if err := rows.Scan(&c.projectID, &c.flagKey, &c.prunedThroughHash,
-			&c.prunedThroughCreatedAt, &c.signature); err != nil {
-			return nil, err
+	for _, row := range rows {
+		c := checkpointRecord{
+			projectID:              row.ProjectIDText,
+			flagKey:                row.FlagKey,
+			prunedThroughHash:      row.PrunedThroughHash,
+			prunedThroughCreatedAt: row.PrunedThroughCreatedAt,
+			signature:              row.Signature,
 		}
 		out[checkpointMapKey(chainKey(c.projectID, c.flagKey), c.prunedThroughHash)] = c
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // checkpointMapKey combines a chain identity with the specific hash a
@@ -268,7 +253,6 @@ func (w *Writer) checkpointExplains(checkpoints map[string]checkpointRecord, cha
 // CountEntries returns the total number of audit rows. Used by the compliance
 // evidence endpoint so it no longer needs its own query.
 func (w *Writer) CountEntries(ctx context.Context) (int, error) {
-	var n int
-	err := w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&n)
-	return n, err
+	n, err := sqlcgen.New(w.db).CountAuditEntries(ctx)
+	return int(n), err
 }
