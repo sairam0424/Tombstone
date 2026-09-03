@@ -145,6 +145,12 @@ func main() {
 	// if auditKey is nil the trail is still recorded, just unkeyed and reported
 	// as unverifiable, because dropping audit records outright is worse.
 	auditWriter := audit.NewWriter(db, auditKey)
+	// DATA-2: shares auditKey rather than a dedicated key — see
+	// audit.NewRetention's doc comment for why. AUDIT_LOG_RETENTION_DAYS
+	// defaults to 365, matching the ~12-month observation window SOC2 Type II
+	// evidence is typically drawn from.
+	auditRetention := audit.NewRetention(db, auditKey)
+	auditRetentionDays := envIntOrDefault("AUDIT_LOG_RETENTION_DAYS", 365, logger)
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher, logger)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
@@ -155,6 +161,7 @@ func main() {
 	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger, auditWriter)
+	retentionH := v1.NewRetentionHandler(logger, auditRetention, auditRetentionDays)
 	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
@@ -286,6 +293,12 @@ func main() {
 		// AUD-1: recomputes the keyed chain and reports real integrity.
 		r.With(rbacMw.RequirePermission("audit", "read")).
 			Get("/audit/verify", auditH.VerifyChain)
+		// DATA-2: archives old audit_log partitions. ADMIN-only — same tier
+		// as /compliance/export and break-glass token creation — since this
+		// mutates the audit log's physical storage, unlike every other
+		// audit:read route above.
+		r.With(rbacMw.RequirePermission("admin", "admin")).
+			Post("/audit/retention/run", retentionH.RunRetention)
 
 		// Compliance: evidence/controls are summaries (audit:read), but a full
 		// audit-log export is the most sensitive read in the system and is
