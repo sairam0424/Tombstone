@@ -17,14 +17,14 @@ SET used = true, used_at = now(), used_by = $1
 WHERE token_hash = $2
   AND used = false
   AND expires_at > now()
-  AND ($3::text = '' OR project_id IS NULL OR project_id::text = $3::text)
+  AND ($3::uuid IS NULL OR project_id IS NULL OR project_id = $3::uuid)
 RETURNING id, scope
 `
 
 type ConsumeBreakGlassTokenParams struct {
 	UsedBy    sql.NullString
 	TokenHash sql.NullString
-	ProjectID string
+	ProjectID sql.NullString
 }
 
 type ConsumeBreakGlassTokenRow struct {
@@ -32,13 +32,18 @@ type ConsumeBreakGlassTokenRow struct {
 	Scope string
 }
 
-// $3 is always a plain string, "" meaning "no project scope requested" — a
-// single static query using an empty-string sentinel, not "$3=”" alongside
-// a same-parameter ::uuid cast in another branch: AUD-1 found that mixing
-// two type contexts for one parameter within one statement is exactly what
-// confuses lib/pq's extended-protocol type inference. Casting the COLUMN to
-// text (not the parameter to uuid) keeps $3 in a single, consistent type
-// context throughout.
+// $3 is nullable — NULL means "no project scope requested". A DATA-1b PR2
+// adversarial review found that an earlier version of this query used an
+// empty-string sentinel with the project_id COLUMN cast to ::text, which
+// silently turned this into a case-SENSITIVE text compare; project_id is a
+// client-controlled HTTP header with no case normalization, so a
+// same-project caller whose header casing merely differed from the
+// canonical lowercase stored value got wrongly rejected with 403. Using
+// sqlc.narg + casting the PARAMETER (not the column) to ::uuid in every
+// occurrence keeps $3 in one single, consistent type context (satisfying
+// the AUD-1 lesson this was originally written to avoid) while restoring
+// uuid's case-insensitive equality semantics the original dynamically-built
+// "project_id = $3::uuid" clause had.
 func (q *Queries) ConsumeBreakGlassToken(ctx context.Context, arg ConsumeBreakGlassTokenParams) (ConsumeBreakGlassTokenRow, error) {
 	row := q.db.QueryRowContext(ctx, consumeBreakGlassToken, arg.UsedBy, arg.TokenHash, arg.ProjectID)
 	var i ConsumeBreakGlassTokenRow

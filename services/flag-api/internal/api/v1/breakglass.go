@@ -57,14 +57,15 @@ func consumeBreakGlassTokenTx(ctx context.Context, tx *sql.Tx, hasher *secrets.T
 
 	tokenHash := hasher.Hash(token)
 
-	// A single static query using an empty-string sentinel for "no project
-	// scope requested" (project_id = ""), not a bare "" cast to ::uuid — see
-	// queries/breakglass.sql's ConsumeBreakGlassToken doc comment for why
-	// that specific pattern (which bit AUD-1 before) is avoided here.
+	// ProjectID is NULL (Valid: false), not "", for "no project scope
+	// requested" — see queries/breakglass.sql's ConsumeBreakGlassToken doc
+	// comment for why the query casts this parameter (not the column) to
+	// ::uuid: a same-project caller whose X-Project-Id header casing merely
+	// differs from the canonical stored value must still match.
 	row, err := sqlcgen.New(tx).ConsumeBreakGlassToken(ctx, sqlcgen.ConsumeBreakGlassTokenParams{
 		UsedBy:    sql.NullString{String: usedBy, Valid: true},
 		TokenHash: sql.NullString{String: tokenHash, Valid: true},
-		ProjectID: projectID,
+		ProjectID: sql.NullString{String: projectID, Valid: projectID != ""},
 	})
 	if err == nil {
 		return row.Scope, row.ID, nil
