@@ -77,6 +77,11 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 	// parameter $1") — found by CI, not reproducible with a non-NULL value,
 	// which is exactly why an explicit type is safer than relying on
 	// inference from context.
+	checkpoints, err := w.loadCheckpoints(ctx, projectID)
+	if err != nil {
+		return report, fmt.Errorf("read retention checkpoints: %w", err)
+	}
+
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,''), COALESCE(new_state::text,''),
@@ -104,12 +109,12 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 		}
 		report.TotalEntries++
 
-		// Chain identity is (project_id, flag_key) — "\x00" as a separator
-		// cannot appear in a UUID string or a flag key, so this concatenation
-		// cannot collide two distinct pairs onto the same chain key.
-		chainKey := rowProjectID + "\x00" + flagKey
-		if first || chainKey != currentChain {
-			currentChain = chainKey
+		// Chain identity is (project_id, flag_key) — see chainKey's doc
+		// comment in retention.go for why this concatenation cannot collide
+		// two distinct pairs.
+		thisChain := chainKey(rowProjectID, flagKey)
+		if first || thisChain != currentChain {
+			currentChain = thisChain
 			expectedPrev = ""
 			report.ChainsChecked++
 			first = false
@@ -141,9 +146,24 @@ func (w *Writer) Verify(ctx context.Context, projectID string) (VerifyReport, er
 		}
 
 		// 2. Does it link to the previous verified entry in this chain?
-		// expectedPrev == "" means this is a chain start (or follows a legacy
-		// row), so any prev_hash is accepted as the genesis of the verified span.
-		if expectedPrev != "" && !w.key.Equal(prevHash, expectedPrev) {
+		//
+		// expectedPrev == "" means this is a chain start in THIS scan (or
+		// follows a legacy row) — but a genuine genesis or post-legacy row
+		// always has its OWN prev_hash empty too (Append reads the chain tip
+		// from the live table either way, and finds nothing to point at). A
+		// non-empty prev_hash here means real predecessor rows existed and
+		// are simply no longer in this result set: either archived (a
+		// retention checkpoint explains exactly this hash) or deleted
+		// (nothing explains it — flag it rather than silently accept it as
+		// a "fresh genesis", which is what this code did before checkpoints
+		// existed).
+		switch {
+		case expectedPrev == "" && prevHash != "":
+			if !w.checkpointExplains(checkpoints, thisChain, prevHash) {
+				report.addFailure(id, flagKey,
+					"prev_hash refers to an entry that is no longer present, and no valid retention checkpoint explains the gap — possible tampering")
+			}
+		case expectedPrev != "" && !w.key.Equal(prevHash, expectedPrev):
 			report.addFailure(id, flagKey,
 				"prev_hash does not match the preceding entry — an entry was removed, reordered, or inserted")
 		}
@@ -182,6 +202,68 @@ func (r *VerifyReport) addFailure(id, flagKey, reason string) {
 // there is nothing to recompute, which is a configuration state (503) rather
 // than a server error (500).
 func (w *Writer) HasKey() bool { return w != nil && w.key != nil }
+
+// checkpointRecord is one sealed retention checkpoint, as needed to
+// recompute and check its signature.
+type checkpointRecord struct {
+	projectID, flagKey, prunedThroughHash string
+	prunedThroughCreatedAt                time.Time
+	signature                             string
+}
+
+// loadCheckpoints reads every retention checkpoint in scope, keyed by
+// (chain, the hash it explains) so resolving a gap in the row-scan loop
+// above costs one map lookup rather than a query per gap. Scoped by
+// projectID the same way the main row query is, for the same reason
+// (TEN-1a-2): a project must never learn about, or be affected by, another
+// project's checkpoints.
+func (w *Writer) loadCheckpoints(ctx context.Context, projectID string) (map[string]checkpointRecord, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT COALESCE(project_id::text,''), flag_key, pruned_through_hash,
+		       pruned_through_created_at, signature
+		FROM audit_retention_checkpoints
+		WHERE $1::uuid IS NULL OR project_id = $1::uuid
+	`, nullIfEmpty(projectID))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string]checkpointRecord{}
+	for rows.Next() {
+		var c checkpointRecord
+		if err := rows.Scan(&c.projectID, &c.flagKey, &c.prunedThroughHash,
+			&c.prunedThroughCreatedAt, &c.signature); err != nil {
+			return nil, err
+		}
+		out[checkpointMapKey(chainKey(c.projectID, c.flagKey), c.prunedThroughHash)] = c
+	}
+	return out, rows.Err()
+}
+
+// checkpointMapKey combines a chain identity with the specific hash a
+// checkpoint explains — a chain can accumulate many checkpoints over
+// successive retention runs, so the hash must be part of the key, not just
+// the chain.
+func checkpointMapKey(chain, prunedThroughHash string) string {
+	return chain + "\x00" + prunedThroughHash
+}
+
+// checkpointExplains reports whether a valid, signed checkpoint accounts for
+// a chain's row referring to gapHash as its prev_hash with no predecessor in
+// this scan. Recomputing the signature (rather than trusting the stored row
+// at face value) matters exactly as it does for entry_hash: RULEs on
+// audit_retention_checkpoints block UPDATE/DELETE, not INSERT, so a party
+// able to write bogus rows there must still be unable to make one verify
+// without holding AUDIT_HMAC_KEY.
+func (w *Writer) checkpointExplains(checkpoints map[string]checkpointRecord, chain, gapHash string) bool {
+	c, ok := checkpoints[checkpointMapKey(chain, gapHash)]
+	if !ok {
+		return false
+	}
+	want := w.key.Sum(checkpointCanonical(c.projectID, c.flagKey, c.prunedThroughHash, c.prunedThroughCreatedAt))
+	return w.key.Equal(want, c.signature)
+}
 
 // CountEntries returns the total number of audit rows. Used by the compliance
 // evidence endpoint so it no longer needs its own query.
