@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -37,39 +38,27 @@ func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.Compli
 // Returns a SOC 2 evidence bundle computed from live database state.
 func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	q := sqlcgen.New(h.db)
 
 	// Total audit log entries.
-	var totalAuditEntries int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&totalAuditEntries)
+	totalAuditEntries64, _ := q.CountAuditLogEntries(ctx)
+	totalAuditEntries := int(totalAuditEntries64)
 
 	// Approval rate: APPROVED or APPLIED out of all non-PENDING change requests.
-	var approved, total int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT
-		    COUNT(*) FILTER (WHERE status IN ('APPROVED','APPLIED')),
-		    COUNT(*)
-		FROM change_requests
-		WHERE status != 'PENDING'
-	`).Scan(&approved, &total)
+	stats, _ := q.ChangeRequestApprovalStats(ctx)
+	approved, total := int(stats.Approved), int(stats.Total)
 	var approvalRate float64
 	if total > 0 {
 		approvalRate = float64(approved) / float64(total)
 	}
 
 	// Break-glass token uses in last 90 days.
-	var breakGlassUses int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM break_glass_tokens
-		WHERE used = true
-		  AND used_at >= now() - INTERVAL '90 days'
-	`).Scan(&breakGlassUses)
+	breakGlassUses64, _ := q.CountRecentBreakGlassUses(ctx)
+	breakGlassUses := int(breakGlassUses64)
 
 	// Active service tokens (not revoked).
-	var serviceTokensActive int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM service_tokens WHERE revoked_at IS NULL
-	`).Scan(&serviceTokensActive)
+	serviceTokensActive64, _ := q.CountActiveServiceTokens(ctx)
+	serviceTokensActive := int(serviceTokensActive64)
 
 	type control struct {
 		ID          string `json:"id"`
@@ -160,8 +149,8 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 	if h.policySource != nil {
 		source = h.policySource()
 	}
-	var roleAssignments int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_roles`).Scan(&roleAssignments)
+	roleAssignments64, _ := q.CountRoleAssignments(ctx)
+	roleAssignments := int(roleAssignments64)
 	evidence["rbac"] = map[string]any{
 		"policy_source":    source,
 		"role_assignments": roleAssignments,
@@ -306,22 +295,12 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
-		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
-		       COALESCE(ip_address,''), COALESCE(prev_hash,''),
-		       EXTRACT(EPOCH FROM created_at)::bigint,
-		       COALESCE(rekor_log_id,''), rekor_log_index
-		FROM audit_log
-		WHERE project_id = $1
-		ORDER BY created_at ASC
-	`, projectID)
+	rows, err := sqlcgen.New(h.db).ExportAuditLogForProject(r.Context(), projectID)
 	if err != nil {
 		h.logger.Error("audit export query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	mac := h.signer.New()
 
@@ -330,17 +309,21 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 
 	lineCount := 0
-	for rows.Next() {
-		var e AuditEntry
-		var prevRaw, newRaw string
-		if err := rows.Scan(&e.ID, &e.FlagKey, &e.Environment, &e.Actor, &e.EventType,
-			&prevRaw, &newRaw, &e.IPAddress, &e.PrevHash, &e.CreatedAt,
-			&e.RekorLogID, &e.RekorLogIndex); err != nil {
-			h.logger.Error("audit export scan", zap.Error(err))
-			return
+	for _, row := range rows {
+		e := AuditEntry{
+			ID:            row.ID,
+			FlagKey:       row.FlagKey,
+			Environment:   row.Environment,
+			Actor:         row.Actor,
+			EventType:     row.EventType,
+			PrevState:     json.RawMessage(row.PrevState),
+			NewState:      json.RawMessage(row.NewState),
+			IPAddress:     row.IpAddress,
+			PrevHash:      row.PrevHash,
+			CreatedAt:     row.CreatedAt,
+			RekorLogID:    row.RekorLogID,
+			RekorLogIndex: nullInt64ToPtr(row.RekorLogIndex),
 		}
-		e.PrevState = json.RawMessage(prevRaw)
-		e.NewState = json.RawMessage(newRaw)
 
 		line, err := json.Marshal(e)
 		if err != nil {
@@ -362,4 +345,14 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		"exported_at": time.Now().Unix(),
 	})
 	_, _ = fmt.Fprintf(w, "%s\n", sigLine)
+}
+
+// nullInt64ToPtr converts a sqlc-generated sql.NullInt64 (used for nullable
+// bigint columns) to the *int64 shape AuditEntry.RekorLogIndex already uses
+// for its "omitempty" JSON encoding.
+func nullInt64ToPtr(n sql.NullInt64) *int64 {
+	if !n.Valid {
+		return nil
+	}
+	return &n.Int64
 }

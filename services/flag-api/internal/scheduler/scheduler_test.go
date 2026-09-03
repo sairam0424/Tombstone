@@ -287,7 +287,7 @@ func TestApplyChange_LegacyRowWithNoProjectIDFailsClosed(t *testing.T) {
 		flagKey:       "my-flag",
 		environment:   "production",
 		changePayload: []byte(`{"enabled":false}`),
-		projectID:     sql.NullString{}, // legacy row: no project_id
+		projectID:     "", // legacy row: no project_id
 	}
 
 	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
@@ -328,7 +328,7 @@ func TestApplyChange_ScopesFlagEnvironmentUpdateToProjectID(t *testing.T) {
 		flagKey:       "my-flag",
 		environment:   "production",
 		changePayload: []byte(`{"enabled":true}`),
-		projectID:     sql.NullString{String: projectID, Valid: true},
+		projectID:     projectID,
 	}
 
 	mock.ExpectQuery(`SELECT fe\.enabled, fe\.rollout_pct, fe\.flag_id\s+FROM flag_environments fe\s+JOIN flags f ON f\.id = fe\.flag_id\s+WHERE f\.key = \$1 AND fe\.environment = \$2 AND f\.project_id = \$3`).

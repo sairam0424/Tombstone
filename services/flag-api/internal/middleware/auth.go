@@ -6,11 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -145,10 +145,7 @@ func (a *AuthMiddleware) tokenPredatesWatermark(ctx context.Context, sub string,
 	// role-revocation match already accepts, for the same reason: erring
 	// toward revoking/matching too broadly is safer than a silent
 	// case-mismatch no-op.
-	var validAfter time.Time
-	err := a.db.QueryRowContext(ctx, `
-		SELECT valid_after FROM user_token_watermarks WHERE user_email = lower($1)
-	`, sub).Scan(&validAfter)
+	validAfter, err := sqlcgen.New(a.db).GetTokenWatermark(ctx, sub)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			a.logger.Warn("auth: token watermark lookup failed, failing open", zap.Error(err))
@@ -177,14 +174,11 @@ func (a *AuthMiddleware) validateServiceToken(ctx context.Context, token string)
 	if a.hasher == nil {
 		return "", "", "", false
 	}
-	var name, role, projectID string
-	err := a.db.QueryRowContext(ctx, `
-		SELECT name, role, project_id FROM service_tokens
-		WHERE token_hash=$1 AND revoked_at IS NULL
-	`, a.hasher.Hash(token)).Scan(&name, &role, &projectID)
+	resolvedToken, err := sqlcgen.New(a.db).ResolveServiceToken(ctx, sql.NullString{String: a.hasher.Hash(token), Valid: true})
 	if err != nil {
 		return "", "", "", false
 	}
+	name, role, projectID := resolvedToken.Name, resolvedToken.Role, resolvedToken.ProjectID
 	resolved := Role(role)
 	if _, known := permissionMatrix[resolved]; !known {
 		resolved = RoleViewer

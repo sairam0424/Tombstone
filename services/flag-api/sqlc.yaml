@@ -1,0 +1,27 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema:
+      - "internal/db/schema.sql"
+      - "internal/db/migrations"
+    queries: "internal/db/queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/db/sqlcgen"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_exact_table_names: false
+        overrides:
+          # This codebase has never used a UUID Go type anywhere — every
+          # handler, middleware, and context value already treats
+          # project_id/flag_id/id etc. as plain strings (chi.URLParam,
+          # requireProjectID, JWT claims). Overriding sqlc's default
+          # (github.com/google/uuid.UUID) to string matches that existing
+          # convention instead of introducing a second representation that
+          # would need converting at every call site for no behavioral gain.
+          - db_type: "uuid"
+            go_type: "string"
+          - db_type: "uuid"
+            go_type: "string"
+            nullable: true
