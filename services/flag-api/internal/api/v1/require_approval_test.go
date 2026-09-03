@@ -229,6 +229,27 @@ func TestRequireApprovalGate(t *testing.T) {
 		}
 	})
 
+	// Regression proof for a case-sensitivity bug the DATA-1b PR 2/4
+	// adversarial review found: ConsumeBreakGlassToken's project-scope
+	// predicate must remain a uuid-typed (case-insensitive) comparison, not
+	// a text comparison — X-Project-Id is a client-controlled header with
+	// no case normalization, and IsProjectMember's own project_id=$2 check
+	// is itself uuid-typed/case-insensitive, so a same-project caller whose
+	// header casing differs from the canonical lowercase stored value must
+	// still be able to consume a token created for that project.
+	t.Run("a break-glass token still bypasses the gate when the caller's project id differs only in letter-case", func(t *testing.T) {
+		setRequireApproval(t, projectID, true)
+		defer setRequireApproval(t, projectID, false)
+
+		token := createTestBreakGlassToken(t, bgH, projectID, "case-tester")
+
+		rec := httptest.NewRecorder()
+		flagH.UpdateEnvironment(rec, updateEnvRequestFor(strings.ToUpper(projectID), flag, true, 77, token))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (a case-varied but equal project id must still match); body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	// Regression proof for the TOCTOU race the adversarial review found in
 	// the original SELECT-then-UPDATE implementation: two concurrent
 	// requests racing the SAME token must not both bypass the gate.

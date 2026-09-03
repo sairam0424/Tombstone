@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"go.uber.org/zap"
 )
 
@@ -99,10 +100,11 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 	}
 
 	// Verify the flag exists IN THE CALLER'S OWN PROJECT.
-	var flagExists bool
-	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM flags WHERE key=$1 AND project_id=$2 AND state != 'ARCHIVED')`, key, projectID,
-	).Scan(&flagExists); err != nil || !flagExists {
+	flagExists, err := sqlcgen.New(h.db).FlagExistsInProjectNotArchived(r.Context(), sqlcgen.FlagExistsInProjectNotArchivedParams{
+		Key:       key,
+		ProjectID: projectID,
+	})
+	if err != nil || !flagExists {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
 	}
@@ -114,39 +116,37 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var sc ScheduledChange
-	var executedAt sql.NullTime
-	var errorMsg sql.NullString
-
-	err = h.db.QueryRowContext(r.Context(), `
-		INSERT INTO scheduled_changes
-		    (id, flag_key, environment, scheduled_for, change_payload, created_by, status, project_id)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
-		RETURNING
-		    id, flag_key, environment,
-		    EXTRACT(EPOCH FROM scheduled_for)::bigint,
-		    change_payload, created_by, status,
-		    executed_at,
-		    error_message,
-		    EXTRACT(EPOCH FROM created_at)::bigint
-	`, uuid.New().String(), key, req.Environment, scheduledAt, payloadJSON, actor, projectID).
-		Scan(
-			&sc.ID, &sc.FlagKey, &sc.Environment, &sc.ScheduledFor,
-			&sc.ChangePayload, &sc.CreatedBy, &sc.Status,
-			&executedAt, &errorMsg, &sc.CreatedAt,
-		)
+	row, err := sqlcgen.New(h.db).CreateScheduledChange(r.Context(), sqlcgen.CreateScheduledChangeParams{
+		ID:            uuid.New().String(),
+		FlagKey:       key,
+		Environment:   req.Environment,
+		ScheduledFor:  scheduledAt,
+		ChangePayload: payloadJSON,
+		CreatedBy:     actor,
+		ProjectID:     sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		h.logger.Error("create scheduled change", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	if executedAt.Valid {
-		ts := executedAt.Time.Unix()
+	sc := ScheduledChange{
+		ID:            row.ID,
+		FlagKey:       row.FlagKey,
+		Environment:   row.Environment,
+		ScheduledFor:  row.ScheduledFor,
+		ChangePayload: row.ChangePayload,
+		CreatedBy:     row.CreatedBy,
+		Status:        row.Status,
+		CreatedAt:     row.CreatedAt,
+	}
+	if row.ExecutedAt.Valid {
+		ts := row.ExecutedAt.Time.Unix()
 		sc.ExecutedAt = &ts
 	}
-	if errorMsg.Valid {
-		sc.ErrorMessage = &errorMsg.String
+	if row.ErrorMessage.Valid {
+		sc.ErrorMessage = &row.ErrorMessage.String
 	}
 
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "scheduled_change_created",
@@ -170,65 +170,38 @@ func (h *ScheduledHandler) ListSchedule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	query := `
-		SELECT
-		    id, flag_key, environment,
-		    EXTRACT(EPOCH FROM scheduled_for)::bigint,
-		    change_payload, created_by, status,
-		    executed_at,
-		    error_message,
-		    EXTRACT(EPOCH FROM created_at)::bigint
-		FROM scheduled_changes
-		WHERE flag_key = $1 AND project_id = $2
-	`
-	args := []any{key, projectID}
-	argIdx := 3
-
-	if envFilter != "" {
-		query += ` AND environment = $` + itoa(argIdx)
-		args = append(args, envFilter)
-		argIdx++
-	}
-	if statusFilter != "" {
-		query += ` AND status = $` + itoa(argIdx)
-		args = append(args, statusFilter)
-	}
-	query += ` ORDER BY scheduled_for ASC`
-
-	rows, err := h.db.QueryContext(r.Context(), query, args...)
+	rows, err := sqlcgen.New(h.db).ListScheduledChanges(r.Context(), sqlcgen.ListScheduledChangesParams{
+		FlagKey:           key,
+		ProjectID:         sql.NullString{String: projectID, Valid: true},
+		EnvironmentFilter: envFilter,
+		StatusFilter:      statusFilter,
+	})
 	if err != nil {
 		h.logger.Error("list scheduled changes", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
 
 	changes := []ScheduledChange{}
-	for rows.Next() {
-		var sc ScheduledChange
-		var executedAt sql.NullTime
-		var errorMsg sql.NullString
-
-		if err := rows.Scan(
-			&sc.ID, &sc.FlagKey, &sc.Environment, &sc.ScheduledFor,
-			&sc.ChangePayload, &sc.CreatedBy, &sc.Status,
-			&executedAt, &errorMsg, &sc.CreatedAt,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
+	for _, row := range rows {
+		sc := ScheduledChange{
+			ID:            row.ID,
+			FlagKey:       row.FlagKey,
+			Environment:   row.Environment,
+			ScheduledFor:  row.ScheduledFor,
+			ChangePayload: row.ChangePayload,
+			CreatedBy:     row.CreatedBy,
+			Status:        row.Status,
+			CreatedAt:     row.CreatedAt,
 		}
-		if executedAt.Valid {
-			ts := executedAt.Time.Unix()
+		if row.ExecutedAt.Valid {
+			ts := row.ExecutedAt.Time.Unix()
 			sc.ExecutedAt = &ts
 		}
-		if errorMsg.Valid {
-			sc.ErrorMessage = &errorMsg.String
+		if row.ErrorMessage.Valid {
+			sc.ErrorMessage = &row.ErrorMessage.String
 		}
 		changes = append(changes, sc)
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "rows iteration failed")
-		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"scheduled_changes": changes, "total": len(changes)})
@@ -251,24 +224,24 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 
 	actor := actorFromContext(r.Context())
 
-	res, err := h.db.ExecContext(r.Context(), `
-		UPDATE scheduled_changes
-		SET status = 'CANCELLED'
-		WHERE id = $1 AND flag_key = $2 AND status = 'PENDING' AND project_id = $3
-	`, id, key, projectID)
+	n, err := sqlcgen.New(h.db).CancelScheduledChange(r.Context(), sqlcgen.CancelScheduledChangeParams{
+		ID:        id,
+		FlagKey:   key,
+		ProjectID: sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		h.logger.Error("cancel scheduled change", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	n, _ := res.RowsAffected()
 	if n == 0 {
 		// Might not exist, might already be non-PENDING, or belongs to another project.
-		var status string
-		scanErr := h.db.QueryRowContext(r.Context(),
-			`SELECT status FROM scheduled_changes WHERE id=$1 AND flag_key=$2 AND project_id=$3`, id, key, projectID,
-		).Scan(&status)
+		status, scanErr := sqlcgen.New(h.db).GetScheduledChangeStatus(r.Context(), sqlcgen.GetScheduledChangeStatusParams{
+			ID:        id,
+			FlagKey:   key,
+			ProjectID: sql.NullString{String: projectID, Valid: true},
+		})
 		if scanErr == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "scheduled change not found")
 			return
@@ -310,14 +283,4 @@ func (h *ScheduledHandler) writeAudit(ctx context.Context, projectID, flagKey, e
 	}); err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
 	}
-}
-
-// itoa converts a small integer to its decimal string — avoids importing strconv just for this.
-func itoa(n int) string {
-	const digits = "0123456789"
-	if n < 10 {
-		return string(digits[n])
-	}
-	// For arg indices beyond 9 (unlikely in this codebase, but correct).
-	return string(digits[n/10]) + string(digits[n%10])
 }
