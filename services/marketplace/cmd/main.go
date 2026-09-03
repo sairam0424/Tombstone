@@ -98,6 +98,20 @@ func main() {
 			}))
 	}
 
+	// OBS-1 (rollout): pull-based, no OTLP_ENDPOINT/collector needed —
+	// unlike InitTracer, there's no "unset means no-op" branch. Mirrors
+	// flag-api/gateway/evaluator's OBS-1 slices exactly (same middleware,
+	// same metric names/labels) so every service's RED metrics are
+	// directly comparable in one dashboard.
+	meter, metricsHandler, err := telemetry.InitMeter("marketplace")
+	if err != nil {
+		logger.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		logger.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 
 	// Middleware
@@ -105,6 +119,7 @@ func main() {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(httpMetrics)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
@@ -128,6 +143,10 @@ func main() {
 	// treats a nil dependency as healthy rather than as a failure.
 	healthChecker := &health.Checker{RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 
 	// Marketplace routes
 	r.Route("/api/v1/marketplace", func(r chi.Router) {

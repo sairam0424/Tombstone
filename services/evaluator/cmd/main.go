@@ -109,8 +109,23 @@ func main() {
 		blastCalc = blast.NewCalculator(db, flagAPIURL)
 	}
 
+	// OBS-1 (rollout): pull-based, no OTLP_ENDPOINT/collector needed —
+	// unlike InitTracer, there's no "unset means no-op" branch. Mirrors
+	// flag-api/gateway's OBS-1 slices exactly (same middleware, same
+	// metric names/labels) so every service's RED metrics are directly
+	// comparable in one dashboard.
+	meter, metricsHandler, err := telemetry.InitMeter("evaluator")
+	if err != nil {
+		logger.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		logger.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(httpMetrics)
 	r.Use(rateMw.RateLimit)
 	// Load shedding runs AFTER rate limiting: rate limiting rejects
 	// over-quota callers first, regardless of system load; load shedding
@@ -126,6 +141,10 @@ func main() {
 	// as healthy, so readiness never fails on an absent-and-optional dependency.
 	healthChecker := &health.Checker{DB: db, RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 
 	// SDK telemetry ingest endpoint
 	r.Post("/api/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
