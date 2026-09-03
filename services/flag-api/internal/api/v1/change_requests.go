@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // ChangeRequestHandler handles the approval-queue endpoints for flag change requests.
@@ -76,50 +77,29 @@ func (h *ChangeRequestHandler) ListChangeRequests(w http.ResponseWriter, r *http
 		status = "PENDING"
 	}
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT id, flag_key, environment, requested_by, status,
-		       change_payload, COALESCE(approved_by, '{}'),
-		       rejected_by, rejection_reason,
-		       EXTRACT(EPOCH FROM created_at)::bigint,
-		       EXTRACT(EPOCH FROM updated_at)::bigint
-		FROM change_requests
-		WHERE status = $1 AND project_id = $2
-		ORDER BY created_at DESC
-		LIMIT 100
-	`, status, projectID)
+	rows, err := sqlcgen.New(h.db).ListChangeRequests(r.Context(), sqlcgen.ListChangeRequestsParams{
+		Status: status, ProjectID: sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		h.logger.Error("list change requests query", zap.Error(err))
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	requests := []ChangeRequest{}
-	for rows.Next() {
-		var cr ChangeRequest
-		var approvedBy []string
-		// approved_by is a Postgres TEXT[]; lib/pq only converts that to a Go
-		// []string through pq.Array — scanning directly into &approvedBy (as
-		// this did before) fails on every row with "unsupported Scan", so the
-		// row is silently dropped by the continue below and this endpoint has
-		// never actually returned anything. Found by TEN-1a-3's tenancy test,
-		// which is the first thing to ever exercise this against real rows.
-		if scanErr := rows.Scan(
-			&cr.ID, &cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.Status,
-			&cr.ChangePayload, pq.Array(&approvedBy),
-			&cr.RejectedBy, &cr.RejectionReason,
-			&cr.CreatedAt, &cr.UpdatedAt,
-		); scanErr != nil {
-			h.logger.Warn("scan change request row", zap.Error(scanErr))
-			continue
+	for _, row := range rows {
+		cr := ChangeRequest{
+			ID: row.ID, FlagKey: row.FlagKey, Environment: row.Environment, RequestedBy: row.RequestedBy,
+			Status: row.Status, ChangePayload: row.ChangePayload, ApprovedBy: row.ApprovedBy,
+			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		}
-		cr.ApprovedBy = approvedBy
+		if row.RejectedBy.Valid {
+			cr.RejectedBy = &row.RejectedBy.String
+		}
+		if row.RejectionReason.Valid {
+			cr.RejectionReason = &row.RejectionReason.String
+		}
 		requests = append(requests, cr)
-	}
-	if err := rows.Err(); err != nil {
-		h.logger.Error("iterate change request rows", zap.Error(err))
-		http.Error(w, `{"error":"iteration failed"}`, http.StatusInternalServerError)
-		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -167,11 +147,9 @@ func (h *ChangeRequestHandler) ProposeChangeRequest(w http.ResponseWriter, r *ht
 
 	// Fail fast with a clear error now rather than a confusing one at apply
 	// time, potentially much later once quorum is finally met.
-	var exists bool
-	if err := h.db.QueryRowContext(r.Context(), `
-		SELECT true FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key = $1 AND fe.environment = $2 AND f.project_id = $3
-	`, body.FlagKey, body.Environment, projectID).Scan(&exists); err != nil {
+	if _, err := sqlcgen.New(h.db).ChangeRequestTargetExists(r.Context(), sqlcgen.ChangeRequestTargetExistsParams{
+		Key: body.FlagKey, Environment: body.Environment, ProjectID: projectID,
+	}); err != nil {
 		if err == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "flag or environment not found")
 			return
@@ -193,21 +171,16 @@ func (h *ChangeRequestHandler) ProposeChangeRequest(w http.ResponseWriter, r *ht
 	// project's quorum mid-flight would silently downgrade the bar an
 	// in-flight proposal is held to — the two approvers who already voted
 	// under a stricter policy would never know the goalposts moved.
-	var requiredApprovals int
-	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT required_approvals FROM projects WHERE id = $1`, projectID,
-	).Scan(&requiredApprovals); err != nil {
+	requiredApprovals32, err := sqlcgen.New(h.db).GetProjectRequiredApprovals(r.Context(), projectID)
+	if err != nil {
 		h.logger.Error("propose change request read required_approvals", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-
-	var cr ChangeRequest
-	err = h.db.QueryRowContext(r.Context(), `
-		INSERT INTO change_requests (flag_key, environment, requested_by, status, change_payload, project_id, required_approvals)
-		VALUES ($1, $2, $3, 'PENDING', $4, $5, $6)
-		RETURNING id, EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-	`, body.FlagKey, body.Environment, actor, payload, projectID, requiredApprovals).Scan(&cr.ID, &cr.CreatedAt, &cr.UpdatedAt)
+	createRow, err := sqlcgen.New(h.db).CreateChangeRequest(r.Context(), sqlcgen.CreateChangeRequestParams{
+		FlagKey: body.FlagKey, Environment: body.Environment, RequestedBy: actor, ChangePayload: payload,
+		ProjectID: sql.NullString{String: projectID, Valid: true}, RequiredApprovals: requiredApprovals32,
+	})
 	if err != nil {
 		// idx_change_requests_one_pending_proposal (migration 020): only one
 		// applicable (flag-environment-shaped) proposal may be PENDING at a
@@ -223,8 +196,11 @@ func (h *ChangeRequestHandler) ProposeChangeRequest(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusInternalServerError, "insert failed")
 		return
 	}
-	cr.FlagKey, cr.Environment, cr.RequestedBy, cr.Status, cr.ChangePayload = body.FlagKey, body.Environment, actor, "PENDING", payload
-	cr.ApprovedBy = []string{}
+	cr := ChangeRequest{
+		ID: createRow.ID, CreatedAt: createRow.CreatedAt, UpdatedAt: createRow.UpdatedAt,
+		FlagKey: body.FlagKey, Environment: body.Environment, RequestedBy: actor, Status: "PENDING",
+		ChangePayload: payload, ApprovedBy: []string{},
+	}
 
 	h.writeAudit(r.Context(), projectID, body.FlagKey, body.Environment, actor, "change_request_proposed",
 		nil, map[string]any{"change_request_id": cr.ID, "enabled": body.Enabled, "rollout_pct": body.RolloutPct}, ipFromRequest(r))
@@ -296,20 +272,9 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var cr struct {
-		FlagKey           string
-		Environment       string
-		RequestedBy       string
-		ChangePayload     json.RawMessage
-		ApprovedBy        []string
-		RequiredApprovals int
-	}
-	err = tx.QueryRowContext(r.Context(), `
-		SELECT flag_key, environment, requested_by, change_payload, COALESCE(approved_by, '{}'), required_approvals
-		FROM change_requests
-		WHERE id = $1 AND project_id = $2 AND status = 'PENDING'
-		FOR UPDATE
-	`, id, projectID).Scan(&cr.FlagKey, &cr.Environment, &cr.RequestedBy, &cr.ChangePayload, pq.Array(&cr.ApprovedBy), &cr.RequiredApprovals)
+	crRow, err := sqlcgen.New(tx).GetChangeRequestForApproval(r.Context(), sqlcgen.GetChangeRequestForApprovalParams{
+		ID: id, ProjectID: sql.NullString{String: projectID, Valid: true},
+	})
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "change request not found or not in PENDING state")
 		return
@@ -318,6 +283,17 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 		h.logger.Error("approve change request lookup", zap.String("id", id), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
+	}
+	cr := struct {
+		FlagKey           string
+		Environment       string
+		RequestedBy       string
+		ChangePayload     json.RawMessage
+		ApprovedBy        []string
+		RequiredApprovals int
+	}{
+		FlagKey: crRow.FlagKey, Environment: crRow.Environment, RequestedBy: crRow.RequestedBy,
+		ChangePayload: crRow.ChangePayload, ApprovedBy: crRow.ApprovedBy, RequiredApprovals: int(crRow.RequiredApprovals),
 	}
 
 	// requested_by == actor rejects self-approval: the person who proposed a
@@ -352,9 +328,9 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 			// this is the only case that still lands on APPROVED.
 			status = "APPROVED"
 		}
-		if _, err := tx.ExecContext(r.Context(), `
-			UPDATE change_requests SET approved_by = $1, status = $2, updated_at = now() WHERE id = $3
-		`, pq.Array(newApprovedBy), status, id); err != nil {
+		if err := sqlcgen.New(tx).RecordApproval(r.Context(), sqlcgen.RecordApprovalParams{
+			ApprovedBy: newApprovedBy, Status: status, ID: id,
+		}); err != nil {
 			h.logger.Error("record approval", zap.String("id", id), zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "update failed")
 			return
@@ -374,13 +350,15 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	// Quorum met on a real flag-environment proposal — apply it now, in the
 	// same transaction as recording the approval that completed the quorum.
 	var prev FlagEnvironmentState
-	_ = tx.QueryRowContext(r.Context(), `
-		SELECT fe.flag_id, f.key, fe.environment, fe.enabled, fe.rollout_pct, f.safe_default,
-		       EXTRACT(EPOCH FROM fe.updated_at)::bigint
-		FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key = $1 AND fe.environment = $2 AND f.project_id = $3
-	`, cr.FlagKey, cr.Environment, projectID).Scan(&prev.FlagID, &prev.FlagKey, &prev.Environment,
-		&prev.Enabled, &prev.RolloutPct, &prev.SafeDefault, &prev.UpdatedAt)
+	if prevRow, prevErr := sqlcgen.New(tx).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: cr.FlagKey, Environment: cr.Environment, ProjectID: projectID,
+	}); prevErr == nil {
+		prev = FlagEnvironmentState{
+			FlagID: prevRow.FlagID, FlagKey: prevRow.Key, Environment: prevRow.Environment,
+			Enabled: prevRow.Enabled, RolloutPct: int(prevRow.RolloutPct), SafeDefault: prevRow.SafeDefault,
+			UpdatedAt: prevRow.UpdatedAt,
+		}
+	}
 
 	// updated_by is the approver whose action just executed this write, not
 	// the original proposer (cr.RequestedBy) — matching how every other
@@ -388,16 +366,16 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	// updated_by to whoever's API call performed the mutation. Self-approval
 	// is already rejected above, so actor != cr.RequestedBy is guaranteed
 	// here.
-	res, err := tx.ExecContext(r.Context(), `
-		UPDATE flag_environments fe SET enabled = $1, rollout_pct = $2, updated_at = now(), updated_by = $3
-		FROM flags f WHERE f.id = fe.flag_id AND f.key = $4 AND fe.environment = $5 AND f.project_id = $6
-	`, payload.Enabled, payload.RolloutPct, actor, cr.FlagKey, cr.Environment, projectID)
+	n, err := sqlcgen.New(tx).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+		Enabled: payload.Enabled, RolloutPct: int32(payload.RolloutPct), UpdatedBy: actor,
+		Key: cr.FlagKey, Environment: cr.Environment, ProjectID: projectID,
+	})
 	if err != nil {
 		h.logger.Error("apply change request", zap.String("id", id), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "apply failed")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		// The flag or environment this proposal targeted no longer exists —
 		// rolling back leaves the approval unrecorded so the caller can see
 		// the real error and decide (reject the now-stale request, etc.)
@@ -406,9 +384,9 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if _, err := tx.ExecContext(r.Context(), `
-		UPDATE change_requests SET approved_by = $1, status = 'APPLIED', updated_at = now() WHERE id = $2
-	`, pq.Array(newApprovedBy), id); err != nil {
+	if err := sqlcgen.New(tx).FinalizeAppliedChangeRequest(r.Context(), sqlcgen.FinalizeAppliedChangeRequestParams{
+		ApprovedBy: newApprovedBy, ID: id,
+	}); err != nil {
 		h.logger.Error("finalize applied change request", zap.String("id", id), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "update failed")
 		return
@@ -458,17 +436,15 @@ func (h *ChangeRequestHandler) RejectChangeRequest(w http.ResponseWriter, r *htt
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body) // reason is optional; an empty/absent body is not an error
 
-	var flagKey, environment string
 	now := time.Now().UTC()
-	err := h.db.QueryRowContext(r.Context(), `
-		UPDATE change_requests
-		SET status           = 'REJECTED',
-		    rejected_by      = $1,
-		    rejection_reason = $2,
-		    updated_at       = $3
-		WHERE id = $4 AND status = 'PENDING' AND project_id = $5
-		RETURNING flag_key, environment
-	`, actor, body.Reason, now, id, projectID).Scan(&flagKey, &environment)
+	rejectRow, err := sqlcgen.New(h.db).RejectChangeRequest(r.Context(), sqlcgen.RejectChangeRequestParams{
+		RejectedBy:      sql.NullString{String: actor, Valid: true},
+		RejectionReason: sql.NullString{String: body.Reason, Valid: true},
+		UpdatedAt:       now,
+		ID:              id,
+		ProjectID:       sql.NullString{String: projectID, Valid: true},
+	})
+	flagKey, environment := rejectRow.FlagKey, rejectRow.Environment
 	if err == sql.ErrNoRows {
 		http.Error(w, `{"error":"change request not found or not in PENDING state"}`, http.StatusNotFound)
 		return

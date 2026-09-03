@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/secrets"
 	"github.com/tombstone/flag-api/internal/transparency"
@@ -116,31 +117,20 @@ func (h *FlagHandler) ListFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT f.id, f.key, f.project_id, f.name, f.description,
-		       f.flag_type, f.state, f.owner_id, f.safe_default,
-		       EXTRACT(EPOCH FROM f.created_at)::bigint,
-		       EXTRACT(EPOCH FROM f.updated_at)::bigint
-		FROM flags f
-		WHERE f.project_id = $1 AND f.state != 'ARCHIVED'
-		ORDER BY f.created_at DESC
-	`, projectID)
+	rows, err := sqlcgen.New(h.db).ListFlags(r.Context(), projectID)
 	if err != nil {
 		h.logger.Error("list flags query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
 
 	flags := []Flag{}
-	for rows.Next() {
-		var f Flag
-		if err := rows.Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description,
-			&f.FlagType, &f.State, &f.OwnerID, &f.SafeDefault, &f.CreatedAt, &f.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
-		}
-		flags = append(flags, f)
+	for _, row := range rows {
+		flags = append(flags, Flag{
+			ID: row.ID, Key: row.Key, ProjectID: row.ProjectID, Name: row.Name, Description: row.Description,
+			FlagType: row.FlagType, State: row.State, OwnerID: row.OwnerID, SafeDefault: row.SafeDefault,
+			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"flags": flags, "total": len(flags)})
 }
@@ -180,35 +170,33 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 	// let a different project silently reuse a key another project already
 	// archived, which is precisely the fat-finger-reuse risk it exists to
 	// close. This is a conscious TEN-1a decision, not an oversight.
-	var exists bool
-	_ = h.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM flag_tombstones WHERE key=$1)`, req.Key).Scan(&exists)
+	exists, _ := sqlcgen.New(h.db).FlagTombstoneExists(r.Context(), req.Key)
 	if exists {
 		writeError(w, http.StatusConflict, fmt.Sprintf("flag key %q is tombstoned and cannot be reused (Knight Capital prevention)", req.Key))
 		return
 	}
 
 	actor := actorFromContext(r.Context())
-	var f Flag
-	err := h.db.QueryRowContext(r.Context(), `
-		INSERT INTO flags (key, project_id, name, description, flag_type, state, owner_id, safe_default)
-		VALUES ($1,$2,$3,$4,$5,'ACTIVE',$6,$7)
-		RETURNING id, key, project_id, name, description, flag_type, state, owner_id, safe_default,
-		          EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-	`, req.Key, projectID, req.Name, req.Description, req.FlagType, req.OwnerID, req.SafeDefault).
-		Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description, &f.FlagType, &f.State,
-			&f.OwnerID, &f.SafeDefault, &f.CreatedAt, &f.UpdatedAt)
+	row, err := sqlcgen.New(h.db).CreateFlag(r.Context(), sqlcgen.CreateFlagParams{
+		Key: req.Key, ProjectID: projectID, Name: req.Name, Description: req.Description,
+		FlagType: req.FlagType, OwnerID: req.OwnerID, SafeDefault: req.SafeDefault,
+	})
 	if err != nil {
 		h.logger.Error("create flag", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	f := Flag{
+		ID: row.ID, Key: row.Key, ProjectID: row.ProjectID, Name: row.Name, Description: row.Description,
+		FlagType: row.FlagType, State: row.State, OwnerID: row.OwnerID, SafeDefault: row.SafeDefault,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+	}
 
 	// Create default environment rows
 	for _, env := range []string{"development", "staging", "production"} {
-		_, _ = h.db.ExecContext(r.Context(), `
-			INSERT INTO flag_environments (flag_id, environment, enabled, rollout_pct, updated_by)
-			VALUES ($1,$2,false,0,$3) ON CONFLICT DO NOTHING
-		`, f.ID, env, actor)
+		_ = sqlcgen.New(h.db).CreateDefaultFlagEnvironment(r.Context(), sqlcgen.CreateDefaultFlagEnvironmentParams{
+			FlagID: f.ID, Environment: env, UpdatedBy: actor,
+		})
 	}
 
 	h.writeAudit(r.Context(), projectID, f.Key, "", actor, "flag_created", nil, &f, ipFromRequest(r))
@@ -227,13 +215,7 @@ func (h *FlagHandler) GetFlag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var f Flag
-	err := h.db.QueryRowContext(r.Context(), `
-		SELECT id, key, project_id, name, description, flag_type, state, owner_id, safe_default,
-		       EXTRACT(EPOCH FROM created_at)::bigint, EXTRACT(EPOCH FROM updated_at)::bigint
-		FROM flags WHERE key=$1 AND project_id=$2
-	`, key, projectID).Scan(&f.ID, &f.Key, &f.ProjectID, &f.Name, &f.Description, &f.FlagType, &f.State,
-		&f.OwnerID, &f.SafeDefault, &f.CreatedAt, &f.UpdatedAt)
+	row, err := sqlcgen.New(h.db).GetFlag(r.Context(), sqlcgen.GetFlagParams{Key: key, ProjectID: projectID})
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
@@ -241,6 +223,11 @@ func (h *FlagHandler) GetFlag(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	f := Flag{
+		ID: row.ID, Key: row.Key, ProjectID: row.ProjectID, Name: row.Name, Description: row.Description,
+		FlagType: row.FlagType, State: row.State, OwnerID: row.OwnerID, SafeDefault: row.SafeDefault,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}
 	writeJSON(w, http.StatusOK, f)
 }
@@ -333,23 +320,25 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 
 	// Get current state for audit
 	var prev FlagEnvironmentState
-	_ = tx.QueryRowContext(r.Context(), `
-		SELECT fe.flag_id, f.key, fe.environment, fe.enabled, fe.rollout_pct, f.safe_default,
-		       EXTRACT(EPOCH FROM fe.updated_at)::bigint
-		FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key=$1 AND fe.environment=$2 AND f.project_id=$3
-	`, key, env, projectID).Scan(&prev.FlagID, &prev.FlagKey, &prev.Environment, &prev.Enabled,
-		&prev.RolloutPct, &prev.SafeDefault, &prev.UpdatedAt)
+	if prevRow, prevErr := sqlcgen.New(tx).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: key, Environment: env, ProjectID: projectID,
+	}); prevErr == nil {
+		prev = FlagEnvironmentState{
+			FlagID: prevRow.FlagID, FlagKey: prevRow.Key, Environment: prevRow.Environment,
+			Enabled: prevRow.Enabled, RolloutPct: int(prevRow.RolloutPct), SafeDefault: prevRow.SafeDefault,
+			UpdatedAt: prevRow.UpdatedAt,
+		}
+	}
 
-	res, err := tx.ExecContext(r.Context(), `
-		UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
-		FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
-	`, req.Enabled, req.RolloutPct, req.UpdatedBy, key, env, projectID)
+	n, err := sqlcgen.New(tx).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+		Enabled: req.Enabled, RolloutPct: int32(req.RolloutPct), UpdatedBy: req.UpdatedBy,
+		Key: key, Environment: env, ProjectID: projectID,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		writeError(w, http.StatusNotFound, "flag or environment not found")
 		return
 	}
@@ -430,15 +419,14 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	)
 
 	actor := actorFromContext(r.Context())
-	res, err := h.db.ExecContext(r.Context(), `
-		UPDATE flag_environments fe SET enabled=false, updated_at=now(), updated_by=$1
-		FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.project_id=$4
-	`, actor, key, req.Environment, projectID)
+	n, err := sqlcgen.New(h.db).KillSwitchFlagEnvironment(r.Context(), sqlcgen.KillSwitchFlagEnvironmentParams{
+		UpdatedBy: actor, Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		writeError(w, http.StatusNotFound, "flag or environment not found")
 		return
 	}
@@ -479,19 +467,16 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(r.Context(),
-		`UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2`, key, projectID)
+	n, err := sqlcgen.New(tx).ArchiveFlag(r.Context(), sqlcgen.ArchiveFlagParams{Key: key, ProjectID: projectID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO flag_tombstones (key, archived_by) VALUES ($1,$2) ON CONFLICT DO NOTHING`, key, actor)
-	if err != nil {
+	if err := sqlcgen.New(tx).CreateFlagTombstone(r.Context(), sqlcgen.CreateFlagTombstoneParams{Key: key, ArchivedBy: actor}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -612,9 +597,11 @@ func (h *FlagHandler) writeAudit(ctx context.Context, projectID, flagKey, env, a
 				return
 			}
 
-			if _, updateErr := db.ExecContext(rekorCtx, `
-				UPDATE audit_log SET rekor_log_id=$1, rekor_log_index=$2 WHERE id=$3
-			`, logID, logIndex, entryID); updateErr != nil {
+			if updateErr := sqlcgen.New(db).BackfillAuditLogRekor(rekorCtx, sqlcgen.BackfillAuditLogRekorParams{
+				RekorLogID:    sql.NullString{String: logID, Valid: true},
+				RekorLogIndex: sql.NullInt64{Int64: logIndex, Valid: true},
+				ID:            entryID,
+			}); updateErr != nil {
 				logger.Warn("rekor back-fill update failed",
 					zap.String("entry_id", entryID),
 					zap.Error(updateErr),
@@ -669,10 +656,8 @@ const breakGlassHeader = "X-Break-Glass-Token"
 // snapshotted, because a proposal's quorum has to stay stable across
 // multiple approvals collected over time).
 func (h *FlagHandler) projectRequiresApproval(ctx context.Context, projectID string) (bool, error) {
-	var requireApproval bool
-	if err := h.db.QueryRowContext(ctx,
-		`SELECT require_approval FROM projects WHERE id = $1`, projectID,
-	).Scan(&requireApproval); err != nil {
+	requireApproval, err := sqlcgen.New(h.db).GetProjectRequireApproval(ctx, projectID)
+	if err != nil {
 		h.logger.Error("read require_approval", zap.Error(err))
 		return false, err
 	}
