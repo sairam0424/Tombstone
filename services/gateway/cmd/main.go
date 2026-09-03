@@ -120,10 +120,31 @@ func main() {
 	metricsH := v1.NewGatewayMetricsHandler(h, logger)
 	dlqH := v1.NewDLQHandler(rdb, logger)
 
+	// OBS-1 (gateway rollout): pull-based, no OTLP_ENDPOINT/collector
+	// needed — unlike InitTracer, there's no "unset means no-op" branch.
+	// Mirrors flag-api's own OBS-1 slice exactly (same middleware, same
+	// metric names/labels) so both services' RED metrics are directly
+	// comparable in one dashboard. Note for /api/v1/stream specifically:
+	// SSE connections are long-lived, so this middleware's count/duration
+	// for that route only records once a connection FINALLY closes, not
+	// when it opens — "requests in flight" isn't something this RED
+	// middleware surfaces for streaming routes; AllConnectionCounts
+	// (/health, /api/v1/gateway/metrics) is the existing mechanism for
+	// that, and stays unchanged by this rollout.
+	meter, metricsHandler, err := telemetry.InitMeter("gateway")
+	if err != nil {
+		logger.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		logger.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(httpMetrics)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "OPTIONS"},
@@ -139,6 +160,13 @@ func main() {
 	// Gateway has no Postgres dependency; readiness is gated on Redis only.
 	healthChecker := &health.Checker{RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above. Network-level access control
+	// (not app-level auth) is the expected boundary for scrape endpoints.
+	// Distinct from /api/v1/gateway/metrics below, which is gateway's own
+	// JSON connection-stats endpoint, not a Prometheus exposition.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/stream", sseH.Stream)
