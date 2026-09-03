@@ -253,6 +253,21 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// DATA-1b PR 4/4: this had no bounds check before sqlc — an out-of-range
+	// rollout_pct simply hit flag_environments' own CHECK(rollout_pct BETWEEN
+	// 0 AND 100) constraint and errored cleanly. sqlc's generated
+	// UpdateFlagEnvironmentParams.RolloutPct is int32 (matching the column),
+	// forcing an explicit int32(req.RolloutPct) conversion at the call
+	// site below — Go's narrowing conversion wraps out-of-int32-range values
+	// via modular arithmetic instead of erroring, so a sufficiently large
+	// value could wrap into an in-range one and silently defeat the DB's own
+	// check. Validating here (matching ProposeChangeRequest's identical
+	// check) closes that gap instead of relying on a range check that this
+	// conversion silently bypasses.
+	if req.RolloutPct < 0 || req.RolloutPct > 100 {
+		writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
+		return
+	}
 
 	span.SetAttributes(
 		attribute.String("flag.key", key),

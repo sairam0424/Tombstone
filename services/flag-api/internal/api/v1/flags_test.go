@@ -244,6 +244,51 @@ func TestCreateFlag_Validation(t *testing.T) {
 	}
 }
 
+// TestUpdateEnvironment_RolloutPctValidation is the regression test for a
+// bug DATA-1b PR 4/4's adversarial review found: sqlc generates an int32
+// field for UpdateFlagEnvironmentParams.RolloutPct (matching the column's
+// INTEGER type), forcing an explicit int32(req.RolloutPct) conversion —
+// before this PR, UpdateEnvironment had NO application-level bounds check
+// and relied entirely on flag_environments' own CHECK(rollout_pct BETWEEN
+// 0 AND 100) constraint, since the raw Go int was passed straight to the
+// driver and Postgres's own int4 range checking caught anything out of
+// range. Go's narrowing int32 conversion wraps out-of-range values via
+// modular arithmetic instead of erroring (int32(4294967346) == 50), which
+// would have silently defeated that DB-level safety net. Validation
+// returns before any DB access, so this is a pure unit test — same
+// established pattern as TestCreateFlag_Validation above.
+func TestUpdateEnvironment_RolloutPctValidation(t *testing.T) {
+	h := &FlagHandler{db: nil, rdb: nil, logger: zap.NewNop()}
+
+	// Every case here must be REJECTED before any DB access — h.db is nil,
+	// matching TestCreateFlag_Validation's established pattern, so a case
+	// that got past validation would panic on the nil DB rather than
+	// cleanly failing, not just fail the status-code assertion.
+	cases := []struct {
+		name       string
+		rolloutPct int
+		wantStatus int
+	}{
+		{name: "negative value returns 400", rolloutPct: -1, wantStatus: http.StatusBadRequest},
+		{name: "value over 100 returns 400", rolloutPct: 101, wantStatus: http.StatusBadRequest},
+		{name: "int32-wraps-to-in-range value still returns 400, not 200", rolloutPct: 4294967346, wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := changeRequestRequestAs(t, http.MethodPatch, "/api/v1/flags/x/environments/production",
+				map[string]any{"enabled": true, "rollout_pct": tc.rolloutPct}, "test-project", "tester",
+				map[string]string{"key": "x", "env": "production"})
+			rec := httptest.NewRecorder()
+			h.UpdateEnvironment(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("rollout_pct=%d: status = %d, want %d; body: %s", tc.rolloutPct, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestValidFlagTypes verifies the ValidFlagTypes map is complete and correct.
 // This is the service-layer guard that mirrors the DB CHECK constraint.
 func TestValidFlagTypes_Map(t *testing.T) {
