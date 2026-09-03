@@ -22,6 +22,8 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jws"
 	oidcjwt "github.com/lestrrat-go/jwx/v3/jwt"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // SSOConfig holds the configuration for the SSO middleware.
@@ -530,9 +532,7 @@ func (s *SSOMiddleware) logMFAEvent(ctx context.Context, email string, amr []str
 		s.logger.Warn("sso: mfa event log skipped — no db configured", zap.String("event_type", eventType))
 		return
 	}
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO user_mfa_log (user_id, event_type) VALUES ($1, $2)
-	`, email, eventType); err != nil {
+	if err := sqlcgen.New(s.db).InsertMFALogEvent(ctx, sqlcgen.InsertMFALogEventParams{UserID: email, EventType: eventType}); err != nil {
 		s.logger.Warn("sso: mfa event log write failed", zap.Error(err), zap.String("event_type", eventType))
 	}
 }

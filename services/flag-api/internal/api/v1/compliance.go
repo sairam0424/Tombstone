@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -37,39 +38,27 @@ func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.Compli
 // Returns a SOC 2 evidence bundle computed from live database state.
 func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	q := sqlcgen.New(h.db)
 
 	// Total audit log entries.
-	var totalAuditEntries int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&totalAuditEntries)
+	totalAuditEntries64, _ := q.CountAuditLogEntries(ctx)
+	totalAuditEntries := int(totalAuditEntries64)
 
 	// Approval rate: APPROVED or APPLIED out of all non-PENDING change requests.
-	var approved, total int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT
-		    COUNT(*) FILTER (WHERE status IN ('APPROVED','APPLIED')),
-		    COUNT(*)
-		FROM change_requests
-		WHERE status != 'PENDING'
-	`).Scan(&approved, &total)
+	stats, _ := q.ChangeRequestApprovalStats(ctx)
+	approved, total := int(stats.Approved), int(stats.Total)
 	var approvalRate float64
 	if total > 0 {
 		approvalRate = float64(approved) / float64(total)
 	}
 
 	// Break-glass token uses in last 90 days.
-	var breakGlassUses int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM break_glass_tokens
-		WHERE used = true
-		  AND used_at >= now() - INTERVAL '90 days'
-	`).Scan(&breakGlassUses)
+	breakGlassUses64, _ := q.CountRecentBreakGlassUses(ctx)
+	breakGlassUses := int(breakGlassUses64)
 
 	// Active service tokens (not revoked).
-	var serviceTokensActive int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM service_tokens WHERE revoked_at IS NULL
-	`).Scan(&serviceTokensActive)
+	serviceTokensActive64, _ := q.CountActiveServiceTokens(ctx)
+	serviceTokensActive := int(serviceTokensActive64)
 
 	type control struct {
 		ID          string `json:"id"`
@@ -160,8 +149,8 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 	if h.policySource != nil {
 		source = h.policySource()
 	}
-	var roleAssignments int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_roles`).Scan(&roleAssignments)
+	roleAssignments64, _ := q.CountRoleAssignments(ctx)
+	roleAssignments := int(roleAssignments64)
 	evidence["rbac"] = map[string]any{
 		"policy_source":    source,
 		"role_assignments": roleAssignments,
@@ -306,6 +295,16 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Deliberately NOT converted to sqlc (DATA-1b adversarial review): sqlc's
+	// generated :many methods always fully materialize the whole result set
+	// into a slice before returning, but this handler is written to STREAM —
+	// scan and write one row at a time so memory use is O(1) regardless of
+	// how large a project's audit history has grown (retention/DATA-2 prunes
+	// the hot table on its own schedule, not on every export call) and so the
+	// client starts receiving bytes immediately rather than waiting for the
+	// entire history to be fetched first. Going through sqlc here would have
+	// silently regressed both properties for no benefit, since the whole
+	// point of streaming is bypassed by a method that returns []Row.
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
@@ -351,6 +350,18 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		mac.Write(line)
 		_, _ = fmt.Fprintf(w, "%s\n", line)
 		lineCount++
+	}
+	// A stream that failed mid-iteration (connection blip, context
+	// cancellation) must NOT get a signature line: the HTTP status is
+	// already committed to 200 by this point, so the only available signal
+	// that the export is truncated is the ABSENCE of the trailing signature
+	// -- a signature covering only the partial data already written would
+	// otherwise validate as a complete, authentic export to any consumer
+	// checking it, which is worse than no signature at all for a
+	// cryptographically-signed compliance artifact.
+	if err := rows.Err(); err != nil {
+		h.logger.Error("audit export: stream failed before completion, omitting signature", zap.Error(err))
+		return
 	}
 
 	sig := secrets.Sum(mac)

@@ -2,7 +2,7 @@
 # Use docker context desktop-linux automatically (macOS Docker Desktop)
 COMPOSE := docker compose -f infra/docker-compose.yml
 
-.PHONY: help dev down migrate seed gen-proto test build lint
+.PHONY: help dev down migrate seed gen-proto gen-sqlc test build lint
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +31,9 @@ seed: ## Insert sample flags into dev database
 
 gen-proto: ## Generate Go stubs from proto files (requires protoc)
 	bash scripts/gen-proto.sh
+
+gen-sqlc: ## Regenerate flag-api's type-safe query package from internal/db/queries/*.sql (requires sqlc, DATA-1b)
+	cd services/flag-api && sqlc generate
 
 test: ## Run all tests (Go + TypeScript + Python)
 	@echo "--- Go tests ---"

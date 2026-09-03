@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 type SnapshotHandler struct {
@@ -71,33 +73,32 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT fe.flag_id, f.key, fe.environment, fe.enabled, fe.rollout_pct, f.safe_default,
-		       EXTRACT(EPOCH FROM fe.updated_at)::bigint
-		FROM flag_environments fe
-		JOIN flags f ON f.id = fe.flag_id
-		WHERE fe.environment = $1 AND f.state = 'ACTIVE' AND f.project_id = $2
-		ORDER BY f.key
-	`, env, projectID)
+	q := sqlcgen.New(h.db)
+	snapRows, err := q.GetEnvironmentSnapshot(r.Context(), sqlcgen.GetEnvironmentSnapshotParams{
+		Environment: env,
+		ProjectID:   projectID,
+	})
 	if err != nil {
 		h.logger.Error("snapshot query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
 
 	// Build index: flag_id -> FlagEnvironmentStateWithPrereqs
 	// We use a slice to preserve ORDER BY f.key ordering.
 	flags := []FlagEnvironmentStateWithPrereqs{}
 	flagIndexByID := map[string]int{} // flag_id -> slice index
 
-	for rows.Next() {
-		var s FlagEnvironmentStateWithPrereqs
-		s.Prerequisites = []SnapshotPrerequisite{} // always a JSON array, never null
-		if err := rows.Scan(&s.FlagID, &s.FlagKey, &s.Environment, &s.Enabled,
-			&s.RolloutPct, &s.SafeDefault, &s.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
+	for _, row := range snapRows {
+		s := FlagEnvironmentStateWithPrereqs{
+			FlagID:        row.FlagID,
+			FlagKey:       row.Key,
+			Environment:   row.Environment,
+			Enabled:       row.Enabled,
+			RolloutPct:    int(row.RolloutPct),
+			SafeDefault:   row.SafeDefault,
+			UpdatedAt:     row.UpdatedAt,
+			Prerequisites: []SnapshotPrerequisite{}, // always a JSON array, never null
 		}
 		flagIndexByID[s.FlagID] = len(flags)
 		flags = append(flags, s)
@@ -105,28 +106,24 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	// Load all prerequisites for flags in this environment in a single query
 	// and attach them to the corresponding flag entries.
-	prereqRows, err := h.db.QueryContext(r.Context(), `
-		SELECT fp.flag_id, fp.id, fp.prereq_flag_key, fp.required_variation, fp.gate, fp.priority
-		FROM flag_prerequisites fp
-		JOIN flag_environments fe ON fe.flag_id = fp.flag_id
-		JOIN flags f ON f.id = fp.flag_id
-		WHERE fe.environment = $1 AND f.state = 'ACTIVE' AND f.project_id = $2
-		ORDER BY fp.flag_id, fp.priority ASC, fp.created_at ASC
-	`, env, projectID)
+	prereqRows, err := q.GetEnvironmentSnapshotPrerequisites(r.Context(), sqlcgen.GetEnvironmentSnapshotPrerequisitesParams{
+		Environment: env,
+		ProjectID:   projectID,
+	})
 	if err != nil {
 		// Non-fatal: return snapshot without prerequisites rather than fail.
 		h.logger.Warn("prerequisites query failed; returning snapshot without prerequisites",
 			zap.Error(err))
 	} else {
-		defer prereqRows.Close()
-		for prereqRows.Next() {
-			var flagID string
-			var p SnapshotPrerequisite
-			if err := prereqRows.Scan(&flagID, &p.ID, &p.PrereqFlagKey,
-				&p.RequiredVariation, &p.Gate, &p.Priority); err != nil {
-				continue
+		for _, pr := range prereqRows {
+			p := SnapshotPrerequisite{
+				ID:                pr.ID,
+				PrereqFlagKey:     pr.PrereqFlagKey,
+				RequiredVariation: pr.RequiredVariation,
+				Gate:              pr.Gate,
+				Priority:          int(pr.Priority),
 			}
-			if idx, ok := flagIndexByID[flagID]; ok {
+			if idx, ok := flagIndexByID[pr.FlagID]; ok {
 				flags[idx].Prerequisites = append(flags[idx].Prerequisites, p)
 			}
 		}

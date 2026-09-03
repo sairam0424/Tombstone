@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // ContextKeyProjectID carries the request's resolved, authoritative
@@ -66,10 +68,7 @@ func (r *RBACMiddleware) RequireProjectID(next http.Handler) http.Handler {
 			return
 		}
 
-		var member bool
-		err := r.db.QueryRowContext(ctx, `
-			SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=$1 AND project_id=$2)
-		`, actor, headerPID).Scan(&member)
+		member, err := sqlcgen.New(r.db).IsProjectMember(ctx, sqlcgen.IsProjectMemberParams{UserID: actor, ProjectID: headerPID})
 		if err != nil || !member {
 			r.logger.Warn("[tenancy] project membership denied",
 				zap.String("actor", actor), zap.String("project_id", headerPID))

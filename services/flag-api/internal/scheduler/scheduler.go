@@ -27,6 +27,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 const tickInterval = 30 * time.Second
@@ -55,11 +56,11 @@ type pendingChange struct {
 	flagKey       string
 	environment   string
 	changePayload []byte
-	// projectID is NULL for rows written before migration 016 (legacy rows —
+	// projectID is "" for rows written before migration 016 (legacy rows —
 	// see that migration's comment for why they are never backfilled).
 	// applyChange refuses to execute a row with no project_id rather than
 	// falling back to a project-blind match.
-	projectID sql.NullString
+	projectID string
 }
 
 // changePayloadFields mirrors the API struct — enabled and/or rollout_pct.
@@ -93,32 +94,25 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, flag_key, environment, change_payload, project_id
-		FROM scheduled_changes
-		WHERE (status = 'PENDING' AND scheduled_for <= NOW())
-		   OR (status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW())
-		ORDER BY scheduled_for ASC
-		FOR UPDATE SKIP LOCKED
-	`)
+	rows, err := sqlcgen.New(tx).SelectDueScheduledChanges(ctx)
 	if err != nil {
 		logger.Error("scheduler: query pending changes failed", zap.Error(err))
 		return
 	}
-	defer rows.Close()
 
-	var due []pendingChange
-	for rows.Next() {
-		var pc pendingChange
-		if err := rows.Scan(&pc.id, &pc.flagKey, &pc.environment, &pc.changePayload, &pc.projectID); err != nil {
-			logger.Error("scheduler: scan row failed", zap.Error(err))
-			continue
-		}
-		due = append(due, pc)
-	}
-	if err := rows.Err(); err != nil {
-		logger.Error("scheduler: rows iteration error", zap.Error(err))
-		return
+	due := make([]pendingChange, 0, len(rows))
+	for _, r := range rows {
+		due = append(due, pendingChange{
+			id:            r.ID,
+			flagKey:       r.FlagKey,
+			environment:   r.Environment,
+			changePayload: r.ChangePayload,
+			// project_id is nullable (legacy pre-migration-016 rows are left
+			// NULL, never backfilled) -- sql.NullString.String is "" when
+			// NULL, matching this field's "" == "no project" convention.
+			// applyChange's own check refuses to execute such a row.
+			projectID: r.ProjectID.String,
+		})
 	}
 	// Commit the lock-acquisition transaction before executing changes
 	// (each applyChange opens its own sub-operation).
@@ -156,22 +150,17 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	// be matched to a flag safely — flags.key is unique only per
 	// (project_id, key), so matching by key alone risks mutating a DIFFERENT
 	// project's same-keyed flag. Refuse rather than guess.
-	if !pc.projectID.Valid {
+	if pc.projectID == "" {
 		markFailed(ctx, db, log, pc.id, "scheduled change has no project_id (legacy row) — cannot execute safely")
 		return
 	}
-	projectID := pc.projectID.String
+	projectID := pc.projectID
 
 	// Read current flag environment state for audit and to fill in unchanged fields.
-	var curEnabled bool
-	var curRollout int
-	var flagID string
-	err := db.QueryRowContext(ctx, `
-		SELECT fe.enabled, fe.rollout_pct, fe.flag_id
-		FROM flag_environments fe
-		JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key = $1 AND fe.environment = $2 AND f.project_id = $3
-	`, pc.flagKey, pc.environment, projectID).Scan(&curEnabled, &curRollout, &flagID)
+	q := sqlcgen.New(db)
+	state, err := q.GetCurrentFlagEnvironmentState(ctx, sqlcgen.GetCurrentFlagEnvironmentStateParams{
+		Key: pc.flagKey, Environment: pc.environment, ProjectID: projectID,
+	})
 	if err == sql.ErrNoRows {
 		markFailed(ctx, db, log, pc.id,
 			fmt.Sprintf("flag %q environment %q not found", pc.flagKey, pc.environment))
@@ -181,6 +170,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		markFailed(ctx, db, log, pc.id, "read current state failed: "+err.Error())
 		return
 	}
+	curEnabled, curRollout := state.Enabled, int(state.RolloutPct)
 
 	// Merge: apply only the fields present in the payload.
 	newEnabled := curEnabled
@@ -193,28 +183,25 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	}
 
 	// Apply the flag environment update (same logic as handlers.UpdateEnvironment).
-	res, err := db.ExecContext(ctx, `
-		UPDATE flag_environments fe
-		SET enabled = $1, rollout_pct = $2, updated_at = now(), updated_by = 'scheduler'
-		FROM flags f
-		WHERE f.id = fe.flag_id AND f.key = $3 AND fe.environment = $4 AND f.project_id = $5
-	`, newEnabled, newRollout, pc.flagKey, pc.environment, projectID)
+	n, err := q.ApplyScheduledFlagEnvironmentUpdate(ctx, sqlcgen.ApplyScheduledFlagEnvironmentUpdateParams{
+		Enabled:     newEnabled,
+		RolloutPct:  int32(newRollout),
+		Key:         pc.flagKey,
+		Environment: pc.environment,
+		ProjectID:   projectID,
+	})
 	if err != nil {
 		markFailed(ctx, db, log, pc.id, "flag environment update failed: "+err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		markFailed(ctx, db, log, pc.id,
 			fmt.Sprintf("flag %q environment %q not found during update", pc.flagKey, pc.environment))
 		return
 	}
 
 	// Mark EXECUTED.
-	if _, err := db.ExecContext(ctx, `
-		UPDATE scheduled_changes
-		SET status = 'EXECUTED', executed_at = NOW()
-		WHERE id = $1
-	`, pc.id); err != nil {
+	if err := q.MarkScheduledChangeExecuted(ctx, pc.id); err != nil {
 		// The flag update already happened — log but don't fail the whole pipeline.
 		log.Error("scheduler: failed to mark EXECUTED (flag was updated)", zap.Error(err))
 	}
@@ -301,20 +288,18 @@ func backoffDuration(retryCount int) time.Duration {
 func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg string) {
 	log.Error("scheduler: change failed", zap.String("error", errMsg))
 
-	var retryCount, maxRetries int
-	if err := db.QueryRowContext(ctx, `
-		SELECT retry_count, max_retries FROM scheduled_changes WHERE id = $1
-	`, id).Scan(&retryCount, &maxRetries); err != nil {
+	q := sqlcgen.New(db)
+	retryState, err := q.GetScheduledChangeRetryState(ctx, id)
+	if err != nil {
 		log.Error("scheduler: failed to read retry state, marking terminal FAILED", zap.Error(err))
-		if _, execErr := db.ExecContext(ctx, `
-			UPDATE scheduled_changes
-			SET status = 'FAILED', error_message = $1
-			WHERE id = $2
-		`, errMsg, id); execErr != nil {
+		if execErr := q.MarkScheduledChangeFailedNoRetryState(ctx, sqlcgen.MarkScheduledChangeFailedNoRetryStateParams{
+			ErrorMessage: sql.NullString{String: errMsg, Valid: true}, ID: id,
+		}); execErr != nil {
 			log.Error("scheduler: failed to mark FAILED", zap.Error(execErr))
 		}
 		return
 	}
+	retryCount, maxRetries := int(retryState.RetryCount), int(retryState.MaxRetries)
 
 	retryCount++
 
@@ -328,11 +313,12 @@ func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg str
 			zap.Int("max_retries", maxRetries),
 			zap.Time("next_retry_at", nextRetryAt))
 
-		if _, err := db.ExecContext(ctx, `
-			UPDATE scheduled_changes
-			SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = $3
-			WHERE id = $4
-		`, errMsg, retryCount, nextRetryAt, id); err != nil {
+		if err := q.MarkScheduledChangeFailedRetryPending(ctx, sqlcgen.MarkScheduledChangeFailedRetryPendingParams{
+			ErrorMessage: sql.NullString{String: errMsg, Valid: true},
+			RetryCount:   int32(retryCount),
+			NextRetryAt:  sql.NullTime{Time: nextRetryAt, Valid: true},
+			ID:           id,
+		}); err != nil {
 			log.Error("scheduler: failed to mark FAILED (retry pending)", zap.Error(err))
 		}
 		return
@@ -347,11 +333,11 @@ func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg str
 		zap.Int("retry_count", retryCount),
 		zap.Int("max_retries", maxRetries))
 
-	if _, err := db.ExecContext(ctx, `
-		UPDATE scheduled_changes
-		SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = NULL
-		WHERE id = $3
-	`, errMsg, retryCount, id); err != nil {
+	if err := q.MarkScheduledChangeFailedTerminal(ctx, sqlcgen.MarkScheduledChangeFailedTerminalParams{
+		ErrorMessage: sql.NullString{String: errMsg, Valid: true},
+		RetryCount:   int32(retryCount),
+		ID:           id,
+	}); err != nil {
 		log.Error("scheduler: failed to mark FAILED (terminal)", zap.Error(err))
 	}
 }

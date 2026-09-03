@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sqlc-dev/pqtype"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // cleanupInterval is how often expired idempotency_keys rows are purged.
@@ -101,13 +104,13 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 
 			requestHash := fmt.Sprintf("%x", sha256.Sum256(bodyBytes))
 
-			var id string
-			insertErr := m.db.QueryRowContext(r.Context(), `
-				INSERT INTO idempotency_keys (actor, idempotency_key, endpoint, request_hash)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (actor, idempotency_key, endpoint) DO NOTHING
-				RETURNING id
-			`, actor, key, endpoint, requestHash).Scan(&id)
+			q := sqlcgen.New(m.db)
+			id, insertErr := q.InsertIdempotencyKey(r.Context(), sqlcgen.InsertIdempotencyKeyParams{
+				Actor:          actor,
+				IdempotencyKey: key,
+				Endpoint:       endpoint,
+				RequestHash:    requestHash,
+			})
 
 			if insertErr == nil {
 				// New key — this is the only path where the real handler runs,
@@ -116,11 +119,11 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 				rec := &idempotencyResponseRecorder{ResponseWriter: w}
 				next.ServeHTTP(rec, r)
 
-				if _, updateErr := m.db.ExecContext(r.Context(), `
-					UPDATE idempotency_keys
-					SET response_status = $1, response_body = $2, completed_at = now()
-					WHERE id = $3
-				`, rec.status, rec.body.Bytes(), id); updateErr != nil {
+				if updateErr := q.UpdateIdempotencyKeyResponse(r.Context(), sqlcgen.UpdateIdempotencyKeyResponseParams{
+					ResponseStatus: sql.NullInt32{Int32: int32(rec.status), Valid: true},
+					ResponseBody:   pqtype.NullRawMessage{RawMessage: rec.body.Bytes(), Valid: true},
+					ID:             id,
+				}); updateErr != nil {
 					m.logger.Warn("idempotency: failed to persist response",
 						zap.String("idempotency_key", key),
 						zap.String("endpoint", endpoint),
@@ -139,17 +142,13 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 			}
 
 			// Conflict — a row already exists for (idempotency_key, endpoint).
-			var (
-				storedHash     string
-				completedAt    sql.NullTime
-				responseStatus sql.NullInt64
-				responseBody   []byte
-			)
-			lookupErr := m.db.QueryRowContext(r.Context(), `
-				SELECT request_hash, completed_at, response_status, response_body
-				FROM idempotency_keys
-				WHERE actor = $1 AND idempotency_key = $2 AND endpoint = $3
-			`, actor, key, endpoint).Scan(&storedHash, &completedAt, &responseStatus, &responseBody)
+			stored, lookupErr := q.GetIdempotencyKey(r.Context(), sqlcgen.GetIdempotencyKeyParams{
+				Actor: actor, IdempotencyKey: key, Endpoint: endpoint,
+			})
+			storedHash := stored.RequestHash
+			completedAt := stored.CompletedAt
+			responseStatus := stored.ResponseStatus
+			responseBody := stored.ResponseBody.RawMessage
 			if lookupErr != nil {
 				m.logger.Error("idempotency: lookup failed",
 					zap.String("idempotency_key", key),
@@ -177,7 +176,7 @@ func (m *IdempotencyMiddleware) Handle(endpoint string) func(http.Handler) http.
 			w.Header().Set("Content-Type", "application/json")
 			status := http.StatusOK
 			if responseStatus.Valid {
-				status = int(responseStatus.Int64)
+				status = int(responseStatus.Int32)
 			}
 			w.WriteHeader(status)
 			_, _ = w.Write(responseBody)
@@ -212,12 +211,12 @@ func (m *IdempotencyMiddleware) StartCleanup(ctx context.Context) {
 }
 
 func (m *IdempotencyMiddleware) purgeExpired(ctx context.Context) {
-	res, err := m.db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE expires_at < NOW()`)
+	n, err := sqlcgen.New(m.db).PurgeExpiredIdempotencyKeys(ctx)
 	if err != nil {
 		m.logger.Warn("idempotency-key cleanup failed", zap.Error(err))
 		return
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	if n > 0 {
 		m.logger.Info("idempotency-key cleanup purged expired rows", zap.Int64("count", n))
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/open-policy-agent/opa/rego"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 type Role string
@@ -353,9 +355,7 @@ func (r *RBACMiddleware) resolveRole(ctx context.Context, actor string) Role {
 	if !ok {
 		return RoleViewer // no resolved project => least privilege, never a guess
 	}
-	var role string
-	err := r.db.QueryRowContext(ctx,
-		"SELECT role FROM user_roles WHERE user_id = $1 AND project_id = $2", actor, projectID).Scan(&role)
+	role, err := sqlcgen.New(r.db).GetUserRole(ctx, sqlcgen.GetUserRoleParams{UserID: actor, ProjectID: projectID})
 	if err != nil {
 		return RoleViewer // default to least privilege
 	}

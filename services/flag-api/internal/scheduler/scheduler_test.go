@@ -213,6 +213,56 @@ func TestRunDue_PollQuery_SelectsPendingAndDueRetries(t *testing.T) {
 // TestRunDue_PollQuery_ExactTextMatch pins the exact poll query text runDue
 // issues, so a future edit that accidentally drops the retry-eligibility
 // clause or the FOR UPDATE SKIP LOCKED anti-duplicate guard fails immediately.
+// TestRunDue_NullProjectIDRowDoesNotAbortTheWholeBatch is the direct
+// regression proof for a real bug an adversarial review found: a legacy
+// scheduled_changes row with NULL project_id (migration 016 leaves these
+// unbackfilled by design) used to make the WHOLE poll query fail outright --
+// scanning a NULL uuid column into a plain Go string is a hard database/sql
+// error ("converting NULL to string is unsupported"), not a silent "", and
+// the generated batch-scan method discards every row already scanned and
+// returns that error for the entire call, not just the offending row. That
+// turned "refuse this one legacy row" into "refuse every due change across
+// every project, forever, every tick" until an operator intervened.
+// project_id is scanned as sql.NullString specifically so this can't happen;
+// applyChange's own `pc.projectID == ""` check is what actually refuses the
+// legacy row, one row at a time, exactly as before this bug existed.
+func TestRunDue_NullProjectIDRowDoesNotAbortTheWholeBatch(t *testing.T) {
+	db, mock := newMockDB(t)
+	logger := zap.NewNop()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id, flag_key, environment, change_payload, project_id\s+FROM scheduled_changes`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "flag_key", "environment", "change_payload", "project_id"}).
+			AddRow("sc-legacy", "legacy-flag", "production", []byte(`{"enabled":true}`), nil).
+			AddRow("sc-normal", "normal-flag", "production", []byte(`not-json`), "11111111-1111-1111-1111-111111111111"))
+	mock.ExpectCommit()
+
+	// sc-legacy: NULL project_id must scan cleanly (as sql.NullString, not
+	// error the whole query), then get refused by applyChange's own check --
+	// not by a Scan failure.
+	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
+		WithArgs("sc-legacy").
+		WillReturnRows(sqlmock.NewRows([]string{"retry_count", "max_retries"}).AddRow(0, 3))
+	mock.ExpectExec(`UPDATE scheduled_changes\s+SET status = 'FAILED', error_message = \$1, retry_count = \$2, next_retry_at = \$3\s+WHERE id = \$4`).
+		WithArgs(sqlmock.AnyArg(), 1, sqlmock.AnyArg(), "sc-legacy").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// sc-normal: must still be processed in the SAME batch -- proving the
+	// NULL-project_id row did not abort the whole poll query.
+	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
+		WithArgs("sc-normal").
+		WillReturnRows(sqlmock.NewRows([]string{"retry_count", "max_retries"}).AddRow(0, 3))
+	mock.ExpectExec(`UPDATE scheduled_changes\s+SET status = 'FAILED', error_message = \$1, retry_count = \$2, next_retry_at = \$3\s+WHERE id = \$4`).
+		WithArgs(sqlmock.AnyArg(), 1, sqlmock.AnyArg(), "sc-normal").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	runDue(context.Background(), db, nil, logger, nil)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations -- the legacy NULL-project_id row likely aborted the whole batch: %v", err)
+	}
+}
+
 func TestRunDue_PollQuery_ExactTextMatch(t *testing.T) {
 	db, mock := newMockDB(t)
 	logger := zap.NewNop()
@@ -287,7 +337,7 @@ func TestApplyChange_LegacyRowWithNoProjectIDFailsClosed(t *testing.T) {
 		flagKey:       "my-flag",
 		environment:   "production",
 		changePayload: []byte(`{"enabled":false}`),
-		projectID:     sql.NullString{}, // legacy row: no project_id
+		projectID:     "", // legacy row: no project_id
 	}
 
 	mock.ExpectQuery(`SELECT retry_count, max_retries FROM scheduled_changes WHERE id = \$1`).
@@ -328,7 +378,7 @@ func TestApplyChange_ScopesFlagEnvironmentUpdateToProjectID(t *testing.T) {
 		flagKey:       "my-flag",
 		environment:   "production",
 		changePayload: []byte(`{"enabled":true}`),
-		projectID:     sql.NullString{String: projectID, Valid: true},
+		projectID:     projectID,
 	}
 
 	mock.ExpectQuery(`SELECT fe\.enabled, fe\.rollout_pct, fe\.flag_id\s+FROM flag_environments fe\s+JOIN flags f ON f\.id = fe\.flag_id\s+WHERE f\.key = \$1 AND fe\.environment = \$2 AND f\.project_id = \$3`).
