@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // SCIMHandler implements SCIM 2.0 User provisioning endpoints.
@@ -72,28 +73,17 @@ func primaryEmail(u SCIMUser) string {
 func (h *SCIMHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	rows, err := h.db.QueryContext(ctx, `
-		SELECT external_id, user_id, email, display_name, active
-		FROM scim_users
-		ORDER BY synced_at DESC
-	`)
+	rows, err := sqlcgen.New(h.db).ListSCIMUsers(ctx)
 	if err != nil {
 		h.logger.Error("scim list users query", zap.Error(err))
 		writeSCIMError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	var users []SCIMUser
-	for rows.Next() {
-		var u SCIMUser
-		var email string
-		if err := rows.Scan(&u.ID, &u.UserName, &email, &u.DisplayName, &u.Active); err != nil {
-			h.logger.Error("scim list users scan", zap.Error(err))
-			writeSCIMError(w, http.StatusInternalServerError, "scan failed")
-			return
-		}
-		u.Emails = []SCIMEmail{{Value: email, Primary: true}}
+	for _, row := range rows {
+		u := SCIMUser{ID: row.ExternalID, UserName: row.UserID, DisplayName: row.DisplayName, Active: row.Active}
+		u.Emails = []SCIMEmail{{Value: row.Email, Primary: true}}
 		users = append(users, u)
 	}
 	if users == nil {
@@ -136,16 +126,9 @@ func (h *SCIMHandler) ProvisionUser(w http.ResponseWriter, r *http.Request) {
 		externalID = u.UserName
 	}
 
-	_, err := h.db.ExecContext(ctx, `
-		INSERT INTO scim_users (external_id, user_id, email, display_name, active, synced_at)
-		VALUES ($1, $2, $3, $4, $5, now())
-		ON CONFLICT (external_id) DO UPDATE
-		    SET user_id      = EXCLUDED.user_id,
-		        email        = EXCLUDED.email,
-		        display_name = EXCLUDED.display_name,
-		        active       = EXCLUDED.active,
-		        synced_at    = now()
-	`, externalID, u.UserName, email, displayName, u.Active)
+	err := sqlcgen.New(h.db).UpsertSCIMUser(ctx, sqlcgen.UpsertSCIMUserParams{
+		ExternalID: externalID, UserID: u.UserName, Email: email, DisplayName: displayName, Active: u.Active,
+	})
 	if err != nil {
 		h.logger.Error("scim provision user upsert", zap.Error(err))
 		writeSCIMError(w, http.StatusInternalServerError, "upsert failed")
@@ -163,13 +146,7 @@ func (h *SCIMHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := chi.URLParam(r, "id")
 
-	var u SCIMUser
-	var email string
-	err := h.db.QueryRowContext(ctx, `
-		SELECT external_id, user_id, email, display_name, active
-		FROM scim_users
-		WHERE external_id = $1
-	`, id).Scan(&u.ID, &u.UserName, &email, &u.DisplayName, &u.Active)
+	row, err := sqlcgen.New(h.db).GetSCIMUser(ctx, id)
 	if err == sql.ErrNoRows {
 		writeSCIMError(w, http.StatusNotFound, "user not found")
 		return
@@ -180,7 +157,8 @@ func (h *SCIMHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u.Emails = []SCIMEmail{{Value: email, Primary: true}}
+	u := SCIMUser{ID: row.ExternalID, UserName: row.UserID, DisplayName: row.DisplayName, Active: row.Active}
+	u.Emails = []SCIMEmail{{Value: row.Email, Primary: true}}
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -204,8 +182,8 @@ func (h *SCIMHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	// caller-supplied value would let a partial/malformed body silently
 	// target the wrong (or nonexistent) user_roles.user_id, no-opping the
 	// revocation with no error.
-	var currentEmail string
-	if err := h.db.QueryRowContext(ctx, `SELECT email FROM scim_users WHERE external_id = $1`, id).Scan(&currentEmail); err != nil {
+	currentEmail, err := sqlcgen.New(h.db).GetSCIMUserEmail(ctx, id)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			writeSCIMError(w, http.StatusNotFound, "user not found")
 			return
@@ -221,23 +199,16 @@ func (h *SCIMHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		displayName = u.UserName
 	}
 
-	result, err := h.db.ExecContext(ctx, `
-		UPDATE scim_users
-		SET user_id      = $1,
-		    email        = $2,
-		    display_name = $3,
-		    active       = $4,
-		    synced_at    = now()
-		WHERE external_id = $5
-	`, u.UserName, email, displayName, u.Active, id)
+	rowsAffected, err := sqlcgen.New(h.db).UpdateSCIMUser(ctx, sqlcgen.UpdateSCIMUserParams{
+		UserID: u.UserName, Email: email, DisplayName: displayName, Active: u.Active, ExternalID: id,
+	})
 	if err != nil {
 		h.logger.Error("scim update user", zap.Error(err))
 		writeSCIMError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	if rowsAffected == 0 {
 		writeSCIMError(w, http.StatusNotFound, "user not found")
 		return
 	}
@@ -258,13 +229,7 @@ func (h *SCIMHandler) DeprovisionUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := chi.URLParam(r, "id")
 
-	var email string
-	err := h.db.QueryRowContext(ctx, `
-		UPDATE scim_users
-		SET active = false, synced_at = now()
-		WHERE external_id = $1
-		RETURNING email
-	`, id).Scan(&email)
+	email, err := sqlcgen.New(h.db).DeprovisionSCIMUser(ctx, id)
 	if err == sql.ErrNoRows {
 		writeSCIMError(w, http.StatusNotFound, "user not found")
 		return
@@ -297,21 +262,10 @@ func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
 	// only ever revokes MORE broadly, never less — the safe direction to err
 	// in for a deprovisioning action, and it closes the silent no-op this
 	// would otherwise produce on a case mismatch.
-	rows, err := h.db.QueryContext(ctx, `DELETE FROM user_roles WHERE lower(user_id) = lower($1) RETURNING project_id`, userEmail)
+	revokedProjectIDs, err := sqlcgen.New(h.db).RevokeUserRoles(ctx, userEmail)
 	if err != nil {
 		h.logger.Error("scim revoke user roles", zap.Error(err), zap.String("user", userEmail))
 		return
-	}
-	defer func() { _ = rows.Close() }()
-
-	var revokedProjectIDs []string
-	for rows.Next() {
-		var projectID string
-		if err := rows.Scan(&projectID); err != nil {
-			h.logger.Error("scim revoke user roles scan", zap.Error(err))
-			continue
-		}
-		revokedProjectIDs = append(revokedProjectIDs, projectID)
 	}
 
 	// SEC-5: deprovisioning must also invalidate any JWT already issued to
@@ -321,11 +275,7 @@ func (h *SCIMHandler) revokeUserRoles(ctx context.Context, userEmail string) {
 	// unconditionally (even when revokedProjectIDs is empty) so
 	// deprovisioning always forces re-authentication for this identity,
 	// not just when it happened to find roles to delete.
-	if _, err := h.db.ExecContext(ctx, `
-		INSERT INTO user_token_watermarks (user_email, valid_after)
-		VALUES (lower($1), now())
-		ON CONFLICT (user_email) DO UPDATE SET valid_after = now()
-	`, userEmail); err != nil {
+	if err := sqlcgen.New(h.db).UpsertUserTokenWatermark(ctx, userEmail); err != nil {
 		h.logger.Warn("scim: failed to set token revocation watermark", zap.Error(err), zap.String("user", userEmail))
 	}
 
@@ -371,24 +321,15 @@ type orphanedFlag struct {
 // change_requests for each, appends an audit_log entry, and publishes a Redis
 // event so connected gateways are notified.
 func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
-	rows, err := h.db.QueryContext(ctx, `
-		SELECT key, project_id FROM flags
-		WHERE owner_id = $1 AND state = 'ACTIVE'
-	`, userEmail)
+	rows, err := sqlcgen.New(h.db).ListActiveFlagsByOwner(ctx, userEmail)
 	if err != nil {
 		h.logger.Error("scim detect orphans query", zap.Error(err), zap.String("owner", userEmail))
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	var affected []orphanedFlag
-	for rows.Next() {
-		var f orphanedFlag
-		if err := rows.Scan(&f.key, &f.projectID); err != nil {
-			h.logger.Error("scim detect orphans scan", zap.Error(err))
-			continue
-		}
-		affected = append(affected, f)
+	for _, row := range rows {
+		affected = append(affected, orphanedFlag{key: row.Key, projectID: row.ProjectID})
 	}
 
 	if len(affected) == 0 {
@@ -407,11 +348,9 @@ func (h *SCIMHandler) detectOrphans(ctx context.Context, userEmail string) {
 		}
 		payloadJSON, _ := json.Marshal(payload)
 
-		_, err := h.db.ExecContext(ctx, `
-			INSERT INTO change_requests
-			    (flag_key, environment, requested_by, status, change_payload, project_id)
-			VALUES ($1, 'production', 'system', 'PENDING', $2, $3)
-		`, f.key, payloadJSON, f.projectID)
+		err := sqlcgen.New(h.db).CreateSCIMOrphanChangeRequest(ctx, sqlcgen.CreateSCIMOrphanChangeRequestParams{
+			FlagKey: f.key, ChangePayload: payloadJSON, ProjectID: sql.NullString{String: f.projectID, Valid: true},
+		})
 		if err != nil {
 			h.logger.Error("scim create change_request", zap.Error(err),
 				zap.String("flag_key", f.key))

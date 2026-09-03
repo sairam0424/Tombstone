@@ -12,8 +12,16 @@ import (
 
 type Querier interface {
 	ApplyScheduledFlagEnvironmentUpdate(ctx context.Context, arg ApplyScheduledFlagEnvironmentUpdateParams) (int64, error)
+	ArchiveFlag(ctx context.Context, arg ArchiveFlagParams) (int64, error)
+	// rekor_log_id/rekor_log_index are nullable (migration 009); the values
+	// passed at the call site are always real/valid when this fires (guarded by
+	// `if subErr != nil || logID == "" { return }` before it's ever called), but
+	// the columns are genuinely nullable so the generated params are sql.NullString/
+	// sql.NullInt64.
+	BackfillAuditLogRekor(ctx context.Context, arg BackfillAuditLogRekorParams) error
 	CancelScheduledChange(ctx context.Context, arg CancelScheduledChangeParams) (int64, error)
 	ChangeRequestApprovalStats(ctx context.Context) (ChangeRequestApprovalStatsRow, error)
+	ChangeRequestTargetExists(ctx context.Context, arg ChangeRequestTargetExistsParams) (bool, error)
 	// $3 is nullable — NULL means "no project scope requested". A DATA-1b PR2
 	// adversarial review found that an earlier version of this query used an
 	// empty-string sentinel with the project_id COLUMN cast to ::text, which
@@ -33,16 +41,39 @@ type Querier interface {
 	CountRecentBreakGlassUses(ctx context.Context) (int64, error)
 	CountRoleAssignments(ctx context.Context) (int64, error)
 	CreateBreakGlassToken(ctx context.Context, arg CreateBreakGlassTokenParams) error
+	CreateChangeRequest(ctx context.Context, arg CreateChangeRequestParams) (CreateChangeRequestRow, error)
+	CreateDefaultFlagEnvironment(ctx context.Context, arg CreateDefaultFlagEnvironmentParams) error
+	CreateFlag(ctx context.Context, arg CreateFlagParams) (CreateFlagRow, error)
+	CreateFlagTombstone(ctx context.Context, arg CreateFlagTombstoneParams) error
 	CreateOrphanChangeRequest(ctx context.Context, arg CreateOrphanChangeRequestParams) error
+	// A separate query from orphan_detector.sql's CreateOrphanChangeRequest even
+	// though the column list is identical: requested_by differs ('system' here
+	// vs 'system-orphan-detector' there), so sharing one query would require
+	// turning that literal into a bound parameter and touching
+	// orphan_detector.go's already-shipped, out-of-scope call site.
+	CreateSCIMOrphanChangeRequest(ctx context.Context, arg CreateSCIMOrphanChangeRequestParams) error
 	CreateScheduledChange(ctx context.Context, arg CreateScheduledChangeParams) (CreateScheduledChangeRow, error)
 	DeletePrerequisite(ctx context.Context, arg DeletePrerequisiteParams) (int64, error)
+	DeprovisionSCIMUser(ctx context.Context, externalID string) (string, error)
+	FinalizeAppliedChangeRequest(ctx context.Context, arg FinalizeAppliedChangeRequestParams) error
 	FlagExistsInProject(ctx context.Context, arg FlagExistsInProjectParams) (bool, error)
 	FlagExistsInProjectNotArchived(ctx context.Context, arg FlagExistsInProjectNotArchivedParams) (bool, error)
+	FlagTombstoneExists(ctx context.Context, key string) (bool, error)
 	GetBreakGlassTokenDiagnostics(ctx context.Context, tokenHash sql.NullString) (GetBreakGlassTokenDiagnosticsRow, error)
+	GetChangeRequestForApproval(ctx context.Context, arg GetChangeRequestForApprovalParams) (GetChangeRequestForApprovalRow, error)
 	GetCurrentFlagEnvironmentState(ctx context.Context, arg GetCurrentFlagEnvironmentStateParams) (GetCurrentFlagEnvironmentStateRow, error)
 	GetEnvironmentSnapshot(ctx context.Context, arg GetEnvironmentSnapshotParams) ([]GetEnvironmentSnapshotRow, error)
 	GetEnvironmentSnapshotPrerequisites(ctx context.Context, arg GetEnvironmentSnapshotPrerequisitesParams) ([]GetEnvironmentSnapshotPrerequisitesRow, error)
+	GetFlag(ctx context.Context, arg GetFlagParams) (GetFlagRow, error)
+	// Shared by flags.go's UpdateEnvironment and change_requests.go's
+	// ApproveChangeRequest apply path — byte-identical SQL in both original
+	// call sites, so this is one query, not two.
+	GetFlagEnvironmentPrevState(ctx context.Context, arg GetFlagEnvironmentPrevStateParams) (GetFlagEnvironmentPrevStateRow, error)
 	GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (GetIdempotencyKeyRow, error)
+	GetProjectRequireApproval(ctx context.Context, id string) (bool, error)
+	GetProjectRequiredApprovals(ctx context.Context, id string) (int32, error)
+	GetSCIMUser(ctx context.Context, externalID string) (GetSCIMUserRow, error)
+	GetSCIMUserEmail(ctx context.Context, externalID string) (string, error)
 	GetScheduledChangeRetryState(ctx context.Context, id string) (GetScheduledChangeRetryStateRow, error)
 	GetScheduledChangeStatus(ctx context.Context, arg GetScheduledChangeStatusParams) (string, error)
 	GetTokenWatermark(ctx context.Context, lower string) (time.Time, error)
@@ -69,6 +100,8 @@ type Querier interface {
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
+	KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchFlagEnvironmentParams) (int64, error)
+	ListActiveFlagsByOwner(ctx context.Context, ownerID string) ([]ListActiveFlagsByOwnerRow, error)
 	// The project_id parameter is cast to ::uuid (never the column to text) on
 	// both sides of the OR — casting a uuid column to text to compare it against
 	// a bare parameter silently turns a case-insensitive uuid comparison into a
@@ -78,9 +111,12 @@ type Querier interface {
 	ListAuditLogForVerification(ctx context.Context, projectID sql.NullString) ([]ListAuditLogForVerificationRow, error)
 	ListAuditRetentionCheckpoints(ctx context.Context, projectID sql.NullString) ([]ListAuditRetentionCheckpointsRow, error)
 	ListBreakGlassTokens(ctx context.Context, projectID sql.NullString) ([]ListBreakGlassTokensRow, error)
+	ListChangeRequests(ctx context.Context, arg ListChangeRequestsParams) ([]ListChangeRequestsRow, error)
+	ListFlags(ctx context.Context, projectID string) ([]ListFlagsRow, error)
 	ListOrphanedFlags(ctx context.Context) ([]ListOrphanedFlagsRow, error)
 	ListPrereqFlagKeysForFlag(ctx context.Context, arg ListPrereqFlagKeysForFlagParams) ([]string, error)
 	ListPrerequisitesForFlag(ctx context.Context, arg ListPrerequisitesForFlagParams) ([]ListPrerequisitesForFlagRow, error)
+	ListSCIMUsers(ctx context.Context) ([]ListSCIMUsersRow, error)
 	// $3/$4 are always plain strings, "" meaning "no filter" — a single static
 	// query using an empty-string sentinel instead of conditionally appending
 	// clauses with a variable placeholder count. environment/status are both
@@ -97,10 +133,26 @@ type Querier interface {
 	MarkScheduledChangeFailedRetryPending(ctx context.Context, arg MarkScheduledChangeFailedRetryPendingParams) error
 	MarkScheduledChangeFailedTerminal(ctx context.Context, arg MarkScheduledChangeFailedTerminalParams) error
 	PurgeExpiredIdempotencyKeys(ctx context.Context) (int64, error)
+	RecordApproval(ctx context.Context, arg RecordApprovalParams) error
+	RejectChangeRequest(ctx context.Context, arg RejectChangeRequestParams) (RejectChangeRequestRow, error)
 	ResolveFlagIDByKey(ctx context.Context, arg ResolveFlagIDByKeyParams) (string, error)
 	ResolveServiceToken(ctx context.Context, tokenHash sql.NullString) (ResolveServiceTokenRow, error)
+	// Case-insensitive on purpose (SEC-5): user_roles.user_id is populated
+	// out-of-band with no case guarantee relative to what an IdP later asserts.
+	// Matching case-insensitively only ever revokes MORE broadly, never less —
+	// the safe direction to err in for a deprovisioning action. Do not collapse
+	// to `user_id = lower($1)`, which would make the column-side comparison
+	// case-sensitive again.
+	RevokeUserRoles(ctx context.Context, userEmail string) ([]string, error)
 	SelectDueScheduledChanges(ctx context.Context) ([]SelectDueScheduledChangesRow, error)
+	// Shared by flags.go's UpdateEnvironment and change_requests.go's
+	// ApproveChangeRequest apply path — byte-identical SQL in both original
+	// call sites, so this is one query, not two.
+	UpdateFlagEnvironment(ctx context.Context, arg UpdateFlagEnvironmentParams) (int64, error)
 	UpdateIdempotencyKeyResponse(ctx context.Context, arg UpdateIdempotencyKeyResponseParams) error
+	UpdateSCIMUser(ctx context.Context, arg UpdateSCIMUserParams) (int64, error)
+	UpsertSCIMUser(ctx context.Context, arg UpsertSCIMUserParams) error
+	UpsertUserTokenWatermark(ctx context.Context, userEmail string) error
 }
 
 var _ Querier = (*Queries)(nil)
