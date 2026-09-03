@@ -8,9 +8,15 @@
 //	                                       and erase the plaintext (needs
 //	                                       TOKEN_HASH_PEPPER; no token rotation)
 //
-// DB_URL must point at the target Postgres. Intended for CI, docker-compose
-// init, and ops — flag-api's own startup does NOT auto-migrate (schema changes
-// stay an explicit, auditable step).
+// DB_URL_DIRECT (falling back to DB_URL if unset) must point at the target
+// Postgres — DIRECTLY, never through a connection pooler. This tool uses
+// pg_advisory_lock/pg_advisory_unlock (internal/db/migrate.go), a session-
+// scoped pair pinned to one physical connection for the whole run; a
+// transaction-pooling proxy (PgBouncer, Neon's own "-pooler" endpoint) can
+// hand the unlock call a DIFFERENT physical connection than the lock call
+// got, silently breaking the mutual-exclusion this tool relies on. Intended
+// for CI, docker-compose init, and ops — flag-api's own startup does NOT
+// auto-migrate (schema changes stay an explicit, auditable step).
 package main
 
 import (
@@ -32,9 +38,12 @@ func main() {
 	hashTokens := flag.Bool("hash-tokens", false, "SEC-4: derive token_hash from existing plaintext service/break-glass tokens and erase the plaintext (requires "+secrets.PepperEnvVar+")")
 	flag.Parse()
 
-	dbURL := os.Getenv("DB_URL")
+	dbURL := os.Getenv("DB_URL_DIRECT")
 	if dbURL == "" {
-		log.Fatal("DB_URL environment variable is required")
+		dbURL = os.Getenv("DB_URL")
+	}
+	if dbURL == "" {
+		log.Fatal("DB_URL_DIRECT (or DB_URL) environment variable is required")
 	}
 
 	database, err := sql.Open("postgres", dbURL)

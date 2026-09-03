@@ -247,6 +247,7 @@ scripts/dev-local.sh logs <svc>
 | marketplace | 8086 |
 | dashboard | 3000 |
 | PostgreSQL | 5432 |
+| PgBouncer (pooled, DATA-2) | 5432 (host: 6432) |
 | Redis | 6379 |
 | Kafka | 9092 |
 | tombstone-operator | (in-cluster only) |

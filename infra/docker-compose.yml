@@ -16,6 +16,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # DATA-2: pools app traffic so a burst of requests doesn't exhaust
+  # Postgres's own connection limit — mirrors what production does via
+  # Neon's built-in pooler ("-pooler" connection string), letting the same
+  # pooled-vs-direct split be exercised locally without real Neon creds.
+  # Transaction pooling mode: safe for flag-api/intelligence's own traffic
+  # (nothing in their hot path holds a session-scoped Postgres feature —
+  # internal/audit's advisory lock is pg_advisory_XACT_lock, transaction-
+  # scoped, which transaction pooling supports fine). NOT safe for
+  # cmd/migrate, which uses the session-scoped pg_advisory_lock/unlock pair
+  # pinned to one physical connection for the whole run — that's exactly
+  # why migrations keep using DB_URL_DIRECT, straight to postgres, below.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_USER: ${POSTGRES_USER:-tombstone}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_HOST: postgres
+      DB_NAME: ${POSTGRES_DB:-tombstone}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "100"
+      DEFAULT_POOL_SIZE: "20"
+      # Postgres 16 (the postgres service's image) defaults password_encryption
+      # to scram-sha-256, not md5 (this image's own default AUTH_TYPE) — a
+      # mismatch here fails every login with "wrong password type".
+      AUTH_TYPE: scram-sha-256
+    ports:
+      - "6432:5432"   # host-side: psql -h localhost -p 6432 -U tombstone tombstone
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U ${POSTGRES_USER:-tombstone}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -53,6 +89,8 @@ services:
       dockerfile: Dockerfile
     depends_on:
       postgres:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -115,6 +153,8 @@ services:
       dockerfile: Dockerfile
     depends_on:
       postgres:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
       kafka:
         condition: service_started
