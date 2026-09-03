@@ -61,6 +61,129 @@ func TestRetentionAgainstPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("DefaultPartitionRowCount surfaces rows stranded outside any monthly partition", func(t *testing.T) {
+		projectID := createAuditTestProject(ctx, t, database, "retention-stranded-tenant")
+		const flagKey = "retention-stranded-chain"
+
+		// 2005 is deliberately outside every partition any other subtest in
+		// this file creates, so this row lands in audit_log_default by
+		// construction — simulating EnsurePartitions having fallen behind.
+		strandedAt := time.Date(2005, 3, 1, 0, 0, 0, 0, time.UTC)
+		appendAtForTest(ctx, t, w, Entry{FlagKey: flagKey, Environment: "production", Actor: "alice", EventType: "flag_created", ProjectID: projectID}, strandedAt)
+
+		count, oldest, err := r.DefaultPartitionRowCount(ctx)
+		if err != nil {
+			t.Fatalf("DefaultPartitionRowCount: %v", err)
+		}
+		if count < 1 {
+			t.Fatalf("count = %d, want at least 1 (the row just inserted with no matching monthly partition)", count)
+		}
+		if !oldest.Before(time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC)) {
+			t.Errorf("oldest = %s, want it to reflect the stranded 2005 row, not a later one", oldest)
+		}
+
+		// Archive's report must surface this too — it's the field the loop
+		// script actually reads to raise a signal. The cutoff is
+		// deliberately earlier than every other subtest's months in this
+		// file, so this call archives nothing real and can't collide with
+		// partitions another subtest still expects to exist/rename.
+		report, err := r.Archive(ctx, time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC))
+		if err != nil {
+			t.Fatalf("archive: %v", err)
+		}
+		if len(report.PartitionsArchived) != 0 {
+			t.Fatalf("expected no partitions archived at this cutoff, got %v", report.PartitionsArchived)
+		}
+		if report.StrandedInDefaultPartition < 1 {
+			t.Fatalf("ArchiveReport.StrandedInDefaultPartition = %d, want at least 1", report.StrandedInDefaultPartition)
+		}
+		if report.StrandedSince == nil {
+			t.Fatal("ArchiveReport.StrandedSince must be set when rows are stranded")
+		}
+	})
+
+	// Direct reproduction of the tiebreaker gap: two rows in one chain that
+	// share an identical created_at (a legitimate tie under coarse
+	// wall-clock resolution or load, not just a contrived edge case — see
+	// audit.go's own comment on Truncate(time.Microsecond) precision
+	// quirks). archiveOne's tip-selection query must pick the SAME row
+	// Append's own chain-tip lookup would have used as the real tip, or the
+	// checkpoint it seals vouches for the wrong hash.
+	t.Run("checkpoint tip-selection breaks a created_at tie the same way Append does", func(t *testing.T) {
+		projectID := createAuditTestProject(ctx, t, database, "retention-tie-tenant")
+		const flagKey = "retention-tie-chain"
+
+		// A year earlier than every other subtest's months in this file, not
+		// merely a distinct one: discoverArchivablePartitions treats its
+		// cutoff as "everything chronologically at or before this," so a
+		// LATER year's cutoff sweeps up every earlier, still-unarchived
+		// partition regardless of which subtest created it — reproduced
+		// concretely while developing this test (an earlier attempt used
+		// 2021, whose cutoff swept up 2019's leftover partitions and caused
+		// a real rename collision two subtests later). An EARLIER year's
+		// cutoff can never reach forward into anything, by construction.
+		tieAt := time.Date(2010, 1, 10, 9, 0, 0, 0, time.UTC).UTC().Truncate(time.Microsecond)
+		recentMonth := time.Date(2010, 3, 10, 9, 0, 0, 0, time.UTC)
+		cutoff := time.Date(2010, 2, 1, 0, 0, 0, 0, time.UTC)
+
+		if err := r.EnsurePartitions(ctx, tieAt, 3); err != nil { // Jan..Apr 2010
+			t.Fatalf("EnsurePartitions: %v", err)
+		}
+
+		// Two rows, identical created_at, distinct ids — inserted directly
+		// (not via appendAtForTest) so which one Append's real tip lookup
+		// (ORDER BY created_at DESC, id DESC) would pick is controlled and
+		// known: idHigh.
+		const idLow = "00000000-0000-0000-0000-000000000001"
+		const idHigh = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+		eLow := Entry{FlagKey: flagKey, Environment: "production", Actor: "alice", EventType: "flag_created", ProjectID: projectID}
+		eHigh := Entry{FlagKey: flagKey, Environment: "production", Actor: "alice", EventType: "flag_environment_updated", ProjectID: projectID}
+		hashLow := key.Sum(canonical(idLow, eLow, tieAt, ""))
+		hashHigh := key.Sum(canonical(idHigh, eHigh, tieAt, hashLow))
+
+		for _, row := range []struct{ id, actor, eventType, prevHash, entryHash string }{
+			{idLow, eLow.Actor, eLow.EventType, "", hashLow},
+			{idHigh, eHigh.Actor, eHigh.EventType, hashLow, hashHigh},
+		} {
+			if _, err := database.ExecContext(ctx, `
+				INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_hash, entry_hash, created_at, project_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			`, row.id, flagKey, "production", row.actor, row.eventType, nullIfEmpty(row.prevHash), row.entryHash, tieAt, projectID); err != nil {
+				t.Fatalf("insert tied row %s: %v", row.id, err)
+			}
+		}
+
+		// A real successor row: appendAtForTest's chain-tip lookup uses the
+		// same ORDER BY as Append itself, so its prev_hash correctly ends up
+		// as hashHigh — this is the ground truth a checkpoint must match.
+		appendAtForTest(ctx, t, w, Entry{FlagKey: flagKey, Environment: "production", Actor: "bob", EventType: "flag_archived", ProjectID: projectID}, recentMonth)
+
+		if _, err := r.Archive(ctx, cutoff); err != nil {
+			t.Fatalf("archive: %v", err)
+		}
+
+		var storedHash string
+		if err := database.QueryRowContext(ctx, `
+			SELECT pruned_through_hash FROM audit_retention_checkpoints
+			WHERE project_id = $1 AND flag_key = $2
+		`, projectID, flagKey).Scan(&storedHash); err != nil {
+			t.Fatalf("read checkpoint: %v", err)
+		}
+		if storedHash != hashHigh {
+			t.Fatalf("checkpointed hash = %q, want %q (the id-DESC tie winner, matching Append's own tip-lookup order) — "+
+				"a mismatched checkpoint would make Verify falsely report tampering against the row appended after this tie",
+				storedHash, hashHigh)
+		}
+
+		report, err := w.Verify(ctx, projectID)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 || !report.Intact {
+			t.Fatalf("a created_at tie within an archived partition must not produce a false tampering report: %+v", report)
+		}
+	})
+
 	t.Run("archiving a chain's oldest rows preserves verifiability via a checkpoint", func(t *testing.T) {
 		projectID := createAuditTestProject(ctx, t, database, "retention-continuing-tenant")
 		const flagKey = "retention-continuing-chain"
@@ -178,6 +301,149 @@ func TestRetentionAgainstPostgres(t *testing.T) {
 		}
 		if report.Intact {
 			t.Fatal("Intact must be false when a gap has no checkpoint")
+		}
+	})
+
+	// A forged checkpoint row is the OTHER half of the threat model
+	// checkpointExplains's own doc comment states: audit_retention_
+	// checkpoints' RULEs block UPDATE/DELETE but not INSERT, so a party able
+	// to write bogus rows there must still be unable to make a real gap
+	// verify without holding AUDIT_HMAC_KEY.
+	t.Run("a checkpoint with a bogus signature does not explain a gap", func(t *testing.T) {
+		projectID := createAuditTestProject(ctx, t, database, "retention-forged-checkpoint-tenant")
+		const flagKey = "retention-forged-checkpoint-chain"
+
+		month1 := time.Date(2019, 6, 10, 9, 0, 0, 0, time.UTC)
+		month2 := time.Date(2019, 8, 10, 9, 0, 0, 0, time.UTC)
+
+		if err := r.EnsurePartitions(ctx, month1, 3); err != nil { // Jun..Sep 2019
+			t.Fatalf("EnsurePartitions: %v", err)
+		}
+
+		rHash := appendAtForTest(ctx, t, w, Entry{FlagKey: flagKey, Environment: "production", Actor: "alice", EventType: "flag_created", ProjectID: projectID}, month1)
+		appendAtForTest(ctx, t, w, Entry{FlagKey: flagKey, Environment: "production", Actor: "bob", EventType: "flag_archived", ProjectID: projectID}, month2)
+
+		// A row that WOULD explain the gap by (chain, hash) lookup, but whose
+		// signature was never actually produced by AUDIT_HMAC_KEY — exactly
+		// what an attacker limited to INSERT (not UPDATE/DELETE) could write.
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO audit_retention_checkpoints
+			    (project_id, flag_key, pruned_through_hash, pruned_through_created_at, signature)
+			VALUES ($1, $2, $3, $4, 'not-a-real-hmac-signature')
+		`, projectID, flagKey, rHash, month1.UTC().Truncate(time.Microsecond)); err != nil {
+			t.Fatalf("insert forged checkpoint: %v", err)
+		}
+
+		name := partitionName(time.Date(2019, 6, 1, 0, 0, 0, 0, time.UTC))
+		if _, err := database.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE audit_log DETACH PARTITION %s`, pgIdent(name))); err != nil {
+			t.Fatalf("detach: %v", err)
+		}
+
+		report, err := w.Verify(ctx, projectID)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount == 0 {
+			t.Fatal("a checkpoint row present but with a signature that doesn't verify must NOT explain the gap — real tampering could otherwise be waved through by writing any bogus checkpoint row")
+		}
+		if report.Intact {
+			t.Fatal("Intact must be false when the only checkpoint for a gap has a bad signature")
+		}
+	})
+
+	// Direct reproduction of the race the checkpoint-decision advisory lock
+	// in archiveOne exists to close: a real Append landing between
+	// survivingChains' snapshot and the transaction's DETACH must not be
+	// able to make a legitimately-continuing chain look tampered with.
+	t.Run("a concurrent append racing an archive does not produce a false tampering report", func(t *testing.T) {
+		projectID := createAuditTestProject(ctx, t, database, "retention-race-tenant")
+		const flagKey = "retention-race-chain"
+
+		oldMonth := time.Date(2019, 9, 10, 9, 0, 0, 0, time.UTC)
+		cutoff := time.Date(2019, 10, 1, 0, 0, 0, 0, time.UTC)
+
+		if err := r.EnsurePartitions(ctx, oldMonth, 3); err != nil { // Sep..Dec 2019
+			t.Fatalf("EnsurePartitions: %v", err)
+		}
+
+		rHash := appendAtForTest(ctx, t, w, Entry{FlagKey: flagKey, Environment: "production", Actor: "alice", EventType: "flag_created", ProjectID: projectID}, oldMonth)
+
+		lockAcquired := make(chan struct{})
+		proceed := make(chan struct{})
+		appendDone := make(chan error, 1)
+
+		// Plays the role of a real, concurrent Writer.Append: takes the
+		// SAME advisory lock Append itself takes, holds it while blocked on
+		// `proceed` (simulating "in the middle of its transaction"), then
+		// inserts the successor row and commits — releasing the lock.
+		go func() {
+			raceTx, err := database.BeginTx(ctx, nil)
+			if err != nil {
+				appendDone <- err
+				return
+			}
+			defer func() { _ = raceTx.Rollback() }()
+
+			if _, err := raceTx.ExecContext(ctx,
+				`SELECT pg_advisory_xact_lock($1, hashtext($2))`, advisoryNamespace, flagKey); err != nil {
+				appendDone <- err
+				return
+			}
+			close(lockAcquired)
+			<-proceed
+
+			id := uuid.New().String()
+			entry := Entry{FlagKey: flagKey, Environment: "production", Actor: "bob", EventType: "flag_archived", ProjectID: projectID}
+			createdAt := time.Date(2019, 12, 10, 9, 0, 0, 0, time.UTC).UTC().Truncate(time.Microsecond)
+			entryHash := key.Sum(canonical(id, entry, createdAt, rHash))
+
+			if _, err := raceTx.ExecContext(ctx, `
+				INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_hash, entry_hash, created_at, project_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			`, id, flagKey, entry.Environment, entry.Actor, entry.EventType, rHash, entryHash, createdAt, projectID); err != nil {
+				appendDone <- err
+				return
+			}
+			appendDone <- raceTx.Commit()
+		}()
+
+		<-lockAcquired
+
+		archiveDone := make(chan struct{})
+		var archiveReport ArchiveReport
+		var archiveErr error
+		go func() {
+			archiveReport, archiveErr = r.Archive(ctx, cutoff)
+			close(archiveDone)
+		}()
+
+		// Best-effort: give Archive's goroutine real wall-clock time to reach
+		// and block on the same advisory lock before it's released. The
+		// test's correctness does not depend on this actually happening —
+		// Postgres's lock serializes the commit before the DETACH either
+		// way — but it makes the interesting contended path likely, not just
+		// possible.
+		time.Sleep(200 * time.Millisecond)
+		close(proceed)
+
+		if err := <-appendDone; err != nil {
+			t.Fatalf("simulated concurrent append: %v", err)
+		}
+		<-archiveDone
+		if archiveErr != nil {
+			t.Fatalf("archive: %v", archiveErr)
+		}
+		if archiveReport.CheckpointsWritten < 1 {
+			t.Fatalf("expected the race-winning append's chain to still get a checkpoint, got %d checkpoints written (partitions archived: %v)",
+				archiveReport.CheckpointsWritten, archiveReport.PartitionsArchived)
+		}
+
+		report, err := w.Verify(ctx, projectID)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if report.FailureCount != 0 || !report.Intact {
+			t.Fatalf("a legitimate concurrent append racing an archive must not produce a false tampering report: %+v", report)
 		}
 	})
 }

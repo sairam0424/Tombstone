@@ -140,6 +140,15 @@ func (r *Retention) discoverArchivablePartitions(ctx context.Context, olderThan 
 type ArchiveReport struct {
 	PartitionsArchived []string `json:"partitions_archived"`
 	CheckpointsWritten int      `json:"checkpoints_written"`
+
+	// StrandedInDefaultPartition surfaces DefaultPartitionRowCount so a
+	// caller (RunRetention's HTTP response, surfaced by the loop script)
+	// sees this otherwise-permanently-silent condition — rows in
+	// audit_log_default because EnsurePartitions fell behind can never be
+	// archived by month once there — rather than it only living in a
+	// comment. Zero in steady-state operation.
+	StrandedInDefaultPartition int        `json:"stranded_in_default_partition"`
+	StrandedSince              *time.Time `json:"stranded_since,omitempty"`
 }
 
 // Archive detaches every fully-eligible monthly partition (oldest first) and
@@ -165,19 +174,119 @@ func (r *Retention) Archive(ctx context.Context, olderThan time.Time) (ArchiveRe
 		report.PartitionsArchived = append(report.PartitionsArchived, p.name)
 		report.CheckpointsWritten += n
 	}
+
+	strandedCount, oldest, err := r.DefaultPartitionRowCount(ctx)
+	if err != nil {
+		return report, fmt.Errorf("check default partition: %w", err)
+	}
+	report.StrandedInDefaultPartition = strandedCount
+	if strandedCount > 0 {
+		report.StrandedSince = &oldest
+	}
+
 	return report, nil
 }
 
-// archiveOne archives a single partition: seal checkpoints for chains that
-// continue past it, then detach and rename, all in one transaction — so a
-// partition can never end up detached with its checkpoints missing (which
-// would make Verify falsely report tampering) or vice versa.
+// DefaultPartitionRowCount reports how many rows currently sit in
+// audit_log_default and, if any, the oldest one's created_at. Rows land
+// there when EnsurePartitions falls behind — e.g. the retention loop paused
+// (AUDIT_RETENTION_ADMIN_TOKEN unset, per scripts/loop-audit-retention.sh's
+// own skip-not-fail behavior) for longer than its lookahead window. Postgres
+// never retroactively re-routes already-committed DEFAULT-partition rows
+// into a monthly partition created later, so once stranded there, this
+// package can never archive them by month.
+func (r *Retention) DefaultPartitionRowCount(ctx context.Context) (int, time.Time, error) {
+	var count int
+	var oldest sql.NullTime
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), MIN(created_at) FROM audit_log_default`,
+	).Scan(&count, &oldest); err != nil {
+		return 0, time.Time{}, err
+	}
+	return count, oldest.Time, nil
+}
+
+// archiveOne archives a single partition: lock every candidate chain against
+// concurrent Append (see the advisory-lock loop below), seal checkpoints for
+// chains that continue past it, then detach and rename — all in one
+// transaction, so a partition can never end up detached with its checkpoints
+// missing (which would make Verify falsely report tampering) or vice versa,
+// AND never with a checkpoint decision made from a survivor snapshot a
+// concurrent write has since invalidated.
 func (r *Retention) archiveOne(ctx context.Context, p partitionInfo) (int, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	// The newest hashed row per chain within this partition — the exact tip
+	// a checkpoint must vouch for, since it is what the chain's next live row
+	// (if any) already has recorded as ITS prev_hash. id DESC breaks a
+	// created_at tie the SAME way Writer.Append's own chain-tip lookup does
+	// (audit.go) — without it, Postgres's DISTINCT ON gives no guarantee
+	// which of two same-instant rows it returns, and picking the wrong one
+	// would checkpoint a hash that never actually matches the surviving
+	// row's real prev_hash, causing a false tampering report on legitimately
+	// archived data.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT ON (COALESCE(project_id::text,''), COALESCE(flag_key,''))
+		    COALESCE(project_id::text,''), COALESCE(flag_key,''), entry_hash, created_at
+		FROM audit_log
+		WHERE created_at >= $1 AND created_at < $2 AND entry_hash IS NOT NULL
+		ORDER BY COALESCE(project_id::text,''), COALESCE(flag_key,''), created_at DESC, id DESC
+	`, p.lower, p.upper)
+	if err != nil {
+		return 0, fmt.Errorf("find chain tips in partition: %w", err)
+	}
+
+	type tip struct {
+		projectID, flagKey, entryHash string
+		createdAt                     time.Time
+	}
+	var tips []tip
+	flagKeySet := map[string]bool{}
+	for rows.Next() {
+		var t tip
+		if err := rows.Scan(&t.projectID, &t.flagKey, &t.entryHash, &t.createdAt); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		tips = append(tips, t)
+		flagKeySet[t.flagKey] = true
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	_ = rows.Close()
+
+	// Serialize this partition's checkpoint-vs-DETACH decision against any
+	// concurrent Writer.Append to the same flag_key(s), using the SAME
+	// advisory lock Append itself takes (audit.go) before its chain-tip
+	// read+insert. Without this, survivingChains below takes its snapshot
+	// under plain READ COMMITTED — a fresh per-statement snapshot, not a
+	// whole-transaction one — so a real Append that lands between that
+	// snapshot and this transaction's later DETACH could commit a new row
+	// for a chain survivingChains had already (correctly, as of its own
+	// snapshot) marked as having no survivor, causing this code to skip a
+	// checkpoint that row now needs, and Verify to report a false tampering
+	// failure against data that was legitimately archived. Locking every
+	// candidate flag_key here, in sorted order (to avoid a lock-ordering
+	// deadlock against another archiveOne call touching an overlapping
+	// set), blocks until any in-flight Append to it has committed or been
+	// blocked out, so the survivor check that follows is guaranteed stable
+	// through to this transaction's own commit.
+	sortedFlagKeys := make([]string, 0, len(flagKeySet))
+	for fk := range flagKeySet {
+		sortedFlagKeys = append(sortedFlagKeys, fk)
+	}
+	sort.Strings(sortedFlagKeys)
+	for _, fk := range sortedFlagKeys {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock($1, hashtext($2))`, advisoryNamespace, fk); err != nil {
+			return 0, fmt.Errorf("lock chain %q for archive: %w", fk, err)
+		}
+	}
 
 	// Chains that have at least one row still live past this partition's
 	// upper bound — only these need a checkpoint. A chain fully contained in
@@ -190,38 +299,6 @@ func (r *Retention) archiveOne(ctx context.Context, p partitionInfo) (int, error
 	if err != nil {
 		return 0, fmt.Errorf("find surviving chains: %w", err)
 	}
-
-	// The newest hashed row per chain within this partition — the exact tip
-	// a checkpoint must vouch for, since it is what the chain's next live row
-	// (if any) already has recorded as ITS prev_hash.
-	rows, err := tx.QueryContext(ctx, `
-		SELECT DISTINCT ON (COALESCE(project_id::text,''), COALESCE(flag_key,''))
-		    COALESCE(project_id::text,''), COALESCE(flag_key,''), entry_hash, created_at
-		FROM audit_log
-		WHERE created_at >= $1 AND created_at < $2 AND entry_hash IS NOT NULL
-		ORDER BY COALESCE(project_id::text,''), COALESCE(flag_key,''), created_at DESC
-	`, p.lower, p.upper)
-	if err != nil {
-		return 0, fmt.Errorf("find chain tips in partition: %w", err)
-	}
-
-	type tip struct {
-		projectID, flagKey, entryHash string
-		createdAt                     time.Time
-	}
-	var tips []tip
-	for rows.Next() {
-		var t tip
-		if err := rows.Scan(&t.projectID, &t.flagKey, &t.entryHash, &t.createdAt); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		tips = append(tips, t)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	_ = rows.Close()
 
 	written := 0
 	for _, t := range tips {
