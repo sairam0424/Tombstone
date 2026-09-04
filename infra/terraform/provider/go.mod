@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/hashicorp/terraform-plugin-sdk/v2 v2.34.0
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.28.0
 )
 
 require (
