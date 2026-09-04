@@ -113,10 +113,12 @@ class ExperimentAnalyzer:
         to 100%. This method uses the warehouse's own aggregates instead, so
         both statistics are computed from the real per-variant spread.
 
-        CUPED and mSPRT are NOT covered here — CUPED needs per-user
-        outcome/covariate pairs to compute a covariance, which cannot be
-        reconstructed from marginal aggregates; both continue to use
-        `analyze()`/`analyze_cuped()`/`analyze_sequential()` unchanged.
+        CUPED is NOT covered here — it needs per-user outcome/covariate
+        pairs to compute a covariance, which cannot be reconstructed from
+        marginal aggregates, so it still uses `analyze()`/`analyze_cuped()`
+        unchanged. mSPRT has its own sufficient-stats method,
+        `analyze_sequential_from_stats()` — it no longer routes through
+        `analyze_sequential()`'s reconstruction either.
         """
         # conversion_count must satisfy 0 <= conversion_count <= sample_size to be a
         # meaningful count of "successes" out of the same trials sample_size counts.
@@ -323,6 +325,13 @@ class ExperimentAnalyzer:
 
         Returns e_value and ci bounds as extra fields embedded in metric_name
         for downstream display.
+
+        No production callers as of EXP-1 PR2 — `/analyze`'s "sequential"
+        path now calls `analyze_sequential_from_stats()` instead. Retained
+        as the ground-truth reference implementation for that method's
+        fidelity tests (see TestSequentialFromStats in
+        test_experiment_analyzer.py) and to document, via its own output,
+        the exact reconstruction bug that method fixes.
         """
         c = np.array(control_data)
         t = np.array(treatment_data)

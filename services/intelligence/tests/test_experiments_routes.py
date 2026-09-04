@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -162,6 +163,12 @@ def test_analyze_sequential_route_wiring(mock_get_connector):
     assert response.status_code == 200
     body = response.json()
     assert body["sample_sizes"] == {"control": 500, "treatment": 500}
+    # sample_sizes alone doesn't prove the analyzer was actually called
+    # correctly (it's built directly from control/treatment.sample_size,
+    # independent of the analyzer call) -- relative_lift IS derived from
+    # the analyzer's real control/treatment means, so it catches a
+    # control/treatment argument swap that sample_sizes alone would miss.
+    assert body["relative_lift"] == pytest.approx(0.2)
 
 
 @patch("app.experiments.routes.get_connector")

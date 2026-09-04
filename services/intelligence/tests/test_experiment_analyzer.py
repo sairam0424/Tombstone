@@ -440,6 +440,33 @@ class TestSequentialFromStats:
         assert actual.is_significant == expected.is_significant
         assert actual.relative_lift == pytest.approx(expected.relative_lift)
 
+    def test_matches_true_analyze_sequential_with_unequal_sample_sizes(self):
+        """
+        The pooled-variance formula weights each variant's variance by its
+        OWN sample size: (var_c*n_c + var_t*n_t) / (n_c+n_t). Every other
+        fidelity test in this class uses equal n_c/n_t, which can't
+        distinguish correct weighted pooling from a broken unweighted
+        average (n_c == n_t makes the two arithmetically identical) --
+        this one uses deliberately skewed sizes to actually exercise it.
+        """
+        rng = np.random.default_rng(11)
+        control_arr = rng.normal(loc=50.0, scale=5.0, size=300)
+        treatment_arr = rng.normal(loc=52.0, scale=8.0, size=900)
+
+        control = _aggregate(control_arr, "control")
+        treatment = _aggregate(treatment_arr, "treatment")
+
+        expected = ExperimentAnalyzer().analyze_sequential(
+            list(control_arr), list(treatment_arr), "metric"
+        )
+        actual = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert actual.metric_name == expected.metric_name
+        assert actual.is_significant == expected.is_significant
+        assert actual.relative_lift == pytest.approx(expected.relative_lift)
+
     def test_does_not_force_continue_for_genuine_nonzero_variance(self):
         """
         Regression test for the bug this fixes: the old `[mean] * n`
