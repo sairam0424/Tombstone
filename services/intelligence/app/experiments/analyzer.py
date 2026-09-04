@@ -113,10 +113,12 @@ class ExperimentAnalyzer:
         to 100%. This method uses the warehouse's own aggregates instead, so
         both statistics are computed from the real per-variant spread.
 
-        CUPED and mSPRT are NOT covered here — CUPED needs per-user
-        outcome/covariate pairs to compute a covariance, which cannot be
-        reconstructed from marginal aggregates; both continue to use
-        `analyze()`/`analyze_cuped()`/`analyze_sequential()` unchanged.
+        CUPED is NOT covered here — it needs per-user outcome/covariate
+        pairs to compute a covariance, which cannot be reconstructed from
+        marginal aggregates, so it still uses `analyze()`/`analyze_cuped()`
+        unchanged. mSPRT has its own sufficient-stats method,
+        `analyze_sequential_from_stats()` — it no longer routes through
+        `analyze_sequential()`'s reconstruction either.
         """
         # conversion_count must satisfy 0 <= conversion_count <= sample_size to be a
         # meaningful count of "successes" out of the same trials sample_size counts.
@@ -323,6 +325,13 @@ class ExperimentAnalyzer:
 
         Returns e_value and ci bounds as extra fields embedded in metric_name
         for downstream display.
+
+        No production callers as of EXP-1 PR2 — `/analyze`'s "sequential"
+        path now calls `analyze_sequential_from_stats()` instead. Retained
+        as the ground-truth reference implementation for that method's
+        fidelity tests (see TestSequentialFromStats in
+        test_experiment_analyzer.py) and to document, via its own output,
+        the exact reconstruction bug that method fixes.
         """
         c = np.array(control_data)
         t = np.array(treatment_data)
@@ -399,6 +408,127 @@ class ExperimentAnalyzer:
 
         # Encode e-value, CI, and recommendation into metric_name suffix for API consumers
         # (MetricResult dataclass has no dedicated fields for these; keep model stable)
+        suffix = (
+            f"_msprt|e={e_value:.4f}"
+            f"|ci=[{ci_lower:.4f},{ci_upper:.4f}]"
+            f"|{recommendation}"
+        )
+        return MetricResult(
+            metric_name=f"{metric_name}{suffix}",
+            control=cs,
+            treatment=ts,
+            relative_lift=round(relative_lift, 4),
+            p_value=None,
+            probability_beats_control=None,
+            is_significant=is_sig,
+        )
+
+    def analyze_sequential_from_stats(
+        self,
+        control: AggregatedMetric,
+        treatment: AggregatedMetric,
+        metric_name: str,
+        alpha: float = 0.05,
+        tau: float = 1.0,
+    ) -> MetricResult:
+        """
+        mSPRT sequential testing directly from warehouse-computed sufficient
+        statistics (n, mean, variance, conversion_count) — no per-user array
+        reconstruction. See `analyze_from_stats()` for the general bug this
+        fixes.
+
+        For mSPRT specifically, the reconstructed `[mean] * sample_size`
+        array makes `var_pooled` exactly 0.0 (every element identical), which
+        already forces this method's own pre-existing `var_pooled == 0`
+        guard to report `is_significant=False`/`recommendation="continue"`
+        unconditionally — so mSPRT via `/analyze`'s warehouse-aggregate path
+        has never been able to report anything OTHER than "continue",
+        regardless of the real e-value, for as long as it's existed. Feeding
+        the warehouse's real per-variant variance restores that guard to
+        only fire for genuinely zero-variance data (its actual intent).
+        """
+        n_c, n_t = control.sample_size, treatment.sample_size
+
+        if n_c < 2 or n_t < 2:
+            cs = VariantStats(
+                "control", n_c, float(control.mean) if n_c else 0.0, 0.0, None
+            )
+            ts = VariantStats(
+                "treatment", n_t, float(treatment.mean) if n_t else 0.0, 0.0, None
+            )
+            return MetricResult(metric_name, cs, ts, 0.0, None, None, False)
+
+        mean_c, mean_t = control.mean, treatment.mean
+        control_conv = max(0, min(control.conversion_count, n_c))
+        treat_conv = max(0, min(treatment.conversion_count, n_t))
+
+        # Convert the warehouse's sample variance (ddof=1, from SQL VARIANCE())
+        # to population variance (ddof=0), matching analyze_sequential()'s own
+        # bare np.var() convention exactly, so var_pooled means the same thing
+        # here as it always has for this method.
+        var_c_pop = control.variance * (n_c - 1) / n_c if control.variance > 0 else 0.0
+        var_t_pop = (
+            treatment.variance * (n_t - 1) / n_t if treatment.variance > 0 else 0.0
+        )
+        var_pooled = (var_c_pop * n_c + var_t_pop * n_t) / (n_c + n_t)
+
+        if var_pooled == 0:
+            relative_lift = 0.0
+            is_sig = False
+            e_value = 1.0
+            ci_lower = 0.0
+            ci_upper = 0.0
+            recommendation = "continue"
+        else:
+            delta = mean_t - mean_c
+            se = np.sqrt(var_pooled * (1 / n_c + 1 / n_t))
+
+            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
+            v = 1 / (1 / tau**2 + 1 / se**2)
+            m = v * delta / se**2
+            log_ratio = (
+                0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
+            )
+            e_value = float(np.exp(log_ratio))
+
+            is_sig = e_value >= (1 / alpha)
+            relative_lift = float(delta / abs(mean_c)) if mean_c != 0 else 0.0
+
+            rho = alpha
+            log_term = np.log(2.0 / (alpha * rho)) if alpha * rho > 0 else 0.0
+            margin = (
+                np.sqrt(2.0 * var_pooled * (1.0 / n_c + 1.0 / n_t) * log_term)
+                if log_term > 0
+                else se * 1.96
+            )
+            ci_lower = float(delta - margin)
+            ci_upper = float(delta + margin)
+
+            equiv_zone = abs(mean_c) * 0.01 if mean_c != 0 else 0.001
+            futile = abs(ci_upper) <= equiv_zone and abs(ci_lower) <= equiv_zone
+
+            if is_sig:
+                recommendation = "stop_significant"
+            elif futile:
+                recommendation = "stop_futility"
+            else:
+                recommendation = "continue"
+
+        cs = VariantStats(
+            "control",
+            n_c,
+            float(mean_c),
+            float(np.sqrt(var_c_pop)),
+            control_conv / n_c,
+        )
+        ts = VariantStats(
+            "treatment",
+            n_t,
+            float(mean_t),
+            float(np.sqrt(var_t_pop)),
+            treat_conv / n_t,
+        )
+
         suffix = (
             f"_msprt|e={e_value:.4f}"
             f"|ci=[{ci_lower:.4f},{ci_upper:.4f}]"

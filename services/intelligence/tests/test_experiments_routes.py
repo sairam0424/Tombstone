@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -113,6 +114,61 @@ def test_analyze_frequentist_does_not_fabricate_significance(mock_get_connector)
     assert body["p_value"] is not None
     assert body["p_value"] > 0.05
     assert body["is_significant"] is False
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_sequential_route_wiring(mock_get_connector):
+    """
+    Wiring test for the stat_method="sequential" branch: confirms the route
+    calls analyze_sequential_from_stats() with the real control/treatment
+    AggregatedMetric objects and returns 200 with correct sample_sizes.
+
+    Note: RunExperimentResponse has no field for the mSPRT e-value/CI/
+    recommendation (MetricResult.metric_name carries them as a suffix
+    string, but routes.py never returns metric_name) -- so the actual
+    statistical fix this method makes (see
+    TestSequentialFromStats::test_does_not_force_continue_for_genuine_nonzero_variance
+    in test_experiment_analyzer.py) has no visible effect through this API
+    response today. That's a pre-existing API-surface gap, flagged here,
+    not fixed -- out of scope for this correctness fix.
+    """
+    mock_get_connector.return_value = FakeConnector(
+        {
+            "control": AggregatedMetric(
+                variant="control",
+                sample_size=500,
+                mean=10.0,
+                std=2.0,
+                variance=4.0,
+                sum=5000.0,
+                conversion_count=500,
+            ),
+            "treatment": AggregatedMetric(
+                variant="treatment",
+                sample_size=500,
+                mean=12.0,
+                std=2.2,
+                variance=4.84,
+                sum=6000.0,
+                conversion_count=500,
+            ),
+        }
+    )
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze", json=_request_body(stat_method="sequential")
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sample_sizes"] == {"control": 500, "treatment": 500}
+    # sample_sizes alone doesn't prove the analyzer was actually called
+    # correctly (it's built directly from control/treatment.sample_size,
+    # independent of the analyzer call) -- relative_lift IS derived from
+    # the analyzer's real control/treatment means, so it catches a
+    # control/treatment argument swap that sample_sizes alone would miss.
+    assert body["relative_lift"] == pytest.approx(0.2)
 
 
 @patch("app.experiments.routes.get_connector")

@@ -418,3 +418,182 @@ class TestRelativeLift:
         )
 
         assert result.relative_lift == pytest.approx(0.2)
+
+
+class TestSequentialFromStats:
+    def test_matches_true_analyze_sequential_on_the_real_per_user_data(self):
+        rng = np.random.default_rng(7)
+        control_arr = rng.normal(loc=100.0, scale=15.0, size=800)
+        treatment_arr = rng.normal(loc=110.0, scale=15.0, size=800)
+
+        control = _aggregate(control_arr, "control")
+        treatment = _aggregate(treatment_arr, "treatment")
+
+        expected = ExperimentAnalyzer().analyze_sequential(
+            list(control_arr), list(treatment_arr), "metric"
+        )
+        actual = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert actual.metric_name == expected.metric_name
+        assert actual.is_significant == expected.is_significant
+        assert actual.relative_lift == pytest.approx(expected.relative_lift)
+
+    def test_matches_true_analyze_sequential_with_unequal_sample_sizes(self):
+        """
+        The pooled-variance formula weights each variant's variance by its
+        OWN sample size: (var_c*n_c + var_t*n_t) / (n_c+n_t). Every other
+        fidelity test in this class uses equal n_c/n_t, which can't
+        distinguish correct weighted pooling from a broken unweighted
+        average (n_c == n_t makes the two arithmetically identical) --
+        this one uses deliberately skewed sizes to actually exercise it.
+        """
+        rng = np.random.default_rng(11)
+        control_arr = rng.normal(loc=50.0, scale=5.0, size=300)
+        treatment_arr = rng.normal(loc=52.0, scale=8.0, size=900)
+
+        control = _aggregate(control_arr, "control")
+        treatment = _aggregate(treatment_arr, "treatment")
+
+        expected = ExperimentAnalyzer().analyze_sequential(
+            list(control_arr), list(treatment_arr), "metric"
+        )
+        actual = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert actual.metric_name == expected.metric_name
+        assert actual.is_significant == expected.is_significant
+        assert actual.relative_lift == pytest.approx(expected.relative_lift)
+
+    def test_does_not_force_continue_for_genuine_nonzero_variance(self):
+        """
+        Regression test for the bug this fixes: the old `[mean] * n`
+        reconstruction made every element in each variant identical, so
+        `var_pooled` was always EXACTLY 0.0 -- which forces this method's
+        own pre-existing zero-variance guard to report
+        e_value=1.0/ci=[0,0]/recommendation="continue" unconditionally.
+        mSPRT via /analyze's warehouse-aggregate path has therefore never
+        been able to report anything else, regardless of the real
+        underlying e-value. Feeding real variance must escape that branch.
+        """
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=500,
+            mean=10.0,
+            std=2.0,
+            variance=4.0,
+            sum=5000.0,
+            conversion_count=500,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=500,
+            mean=12.0,
+            std=2.2,
+            variance=4.84,
+            sum=6000.0,
+            conversion_count=500,
+        )
+
+        result = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert "e=1.0000|ci=[0.0000,0.0000]|continue" not in result.metric_name
+
+    def test_reconstructed_array_pattern_always_forces_continue(self):
+        """
+        Documents the exact bug being fixed, reproduced against the OLD
+        method: reconstructing `[mean] * n` per variant and calling the
+        original analyze_sequential() always lands on the degenerate
+        var_pooled==0 branch, no matter how large the real mean difference.
+        """
+        old_result = ExperimentAnalyzer().analyze_sequential(
+            [10.0] * 500, [12.0] * 500, "metric"
+        )
+        assert "e=1.0000|ci=[0.0000,0.0000]|continue" in old_result.metric_name
+        assert old_result.is_significant is False
+
+    def test_genuine_zero_variance_still_forces_continue(self):
+        """The zero-variance guard must still fire for REAL zero variance."""
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=500,
+            mean=10.0,
+            std=0.0,
+            variance=0.0,
+            sum=5000.0,
+            conversion_count=500,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=500,
+            mean=12.0,
+            std=0.0,
+            variance=0.0,
+            sum=6000.0,
+            conversion_count=500,
+        )
+
+        result = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert "e=1.0000|ci=[0.0000,0.0000]|continue" in result.metric_name
+        assert result.is_significant is False
+
+    def test_requires_at_least_two_observations_per_variant(self):
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=1,
+            mean=1.0,
+            std=0.0,
+            variance=0.0,
+            sum=1.0,
+            conversion_count=1,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=1,
+            mean=2.0,
+            std=0.0,
+            variance=0.0,
+            sum=2.0,
+            conversion_count=1,
+        )
+
+        result = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert result.p_value is None
+        assert result.is_significant is False
+
+    def test_conversion_rate_stays_within_bounds_even_with_bad_counts(self):
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=100,
+            mean=1.5,
+            std=0.3,
+            variance=0.09,
+            sum=150.0,
+            conversion_count=150,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=100,
+            mean=1.0,
+            std=0.3,
+            variance=0.09,
+            sum=100.0,
+            conversion_count=-5,
+        )
+
+        result = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        assert 0.0 <= result.control.conversion_rate <= 1.0
+        assert 0.0 <= result.treatment.conversion_rate <= 1.0
