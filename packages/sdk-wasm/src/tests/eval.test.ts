@@ -2,115 +2,64 @@
  * @tombstone/eval — Evaluation engine tests.
  *
  * Covers:
- *   - 12 cross-language MurmurHash3 v1 contract vectors (same inputs as
- *     test-contract/vectors.json, expected values computed from the
- *     correct inline MurmurHash3 implementation matching the murmurhash npm
- *     package output — see bucket comments for verification).
- *   - 12 hash-v2 (double-FNV32a) contract vectors with pre-computed
- *     expected values.
- *   - evaluate() OFF reason
- *   - evaluate() FALLTHROUGH reason
- *   - evaluate() RULE_MATCH reason
+ *   - The real cross-language rollout vectors from
+ *     packages/sdks/test-contract/vectors.json (loaded directly, not
+ *     hand-copied — a prior version of this file had self-derived v2
+ *     expected values computed from this engine's OWN (buggy) hashV2,
+ *     which is exactly why a real hashV2 algorithm bug went undetected
+ *     here: the test data and the code under test shared the same bug).
+ *   - evaluate() OFF / FALLTHROUGH / RULE_MATCH reasons.
+ *   - safeDefault-on-OFF (flag.safeDefault wins over the caller's
+ *     defaultValue, matching @tombstone/core exactly).
+ *   - Ascending rule-priority ordering (0 = highest, matching
+ *     @tombstone/core — this engine used to sort descending).
  */
 
-import assert from 'assert';
-import { isInRollout, evaluate } from '../index.js';
-import type { FlagState, EvalContext } from '../index.js';
+import assert from "assert";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+import { evaluate, isInRollout } from "../index.js";
+import type { EvalContext, FlagState } from "../index.js";
 
-// ---------------------------------------------------------------------------
-// Contract vectors — v1 (MurmurHash3, same inputs as test-contract/vectors.json)
-//
-// Expected values computed by running:
-//   murmurhash.v3(flagKey + userId) % 100  < rolloutPct
-// using the murmurhash npm package (the same algorithm our inline murmur32()
-// replicates). The test-contract/vectors.json expected_in_cohort values
-// contained some errors; the values here are algorithmically correct.
-// ---------------------------------------------------------------------------
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const V1_VECTORS: Array<{
+// packages/sdk-wasm/dist/tests/ -> ../../../sdks/test-contract/vectors.json
+// (same relative-path convention as @tombstone/core's contract.test.ts).
+const vectorsPath = join(__dirname, "../../../sdks/test-contract/vectors.json");
+const contractData = JSON.parse(readFileSync(vectorsPath, "utf-8"));
+
+interface RolloutVector {
   flag_key: string;
   user_id: string;
+  hash_version?: 1 | 2;
   rollout_pct: number;
   expected_in_cohort: boolean;
-  bucket?: number;
   note?: string;
-}> = [
-  // boundary guards (algorithm doesn't need hash)
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 100, expected_in_cohort: true,  note: '100% always true' },
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 0,   expected_in_cohort: false, note: '0% always false' },
-  // bucket=98 — 98 < 50 is false
-  { flag_key: 'checkout-v2', user_id: 'user-xyz-789', rollout_pct: 50,  expected_in_cohort: false, bucket: 98,  note: 'bucket(98) > 50' },
-  // bucket=66 — 66 < 50 is false
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 50,  expected_in_cohort: false, bucket: 66,  note: 'bucket(66) > 50' },
-  // bucket=12 — 12 < 50 is true
-  { flag_key: 'payment-gateway-fee-display', user_id: 'user-abc-123', rollout_pct: 50,  expected_in_cohort: true,  bucket: 12,  note: 'bucket(12) < 50' },
-  // bucket=37 — 37 < 75 is true
-  { flag_key: 'max-cart-items', user_id: 'user-abc-123', rollout_pct: 75,  expected_in_cohort: true,  bucket: 37,  note: 'bucket(37) < 75' },
-  // bucket=58 — 58 < 25 is false
-  { flag_key: 'max-cart-items', user_id: 'user-xyz-789', rollout_pct: 25,  expected_in_cohort: false, bucket: 58,  note: 'bucket(58) >= 25' },
-  // bucket=91 — 91 < 50 is false
-  { flag_key: 'a', user_id: 'b', rollout_pct: 50,  expected_in_cohort: false, bucket: 91,  note: 'minimal keys — hash stability check' },
-  // bucket=68 — 68 < 50 is false (empty userId doesn't panic)
-  { flag_key: 'checkout-v2', user_id: '', rollout_pct: 50,  expected_in_cohort: false, bucket: 68,  note: 'empty userId — must not panic' },
-  // bucket=54 — 54 < 1 is false
-  { flag_key: 'payments.checkout.new-flow.v2-beta', user_id: 'user-abc-123', rollout_pct: 1, expected_in_cohort: false, bucket: 54, note: 'deep dot-notation key' },
-  // bucket=66 — 66 < 99 is true
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 99,  expected_in_cohort: true,  bucket: 66,  note: 'bucket(66) < 99' },
-  // bucket=66 — 66 < 1 is false
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 1,   expected_in_cohort: false, bucket: 66,  note: 'bucket(66) >= 1' },
-];
+}
+
+const rolloutVectors: RolloutVector[] = contractData.vectors ?? [];
 
 // ---------------------------------------------------------------------------
-// Contract vectors — v2 (double-FNV32a)
-//
-// Expected values from: hashV2(flagKey, userId) < rolloutPct / 100
-// where hashV2(seed, value) = (fnv32a(seed+value) ^ fnv32a(value+seed)) / 2^32
-// Values verified by running the algorithm before committing.
+// Contract vectors — real vectors.json, both hashVersion 1 and 2
 // ---------------------------------------------------------------------------
 
-const V2_VECTORS: Array<{
-  flag_key: string;
-  user_id: string;
-  rollout_pct: number;
-  expected_in_cohort: boolean;
-  hash_approx?: string;
-  note?: string;
-}> = [
-  // boundary guards
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 100, expected_in_cohort: true,  note: 'v2: 100% always true' },
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 0,   expected_in_cohort: false, note: 'v2: 0% always false' },
-  // hash~0.5225 — 0.5225 < 0.50 is false
-  { flag_key: 'checkout-v2', user_id: 'user-xyz-789', rollout_pct: 50,  expected_in_cohort: false, hash_approx: '0.5225', note: 'v2: hash > 0.50' },
-  // hash~0.7091 — 0.7091 < 0.50 is false
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 50,  expected_in_cohort: false, hash_approx: '0.7091', note: 'v2: hash > 0.50 (differs from contract note)' },
-  // hash~0.6142 — 0.6142 < 0.50 is false
-  { flag_key: 'payment-gateway-fee-display', user_id: 'user-abc-123', rollout_pct: 50,  expected_in_cohort: false, hash_approx: '0.6142', note: 'v2: hash > 0.50' },
-  // hash~0.4862 — 0.4862 < 0.75 is true
-  { flag_key: 'max-cart-items', user_id: 'user-abc-123', rollout_pct: 75,  expected_in_cohort: true,  hash_approx: '0.4862', note: 'v2: hash < 0.75' },
-  // hash~0.8972 — 0.8972 < 0.25 is false
-  { flag_key: 'max-cart-items', user_id: 'user-xyz-789', rollout_pct: 25,  expected_in_cohort: false, hash_approx: '0.8972', note: 'v2: hash > 0.25' },
-  // hash~0.4416 — 0.4416 < 0.50 is true
-  { flag_key: 'a', user_id: 'b', rollout_pct: 50,  expected_in_cohort: true,  hash_approx: '0.4416', note: 'v2: minimal keys' },
-  // hash~0.0000 — 0.0000 < 0.50 is true (empty userId gives near-zero hash)
-  { flag_key: 'checkout-v2', user_id: '', rollout_pct: 50,  expected_in_cohort: true,  hash_approx: '0.0000', note: 'v2: empty userId — must not panic' },
-  // hash~0.2179 — 0.2179 < 0.01 is false
-  { flag_key: 'payments.checkout.new-flow.v2-beta', user_id: 'user-abc-123', rollout_pct: 1,   expected_in_cohort: false, hash_approx: '0.2179', note: 'v2: deep key, narrow rollout' },
-  // hash~0.7091 — 0.7091 < 0.99 is true
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 99,  expected_in_cohort: true,  hash_approx: '0.7091', note: 'v2: 99% includes user' },
-  // hash~0.7091 — 0.7091 < 0.01 is false
-  { flag_key: 'checkout-v2', user_id: 'user-abc-123', rollout_pct: 1,   expected_in_cohort: false, hash_approx: '0.7091', note: 'v2: 1% excludes user' },
-];
+describe("@tombstone/eval — isInRollout (real cross-SDK contract vectors)", () => {
+  assert.ok(
+    rolloutVectors.length > 0,
+    "contract vectors.json must not be empty",
+  );
 
-// ---------------------------------------------------------------------------
-// Test suites
-// ---------------------------------------------------------------------------
-
-describe('@tombstone/eval — isInRollout (v1 contract vectors)', () => {
-  for (const v of V1_VECTORS) {
-    const bucketDesc = v.bucket !== undefined ? ` [bucket=${v.bucket}]` : '';
-    const label = `flag=${v.flag_key} user=${JSON.stringify(v.user_id)} pct=${v.rollout_pct}${bucketDesc}${v.note ? ` — ${v.note}` : ''}`;
+  for (const v of rolloutVectors) {
+    const hashVersion = v.hash_version ?? 1;
+    const label = `flag=${v.flag_key} user=${JSON.stringify(v.user_id)} pct=${v.rollout_pct} v${hashVersion}${v.note ? ` — ${v.note}` : ""}`;
     it(label, () => {
-      const result = isInRollout(v.flag_key, v.user_id, v.rollout_pct, 1);
+      const result = isInRollout(
+        v.flag_key,
+        v.user_id,
+        v.rollout_pct,
+        hashVersion,
+      );
       assert.strictEqual(
         result,
         v.expected_in_cohort,
@@ -120,233 +69,373 @@ describe('@tombstone/eval — isInRollout (v1 contract vectors)', () => {
   }
 });
 
-describe('@tombstone/eval — isInRollout (v2 contract vectors)', () => {
-  for (const v of V2_VECTORS) {
-    const hashDesc = v.hash_approx ? ` [hash~${v.hash_approx}]` : '';
-    const label = `v2 flag=${v.flag_key} user=${JSON.stringify(v.user_id)} pct=${v.rollout_pct}${hashDesc}${v.note ? ` — ${v.note}` : ''}`;
-    it(label, () => {
-      const result = isInRollout(v.flag_key, v.user_id, v.rollout_pct, 2);
-      assert.strictEqual(
-        result,
-        v.expected_in_cohort,
-        `Expected ${v.expected_in_cohort} but got ${result}`,
-      );
-    });
-  }
-});
+// ---------------------------------------------------------------------------
+// evaluate()
+// ---------------------------------------------------------------------------
 
-describe('@tombstone/eval — evaluate()', () => {
+describe("@tombstone/eval — evaluate()", () => {
   const baseFlag: FlagState = {
-    flagKey: 'my-flag',
+    flagKey: "my-flag",
     enabled: true,
     rolloutPct: 100,
-    safeDefault: 'false',
+    safeDefault: "false",
   };
 
   // -------------------------------------------------------------------
-  // OFF reason
+  // OFF reason — uses flag.safeDefault, not the caller's defaultValue
   // -------------------------------------------------------------------
-  it('returns OFF reason when flag.enabled is false', () => {
+  it("returns OFF reason when flag.enabled is false", () => {
     const flag: FlagState = { ...baseFlag, enabled: false };
-    const result = evaluate(flag, { userId: 'user-1' }, false);
-    assert.strictEqual(result.reason, 'OFF');
+    const result = evaluate(flag, { userId: "user-1" }, false);
+    assert.strictEqual(result.reason, "OFF");
     assert.strictEqual(result.value, false);
   });
 
-  it('returns supplied defaultValue when OFF', () => {
-    const flag: FlagState = { ...baseFlag, enabled: false };
-    const result = evaluate(flag, {}, 'my-default');
-    assert.strictEqual(result.value, 'my-default');
-    assert.strictEqual(result.reason, 'OFF');
+  it("OFF returns flag.safeDefault converted to defaultValue's type, NOT the caller's defaultValue verbatim", () => {
+    // safeDefault='true' but the caller passes false — the flag's own
+    // configured off-state value must win, matching @tombstone/core.
+    const flag: FlagState = {
+      ...baseFlag,
+      enabled: false,
+      safeDefault: "true",
+    };
+    const result = evaluate(flag, { userId: "user-1" }, false);
+    assert.strictEqual(result.reason, "OFF");
+    assert.strictEqual(result.value, true);
   });
 
-  it('returns OFF with boolean default value false', () => {
+  it("OFF with a string defaultValue: safeDefault is used as-is (string identity)", () => {
+    const flag: FlagState = {
+      ...baseFlag,
+      enabled: false,
+      safeDefault: "archived",
+    };
+    const result = evaluate(flag, {}, "my-default");
+    assert.strictEqual(result.value, "archived");
+    assert.strictEqual(result.reason, "OFF");
+  });
+
+  it("OFF with a numeric defaultValue: safeDefault is parsed as a number", () => {
+    const flag: FlagState = { ...baseFlag, enabled: false, safeDefault: "42" };
+    const result = evaluate(flag, {}, 0);
+    assert.strictEqual(result.value, 42);
+    assert.strictEqual(result.reason, "OFF");
+  });
+
+  it("OFF falls back to defaultValue when safeDefault fails to parse for a numeric default", () => {
+    const flag: FlagState = {
+      ...baseFlag,
+      enabled: false,
+      safeDefault: "not-a-number",
+    };
+    const result = evaluate(flag, {}, 7);
+    assert.strictEqual(result.value, 7);
+    assert.strictEqual(result.reason, "OFF");
+  });
+
+  it("returns OFF with boolean default value false", () => {
     const flag: FlagState = { ...baseFlag, enabled: false };
-    const result = evaluate(flag, { userId: 'any' }, false);
-    assert.strictEqual(result.reason, 'OFF');
+    const result = evaluate(flag, { userId: "any" }, false);
+    assert.strictEqual(result.reason, "OFF");
     assert.strictEqual(result.value, false);
   });
 
   // -------------------------------------------------------------------
   // FALLTHROUGH reason
   // -------------------------------------------------------------------
-  it('returns FALLTHROUGH + true at 100% rollout', () => {
-    const result = evaluate(baseFlag, { userId: 'anyone' }, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+  it("returns FALLTHROUGH + true at 100% rollout", () => {
+    const result = evaluate(baseFlag, { userId: "anyone" }, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });
 
-  it('returns FALLTHROUGH + defaultValue when user not in 0% rollout', () => {
+  it("returns FALLTHROUGH + defaultValue when user not in 0% rollout", () => {
     const flag: FlagState = { ...baseFlag, rolloutPct: 0 };
-    const result = evaluate(flag, { userId: 'user-1' }, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    const result = evaluate(flag, { userId: "user-1" }, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, false);
   });
 
-  it('FALLTHROUGH is consistent — same user always gets same bucket', () => {
-    const flag: FlagState = { ...baseFlag, flagKey: 'checkout-v2', rolloutPct: 50 };
-    const ctx: EvalContext = { userId: 'user-abc-123' };
+  it("FALLTHROUGH is consistent — same user always gets same bucket", () => {
+    const flag: FlagState = {
+      ...baseFlag,
+      flagKey: "checkout-v2",
+      rolloutPct: 50,
+    };
+    const ctx: EvalContext = { userId: "user-abc-123" };
     const first = evaluate(flag, ctx, false);
     for (let i = 0; i < 20; i++) {
       const next = evaluate(flag, ctx, false);
-      assert.strictEqual(next.value, first.value, 'Evaluation must be deterministic');
+      assert.strictEqual(
+        next.value,
+        first.value,
+        "Evaluation must be deterministic",
+      );
       assert.strictEqual(next.reason, first.reason);
     }
   });
 
-  it('v1 contract: payment-gateway-fee-display + user-abc-123 at 50% → in cohort', () => {
-    // bucket=12, 12 < 50 is true
+  it("v1 contract: payment-gateway-fee-display + user-abc-123 at 50% → in cohort", () => {
     const flag: FlagState = {
-      flagKey: 'payment-gateway-fee-display',
+      flagKey: "payment-gateway-fee-display",
       enabled: true,
       rolloutPct: 50,
-      safeDefault: 'false',
+      safeDefault: "false",
       hashVersion: 1,
     };
-    const result = evaluate(flag, { userId: 'user-abc-123' }, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    const result = evaluate(flag, { userId: "user-abc-123" }, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });
 
-  it('v1 contract: checkout-v2 + user-abc-123 at 1% → NOT in cohort', () => {
-    // bucket=66, 66 < 1 is false
+  it("v1 contract: checkout-v2 + user-abc-123 at 1% → NOT in cohort", () => {
     const flag: FlagState = {
-      flagKey: 'checkout-v2',
+      flagKey: "checkout-v2",
       enabled: true,
       rolloutPct: 1,
-      safeDefault: 'false',
+      safeDefault: "false",
       hashVersion: 1,
     };
-    const result = evaluate(flag, { userId: 'user-abc-123' }, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    const result = evaluate(flag, { userId: "user-abc-123" }, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, false);
   });
 
   // -------------------------------------------------------------------
   // RULE_MATCH reason
   // -------------------------------------------------------------------
-  it('returns RULE_MATCH when IN operator matches context attribute', () => {
+  it("returns RULE_MATCH when IN operator matches context attribute", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 0,
       targetingRules: [
-        { attribute: 'plan', operator: 'IN', values: ['pro', 'enterprise'], variation: 'enabled', priority: 10 },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro", "enterprise"],
+          variation: "enabled",
+          priority: 10,
+        },
       ],
     };
-    const ctx: EvalContext = { userId: 'user-1', plan: 'pro' };
+    const ctx: EvalContext = { userId: "user-1", plan: "pro" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'RULE_MATCH');
-    assert.strictEqual(result.value, 'enabled');
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "enabled");
   });
 
-  it('RULE_MATCH returns the matched rule variation', () => {
+  it("RULE_MATCH returns the matched rule variation", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 0,
       targetingRules: [
-        { attribute: 'country', operator: 'EQ', values: ['US'], variation: 'us-variant', priority: 5 },
+        {
+          attribute: "country",
+          operator: "EQ",
+          values: ["US"],
+          variation: "us-variant",
+          priority: 5,
+        },
       ],
     };
-    const ctx: EvalContext = { userId: 'u', country: 'US' };
+    const ctx: EvalContext = { userId: "u", country: "US" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'RULE_MATCH');
-    assert.strictEqual(result.value, 'us-variant');
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "us-variant");
   });
 
-  it('higher priority rule wins over lower priority rule', () => {
+  it("lower priority NUMBER wins over higher priority number — 0 is highest, matching @tombstone/core", () => {
+    // Regression test: this engine used to sort DESCENDING (higher number
+    // wins), the opposite of @tombstone/core's documented "0 = highest"
+    // convention — two rules that both match must resolve to the one
+    // with the SMALLER priority number.
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 0,
       targetingRules: [
-        { attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'low-priority', priority: 1 },
-        { attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'high-priority', priority: 10 },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "priority-10",
+          priority: 10,
+        },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "priority-1",
+          priority: 1,
+        },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "priority-0",
+          priority: 0,
+        },
       ],
     };
-    const ctx: EvalContext = { userId: 'u', plan: 'pro' };
+    const ctx: EvalContext = { userId: "u", plan: "pro" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'RULE_MATCH');
-    assert.strictEqual(result.value, 'high-priority');
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "priority-0");
   });
 
-  it('falls through when targeting rule does not match', () => {
+  it("falls through when targeting rule does not match", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 100,
       targetingRules: [
-        { attribute: 'plan', operator: 'IN', values: ['enterprise'], variation: 'enabled', priority: 10 },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["enterprise"],
+          variation: "enabled",
+          priority: 10,
+        },
       ],
     };
     // plan=pro not in ['enterprise'], falls through to 100% rollout
-    const ctx: EvalContext = { userId: 'user-abc-123', plan: 'pro' };
+    const ctx: EvalContext = { userId: "user-abc-123", plan: "pro" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });
 
-  it('NOT_IN operator: RULE_MATCH when attribute NOT in list', () => {
+  it("NOT_IN operator: RULE_MATCH when attribute NOT in list", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 0,
       targetingRules: [
-        { attribute: 'plan', operator: 'NOT_IN', values: ['enterprise'], variation: 'free-variant', priority: 5 },
+        {
+          attribute: "plan",
+          operator: "NOT_IN",
+          values: ["enterprise"],
+          variation: "free-variant",
+          priority: 5,
+        },
       ],
     };
-    const ctx: EvalContext = { userId: 'u', plan: 'free' };
+    const ctx: EvalContext = { userId: "u", plan: "free" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'RULE_MATCH');
-    assert.strictEqual(result.value, 'free-variant');
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "free-variant");
   });
 
-  it('PREFIX operator: RULE_MATCH when attribute starts with value', () => {
+  it("PREFIX operator: RULE_MATCH when attribute starts with value", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 0,
       targetingRules: [
-        { attribute: 'userId', operator: 'PREFIX', values: ['beta-'], variation: 'beta', priority: 5 },
+        {
+          attribute: "userId",
+          operator: "PREFIX",
+          values: ["beta-"],
+          variation: "beta",
+          priority: 5,
+        },
       ],
     };
-    const ctx: EvalContext = { userId: 'beta-user-42' };
+    const ctx: EvalContext = { userId: "beta-user-42" };
     const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'RULE_MATCH');
-    assert.strictEqual(result.value, 'beta');
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "beta");
   });
 
-  it('RULE_MATCH skips rule when context attribute is missing', () => {
+  it("GTE operator: numeric string comparison", () => {
+    const flag: FlagState = {
+      ...baseFlag,
+      rolloutPct: 0,
+      targetingRules: [
+        {
+          attribute: "age",
+          operator: "GTE",
+          values: ["18"],
+          variation: "adult",
+          priority: 0,
+        },
+      ],
+    };
+    const result = evaluate(flag, { userId: "u", age: "18" }, false);
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "adult");
+  });
+
+  it("GT operator does not treat a non-numeric-looking string as its leading digits", () => {
+    // Regression test: this engine used to parse comparison operands with
+    // parseFloat, which happily parses "5px" as 5 — @tombstone/core uses
+    // Number()+isFinite, which correctly treats "5px" as not-a-number and
+    // never matches. A rule with a non-numeric attribute value must be
+    // inconclusive (no match), not silently coerced.
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 100,
       targetingRules: [
-        { attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'enabled', priority: 10 },
+        {
+          attribute: "width",
+          operator: "GT",
+          values: ["3"],
+          variation: "wide",
+          priority: 0,
+        },
       ],
     };
-    // No 'plan' attribute in context — rule does not match, falls through to rollout
-    const ctx: EvalContext = { userId: 'user-abc-123' };
-    const result = evaluate(flag, ctx, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    const result = evaluate(flag, { userId: "u", width: "5px" }, false);
+    // No match -> falls through to the 100% rollout, not RULE_MATCH.
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });
 
-  it('rules array empty — falls through to rollout', () => {
+  it("RULE_MATCH skips rule when context attribute is missing", () => {
+    const flag: FlagState = {
+      ...baseFlag,
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "enabled",
+          priority: 10,
+        },
+      ],
+    };
+    // No 'plan' attribute in context — rule does not match, falls through to rollout
+    const ctx: EvalContext = { userId: "user-abc-123" };
+    const result = evaluate(flag, ctx, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("rules array empty — falls through to rollout", () => {
     const flag: FlagState = {
       ...baseFlag,
       rolloutPct: 100,
       targetingRules: [],
     };
-    const result = evaluate(flag, { userId: 'any' }, false);
-    assert.strictEqual(result.reason, 'FALLTHROUGH');
+    const result = evaluate(flag, { userId: "any" }, false);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });
 
-  it('disabled flag with rules — returns OFF without evaluating rules', () => {
+  it("disabled flag with rules — returns OFF (safeDefault) without evaluating rules", () => {
     const flag: FlagState = {
       ...baseFlag,
       enabled: false,
+      safeDefault: "true",
       targetingRules: [
-        { attribute: 'plan', operator: 'IN', values: ['pro'], variation: 'enabled', priority: 10 },
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "enabled",
+          priority: 10,
+        },
       ],
     };
-    const result = evaluate(flag, { userId: 'u', plan: 'pro' }, 'default');
-    assert.strictEqual(result.reason, 'OFF');
-    assert.strictEqual(result.value, 'default');
+    const result = evaluate(flag, { userId: "u", plan: "pro" }, false);
+    assert.strictEqual(result.reason, "OFF");
+    assert.strictEqual(result.value, true);
   });
 });

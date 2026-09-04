@@ -12,9 +12,15 @@
   "homepage": "https://github.com/sairam0424/Tombstone",
   "bugs": { "url": "https://github.com/sairam0424/Tombstone/issues" },
   "license": "MIT",
-  "scripts": { "build": "tsc -p tsconfig.build.json" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run build && node --experimental-vm-modules node_modules/.bin/mocha 'dist/tests/*.test.js'"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^22.0.0",
+    "mocha": "^10.0.0",
     "typescript": "~5.8.2"
   },
   "keywords": [

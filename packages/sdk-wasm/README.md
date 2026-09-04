@@ -4,7 +4,7 @@ Zero-dependency evaluation engine for Tombstone.
 
 Runs in: **Node.js**, **browser**, **Deno**, **Bun**, **Cloudflare Workers**, and any WASM-capable JS runtime.
 
-**Version:** 0.1.0 | **Tests:** 41/41 passing | **Dependencies:** none
+**Version:** 0.1.0 | **Tests:** 46/46 passing | **Dependencies:** none
 
 ## Why @tombstone/eval?
 
@@ -95,13 +95,21 @@ function isInRollout(
 ): boolean
 ```
 
-## 5-Step Evaluation Pipeline
+## Evaluation Pipeline
 
-`evaluate()` implements the same pipeline as `@tombstone/core`:
+`evaluate()` implements 3 of `@tombstone/core`'s 5 pipeline steps — Core's
+step 2 (prerequisites) and step 3 (individual target list) are **not yet
+implemented** here, since they require looking up other flags via a
+cache/lookup abstraction this zero-dependency engine doesn't yet expose
+(a disclosed gap, not a bug — see the comparison table below):
 
 1. **Guard** — flag must be defined (returns `ERROR` if missing)
-2. **OFF check** — `flag.enabled` must be `true` (returns `OFF` if false)
-3. **Targeting rules** — rules sorted by `priority` descending (higher number = higher priority in this engine); first match returns `RULE_MATCH`
+2. **OFF check** — `flag.enabled` must be `true` (returns `OFF` with
+   `flag.safeDefault`, converted to `defaultValue`'s type — NOT the
+   caller's `defaultValue` verbatim, matching `@tombstone/core` exactly)
+3. **Targeting rules** — rules sorted by `priority` ascending (`0` =
+   highest priority, matching `@tombstone/core`); first match returns
+   `RULE_MATCH`
 4. **Rollout hash check** — `isInRollout()` with `flag.hashVersion`
 5. **Default fallthrough** — returns `defaultValue` with reason `FALLTHROUGH`
 
@@ -112,7 +120,7 @@ Both hash algorithms are inlined — no external packages.
 | `hashVersion` | Algorithm | Notes |
 |---|---|---|
 | `1` (default) | MurmurHash3 x86 32-bit | Identical to `murmurhash` npm `v3()` |
-| `2` | Double-FNV32a | Better avalanche for short/numeric user IDs |
+| `2` | Double-FNV32a, 10,000-bucket | `inner = fnv32a(flagKey+userId)`, `outer = fnv32a(String(inner))`, `bucket = (outer % 10000) / 10000` — same algorithm as `@tombstone/core`'s `isInRollout` hashVersion===2 branch |
 
 ```typescript
 // Hash v1 (MurmurHash3)
@@ -122,8 +130,10 @@ isInRollout('my_flag', 'u123', 50, 1);
 isInRollout('my_flag', 'u123', 50, 2);
 ```
 
-Both hash algorithms produce consistent bucket assignments that match
-`@tombstone/core` for the same inputs.
+Both hash algorithms produce bucket assignments that match `@tombstone/core`
+for the same inputs, byte-for-byte, verified against the real cross-SDK
+contract vectors in `packages/sdks/test-contract/vectors.json` (not a
+hand-copied fixture).
 
 ## Types
 
@@ -210,20 +220,26 @@ import { evaluate, isInRollout } from '@tombstone/eval';
 | Bundle size | ~4KB | ~25KB |
 | Hash v1 (MurmurHash3) | Inlined | npm package |
 | Hash v2 (FNV32a) | Inlined | Inlined |
-| Targeting rules | Yes | Yes |
-| 5-step pipeline | Yes | Yes |
+| Targeting rules (single-condition, IN/EQ/CONTAINS/etc.) | Yes | Yes |
+| Prerequisites (Core's step 2) | **No** — not yet implemented | Yes |
+| Individual target list (Core's step 3) | **No** — not yet implemented | Yes |
+| Pipeline steps implemented | 3 of 5 | 5 of 5 |
 
 Use `@tombstone/eval` when you need evaluation without a persistent SSE
 connection — edge functions, browser bundles, serverless cold starts, or any
-non-Node runtime. Use `@tombstone/core` for long-lived server processes that
-benefit from real-time flag streaming.
+non-Node runtime, **and your flags don't rely on prerequisites or individual
+user targeting** (not yet supported here — see the pipeline gap above). Use
+`@tombstone/core` for long-lived server processes, or any flag that needs the
+full 5-step pipeline.
 
 ## Tests
 
 ```bash
 npm test
-# 41 passing
+# 46 passing
 ```
 
-Tests cover hash v1/v2 parity with `@tombstone/core`, all rule operators,
-rollout edge cases (0%, 100%, boundary), disabled flags, and missing flags.
+Tests run against the real cross-SDK contract vectors in
+`packages/sdks/test-contract/vectors.json` (not a hand-copied fixture), plus
+all rule operators, rollout edge cases (0%, 100%, boundary), safeDefault-on-OFF,
+rule-priority ordering, disabled flags, and missing flags.
