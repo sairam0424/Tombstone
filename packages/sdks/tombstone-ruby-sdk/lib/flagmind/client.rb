@@ -6,7 +6,7 @@ require_relative "evaluation_engine"
 
 module Tombstone
   class Client
-    def initialize(sdk_key:, environment: "production", api_url: nil, gateway_url: nil, defaults: {})
+    def initialize(sdk_key:, environment: "production", api_url: nil, gateway_url: nil, defaults: {}, lag_debounce: 0.5)
       @sdk_key = sdk_key
       @environment = environment
       @api_url = api_url || "http://localhost:8081"
@@ -16,6 +16,9 @@ module Tombstone
       @engine = EvaluationEngine.new
       @connected = false
       @sse_thread = nil
+      @lag_debounce = lag_debounce
+      @lag_mutex = Mutex.new
+      @lag_timer = nil
     end
 
     def connect
@@ -40,6 +43,7 @@ module Tombstone
     def disconnect
       @connected = false
       @sse_thread&.kill
+      @lag_timer&.kill
     end
 
     private
@@ -74,9 +78,15 @@ module Tombstone
               req["Authorization"] = "Bearer #{@sdk_key}"
               req["Accept"] = "text/event-stream"
               http.request(req) do |resp|
+                current_event = nil
                 resp.read_body do |chunk|
                   chunk.each_line do |line|
-                    apply_event(line[5..].strip) if line.start_with?("data:")
+                    if line.start_with?("event:")
+                      current_event = line[6..].strip
+                    elsif line.start_with?("data:")
+                      dispatch_sse_event(current_event, line[5..].strip)
+                      current_event = nil
+                    end
                   end
                 end
               end
@@ -97,6 +107,33 @@ module Tombstone
       )
     rescue JSON::ParserError
       # malformed event — ignore
+    end
+
+    # Route a parsed SSE frame. A "lag" frame is the gateway warning us that our
+    # buffer overflowed and it DROPPED the real flag-update event; recover the
+    # dropped update by refetching the full snapshot. Everything else is a normal
+    # flag-update event applied incrementally to the cache.
+    def dispatch_sse_event(event_type, data)
+      if event_type == "lag"
+        schedule_snapshot_refetch
+      else
+        apply_event(data)
+      end
+    end
+
+    # Debounced full-snapshot refetch reusing the same path connect() uses to
+    # populate the cache. A slow client can receive many lag frames in a burst,
+    # so coalesce them into a single refetch inside a ~@lag_debounce window. The
+    # timer is a plain Thread guarded by @lag_mutex and is cancelled on disconnect.
+    def schedule_snapshot_refetch
+      @lag_mutex.synchronize do
+        return if @lag_timer&.alive?
+        @lag_timer = Thread.new do
+          sleep(@lag_debounce)
+          fetch_snapshot if @connected
+          @lag_mutex.synchronize { @lag_timer = nil }
+        end
+      end
     end
   end
 end

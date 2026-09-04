@@ -1,67 +1,64 @@
 package v1
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 // ComplianceHandler serves SOC 2 evidence and control documentation.
 type ComplianceHandler struct {
 	db     *sql.DB
 	logger *zap.Logger
+	// signer signs audit exports with a key DISTINCT from JWT_SECRET (SEC-4).
+	// nil means no dedicated key is configured; export then fails closed rather
+	// than falling back to the JWT signing key.
+	signer *secrets.ComplianceSigner
+	// audit recomputes real chain integrity (AUD-1) instead of asserting it.
+	audit *audit.Writer
+	// policySource reports the live authorization source ("opa" or
+	// "fallback_matrix"). A func, not a value, because OPA policies hot-reload.
+	policySource func() string
 }
 
 // NewComplianceHandler constructs a ComplianceHandler.
-func NewComplianceHandler(db *sql.DB, logger *zap.Logger) *ComplianceHandler {
-	return &ComplianceHandler{db: db, logger: logger}
+func NewComplianceHandler(db *sql.DB, logger *zap.Logger, signer *secrets.ComplianceSigner, auditW *audit.Writer, policySource func() string) *ComplianceHandler {
+	return &ComplianceHandler{db: db, logger: logger, signer: signer, audit: auditW, policySource: policySource}
 }
 
 // GetEvidence handles GET /api/v1/compliance/evidence
 // Returns a SOC 2 evidence bundle computed from live database state.
 func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	q := sqlcgen.New(h.db)
 
 	// Total audit log entries.
-	var totalAuditEntries int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&totalAuditEntries)
+	totalAuditEntries64, _ := q.CountAuditLogEntries(ctx)
+	totalAuditEntries := int(totalAuditEntries64)
 
 	// Approval rate: APPROVED or APPLIED out of all non-PENDING change requests.
-	var approved, total int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT
-		    COUNT(*) FILTER (WHERE status IN ('APPROVED','APPLIED')),
-		    COUNT(*)
-		FROM change_requests
-		WHERE status != 'PENDING'
-	`).Scan(&approved, &total)
+	stats, _ := q.ChangeRequestApprovalStats(ctx)
+	approved, total := int(stats.Approved), int(stats.Total)
 	var approvalRate float64
 	if total > 0 {
 		approvalRate = float64(approved) / float64(total)
 	}
 
 	// Break-glass token uses in last 90 days.
-	var breakGlassUses int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM break_glass_tokens
-		WHERE used = true
-		  AND used_at >= now() - INTERVAL '90 days'
-	`).Scan(&breakGlassUses)
+	breakGlassUses64, _ := q.CountRecentBreakGlassUses(ctx)
+	breakGlassUses := int(breakGlassUses64)
 
 	// Active service tokens (not revoked).
-	var serviceTokensActive int
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM service_tokens WHERE revoked_at IS NULL
-	`).Scan(&serviceTokensActive)
+	serviceTokensActive64, _ := q.CountActiveServiceTokens(ctx)
+	serviceTokensActive := int(serviceTokensActive64)
 
 	type control struct {
 		ID          string `json:"id"`
@@ -102,17 +99,64 @@ func (h *ComplianceHandler) GetEvidence(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"generated_at":                   time.Now().UTC().Format(time.RFC3339),
-		"audit_log_coverage":             "100%",
-		"total_audit_entries":            totalAuditEntries,
-		"merkle_chain_integrity":         true,
-		"change_approval_rate":           approvalRate,
-		"rbac_enabled":                   true,
+	// AUD-1: these three fields were hardcoded — audit_log_coverage was the
+	// literal string "100%", and merkle_chain_integrity and rbac_enabled were
+	// the literal `true`. Compliance evidence asserting facts nobody computed is
+	// worse than no evidence, so each is now derived.
+	//
+	// Chain verification walks the whole audit_log, which is O(n); audit_log
+	// partitioning (DATA-2) is what makes this cheap at scale.
+	evidence := map[string]any{
+		"generated_at":                    time.Now().UTC().Format(time.RFC3339),
+		"total_audit_entries":             totalAuditEntries,
+		"change_approval_rate":            approvalRate,
 		"break_glass_token_uses_last_90d": breakGlassUses,
-		"service_tokens_active":          serviceTokensActive,
-		"controls":                       controls,
-	})
+		"service_tokens_active":           serviceTokensActive,
+		"controls":                        controls,
+	}
+
+	if h.audit == nil {
+		evidence["merkle_chain_integrity"] = nil
+		evidence["audit_log_coverage"] = nil
+		evidence["merkle_chain_note"] = "AUDIT_HMAC_KEY is not configured — chain integrity cannot be computed and is NOT asserted"
+	} else if report, err := h.audit.Verify(ctx, ""); err != nil { // "" = whole-log, cross-project figure by design
+		h.logger.Error("compliance: audit verification failed", zap.Error(err))
+		evidence["merkle_chain_integrity"] = nil
+		evidence["audit_log_coverage"] = nil
+		evidence["merkle_chain_note"] = "chain verification failed to run — integrity is NOT asserted"
+	} else {
+		evidence["merkle_chain_integrity"] = report.Intact
+		// Real coverage: the share of entries whose keyed hash was recomputed and
+		// checked. Pre-AUD-1 rows are excluded rather than counted as verified.
+		coverage := 0.0
+		if report.TotalEntries > 0 {
+			coverage = float64(report.VerifiedEntries) / float64(report.TotalEntries) * 100
+		}
+		evidence["audit_log_coverage"] = fmt.Sprintf("%.1f%%", coverage)
+		evidence["audit_chain_verified_entries"] = report.VerifiedEntries
+		evidence["audit_chain_legacy_entries"] = report.LegacyEntries
+		evidence["audit_chain_failures"] = report.FailureCount
+		if report.Note != "" {
+			evidence["merkle_chain_note"] = report.Note
+		}
+	}
+
+	// Replaces the hardcoded rbac_enabled=true with facts: which policy engine is
+	// actually live, and how many role assignments exist. Since SEC-1 every
+	// /api/v1 route carries a RequirePermission gate (enforced by a structural
+	// test), so enforcement is a property of the route table, not a self-claim.
+	source := "unknown"
+	if h.policySource != nil {
+		source = h.policySource()
+	}
+	roleAssignments64, _ := q.CountRoleAssignments(ctx)
+	roleAssignments := int(roleAssignments64)
+	evidence["rbac"] = map[string]any{
+		"policy_source":    source,
+		"role_assignments": roleAssignments,
+	}
+
+	writeJSON(w, http.StatusOK, evidence)
 }
 
 // GetControls handles GET /api/v1/compliance/controls
@@ -218,17 +262,49 @@ func (h *ComplianceHandler) GetControls(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"framework":  "SOC 2 Type II — Trust Services Criteria 2017",
+		"framework":    "SOC 2 Type II — Trust Services Criteria 2017",
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"controls":   controls,
+		"controls":     controls,
 	})
 }
 
 // ExportAuditLog handles GET /api/v1/compliance/export
 // Streams the full audit log as JSONL with a trailing HMAC-SHA256 signature line.
 func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Request) {
-	secret := os.Getenv("JWT_SECRET")
+	// SEC-4: this export was signed with JWT_SECRET, so anyone able to VERIFY an
+	// export could also MINT auth tokens. Signing now uses a separate key and
+	// fails closed if that key is absent — silently reusing JWT_SECRET would
+	// reintroduce the vulnerability.
+	if h.signer == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"compliance export signing key is not configured (set COMPLIANCE_SIGNING_KEY)")
+		return
+	}
 
+	// TEN-1a-2: an adversarial review of the audit_log project-scoping fix
+	// found this query STILL unscoped — ADMIN is a per-project role
+	// (user_roles is keyed by (user_id, project_id)), so a Project A admin
+	// has no special relationship to Project B, yet this exported EVERY
+	// project's full raw audit rows (prev_state/new_state, actor, ip_address)
+	// under a cryptographic signature that lends the leaked data false
+	// authority. Unlike GetEvidence/GetControls just below — which report
+	// system-wide AGGREGATE counts and stay intentionally cross-project — this
+	// hands over row-level content, the same severity class ListAuditLog was.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	// Deliberately NOT converted to sqlc (DATA-1b adversarial review): sqlc's
+	// generated :many methods always fully materialize the whole result set
+	// into a slice before returning, but this handler is written to STREAM —
+	// scan and write one row at a time so memory use is O(1) regardless of
+	// how large a project's audit history has grown (retention/DATA-2 prunes
+	// the hot table on its own schedule, not on every export call) and so the
+	// client starts receiving bytes immediately rather than waiting for the
+	// entire history to be fetched first. Going through sqlc here would have
+	// silently regressed both properties for no benefit, since the whole
+	// point of streaming is bypassed by a method that returns []Row.
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, COALESCE(flag_key,''), COALESCE(environment,''), actor, event_type,
 		       COALESCE(prev_state::text,'null'), COALESCE(new_state::text,'null'),
@@ -236,8 +312,9 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		       EXTRACT(EPOCH FROM created_at)::bigint,
 		       COALESCE(rekor_log_id,''), rekor_log_index
 		FROM audit_log
+		WHERE project_id = $1
 		ORDER BY created_at ASC
-	`)
+	`, projectID)
 	if err != nil {
 		h.logger.Error("audit export query", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
@@ -245,7 +322,7 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 	}
 	defer func() { _ = rows.Close() }()
 
-	mac := hmac.New(sha256.New, []byte(secret))
+	mac := h.signer.New()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"audit_log_export.jsonl\"")
@@ -274,10 +351,23 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 		_, _ = fmt.Fprintf(w, "%s\n", line)
 		lineCount++
 	}
+	// A stream that failed mid-iteration (connection blip, context
+	// cancellation) must NOT get a signature line: the HTTP status is
+	// already committed to 200 by this point, so the only available signal
+	// that the export is truncated is the ABSENCE of the trailing signature
+	// -- a signature covering only the partial data already written would
+	// otherwise validate as a complete, authentic export to any consumer
+	// checking it, which is worse than no signature at all for a
+	// cryptographically-signed compliance artifact.
+	if err := rows.Err(); err != nil {
+		h.logger.Error("audit export: stream failed before completion, omitting signature", zap.Error(err))
+		return
+	}
 
-	sig := hex.EncodeToString(mac.Sum(nil))
+	sig := secrets.Sum(mac)
 	sigLine, _ := json.Marshal(map[string]any{
 		"_type":       "export_signature",
+		"kid":         h.signer.KeyID(),
 		"hmac_sha256": sig,
 		"line_count":  lineCount,
 		"exported_at": time.Now().Unix(),

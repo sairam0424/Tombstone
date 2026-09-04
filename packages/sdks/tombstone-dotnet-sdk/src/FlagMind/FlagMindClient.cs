@@ -12,19 +12,29 @@ public sealed class TombstoneClient : IDisposable
     private readonly Dictionary<string, object?> _defaults;
     private readonly FlagCache _cache = new();
     private readonly EvaluationEngine _engine = new();
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http;
+    private readonly int _lagRefetchDebounceMs;
     private CancellationTokenSource? _cts;
+    // Debounce timer for coalescing a burst of "lag" events into a SINGLE
+    // snapshot refetch. Null when no refetch is pending. Guarded by
+    // _lagRefetchLock; cancelled on Dispose to stay cancel-safe.
+    private CancellationTokenSource? _lagRefetchCts;
+    private readonly object _lagRefetchLock = new();
     private bool _connected;
 
     public TombstoneClient(string sdkKey, string environment,
         string? apiUrl = null, string? gatewayUrl = null,
-        Dictionary<string, object?>? defaults = null)
+        Dictionary<string, object?>? defaults = null,
+        int lagRefetchDebounceMs = 500,
+        HttpMessageHandler? httpMessageHandler = null)
     {
         _sdkKey = sdkKey;
         _environment = environment;
         _apiUrl = apiUrl ?? "http://localhost:8081";
         _gatewayUrl = gatewayUrl ?? "http://localhost:8080";
         _defaults = defaults ?? new();
+        _lagRefetchDebounceMs = lagRefetchDebounceMs;
+        _http = httpMessageHandler is null ? new HttpClient() : new HttpClient(httpMessageHandler);
         _http.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", sdkKey);
     }
@@ -80,11 +90,36 @@ public sealed class TombstoneClient : IDisposable
                 using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
                 using var stream = await resp.Content.ReadAsStreamAsync(ct);
                 using var reader = new StreamReader(stream);
+                // Track the current SSE frame's event type. The gateway writes an
+                // `event: lag` frame right BEFORE it DROPS a real flag-update event
+                // whenever this client's send buffer is full — we fell behind (see
+                // services/gateway/internal/hub/hub.go). A blank line terminates each
+                // frame and resets the type back to the default (flag-update) branch.
+                var eventType = "";
                 while (!ct.IsCancellationRequested && await reader.ReadLineAsync(ct) is { } line)
                 {
-                    if (line.StartsWith("data:", StringComparison.Ordinal))
+                    if (line.Length == 0)
                     {
-                        ApplyEvent(line[5..].Trim());
+                        eventType = "";
+                    }
+                    else if (line.StartsWith("event:", StringComparison.Ordinal))
+                    {
+                        eventType = line[6..].Trim();
+                    }
+                    else if (line.StartsWith("data:", StringComparison.Ordinal))
+                    {
+                        if (eventType == "lag")
+                        {
+                            // The dropped update would otherwise leave the cache
+                            // silently stale until the next event or a full reconnect.
+                            // Recover it by re-running the SAME snapshot fetch that
+                            // ConnectAsync uses, debounced so a burst collapses into one.
+                            ScheduleLagRefetch(ct);
+                        }
+                        else
+                        {
+                            ApplyEvent(line[5..].Trim());
+                        }
                     }
                 }
             }
@@ -109,9 +144,43 @@ public sealed class TombstoneClient : IDisposable
         catch { /* malformed event — ignore */ }
     }
 
+    // Debounced full-snapshot refetch, triggered by "lag" events. Each lag frame
+    // cancels and recreates the delay, so a burst arriving within the debounce
+    // window coalesces into a SINGLE FetchSnapshotAsync — the exact snapshot path
+    // ConnectAsync uses to populate the cache — fired _lagRefetchDebounceMs after
+    // the last frame. The delay token is linked to the SSE listener token so a
+    // disconnect/Dispose cancels any pending refetch.
+    private void ScheduleLagRefetch(CancellationToken ct)
+    {
+        lock (_lagRefetchLock)
+        {
+            _lagRefetchCts?.Cancel();
+            _lagRefetchCts?.Dispose();
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _lagRefetchCts = cts;
+            var token = cts.Token;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(_lagRefetchDebounceMs, token);
+                    await FetchSnapshotAsync(token);
+                }
+                catch (OperationCanceledException) { /* superseded by a newer lag frame or stopped */ }
+                catch { /* refetch failed — the next event or reconnect will recover */ }
+            }, token);
+        }
+    }
+
     public void Dispose()
     {
         _cts?.Cancel();
+        lock (_lagRefetchLock)
+        {
+            _lagRefetchCts?.Cancel();
+            _lagRefetchCts?.Dispose();
+            _lagRefetchCts = null;
+        }
         _cts?.Dispose();
         _http.Dispose();
         _connected = false;

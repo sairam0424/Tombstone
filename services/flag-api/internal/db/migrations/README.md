@@ -17,6 +17,12 @@
 | 010 | `010_idempotency_keys.sql` | Idempotency-key support for flag-api mutation endpoints |
 | 011 | `011_scheduler_retry_columns.sql` | Scheduler retry/backoff columns (retry_count, max_retries, next_retry_at). Confirmed no collision with 010 above — both were developed concurrently from the same `develop` base and landed cleanly. |
 | 012 | `012_idempotency_actor_scope.sql` | Adds actor column to idempotency_keys and re-keys unique index to (actor, idempotency_key, endpoint) — fixes SEC-001 cross-caller cache poisoning. |
+| 013 | `013_service_token_roles.sql` | Per-token `role` on `service_tokens` (default `VIEWER`, CHECK-constrained) — fixes SEC-1: every service token previously resolved to OPERATOR, so any SDK token could create/archive flags and change production rollouts. **Breaking:** existing rows backfill to `VIEWER`; machine writers must be re-provisioned (see the migration header for the exact roles). |
+| 014 | `014_hashed_tokens.sql` | Adds `token_hash` + unique index to `service_tokens` and `break_glass_tokens` and makes the plaintext `token` nullable — fixes SEC-4: both tables stored bearer tokens in PLAINTEXT, so any DB read yielded working credentials. **Two-step:** apply this migration, then run `go run ./cmd/migrate -hash-tokens` (needs `TOKEN_HASH_PEPPER`) to derive each hash and erase the plaintext. No token rotation required. |
+| 015 | `015_audit_entry_hash.sql` | Adds `entry_hash` (each row's own keyed hash) + a chain-walk index to `audit_log` — fixes AUD-1: four writers each built the chain themselves and disagreed (`flags.go`/`scheduler.go` hashed six pipe-joined fields, `scheduled.go` hashed `id + timestamp`), the hash was unkeyed (so anyone who could INSERT could forge a valid-looking chain), and the unlocked SELECT-then-INSERT forked the chain under concurrency. **Deliberately NOT backfilled:** minting keyed hashes for historical rows would fabricate evidence they were verified. Those rows stay NULL and `GET /api/v1/audit/verify` reports them as `legacy_entries_unverifiable`. Verified coverage starts at the first entry written after deploy. |
+| 016-022 | _(see git log)_ | project_id scoping for `scheduled_changes`/`audit_log`/`change_requests` (TEN-1a), SEC-3b propose/quorum/apply + require_approval gate, break-glass hardening — this table fell behind; not backfilled retroactively, see the plan memory for the full history. |
+| 023 | `023_targeted_indexes.sql` | DATA-2: five indexes for existing hot-path query patterns that had no supporting index — `flag_environments(environment)`, `change_requests(status, created_at)`, `flags(project_id, state)`, `audit_log(project_id, created_at)`, `scim_users(email)`. Purely additive, no application code change. |
+| 024 | `024_user_token_watermarks.sql` | SEC-5: adds `user_token_watermarks(user_email PK, valid_after)` — lets `validateJWT` reject a token issued before the subject's most recent forced-logout timestamp, closing the gap where SCIM deprovisioning revoked `user_roles` but left an already-issued JWT valid until natural expiry. |
 
 ## Why 001 Is Skipped
 
@@ -31,7 +37,36 @@ the convention is:
 
 ## How to Apply
 
-### Fresh database (dev / CI)
+### Recommended: the migration runner (`cmd/migrate`)
+
+The runner applies the baseline (`schema.sql` = version 1) plus every pending
+`migrations/NNN_*.sql` in ascending order, records each in a `schema_migrations`
+ledger (so re-runs are no-ops), and holds a Postgres advisory lock so concurrent
+flag-api replicas can't double-apply.
+
+```bash
+cd services/flag-api
+DB_URL_DIRECT="$DATABASE_URL" go run ./cmd/migrate            # apply all pending
+DB_URL_DIRECT="$DATABASE_URL" go run ./cmd/migrate -baseline  # adopt on a hand-built DB
+```
+
+Set `DB_URL_DIRECT`, not `DB_URL` — this tool uses a session-scoped Postgres
+advisory lock (`pg_advisory_lock`/`pg_advisory_unlock`, pinned to one physical
+connection for the whole run), which a transaction-pooling proxy (PgBouncer,
+Neon's own "-pooler" endpoint) can silently break by handing the lock and
+unlock calls different physical backends (DATA-2). `DB_URL` is meant for
+flag-api's/intelligence's own app traffic, which IS safe to run through a
+pooler. `cmd/migrate` falls back to `DB_URL` if `DB_URL_DIRECT` is unset, for
+backward compatibility — but always prefer setting `DB_URL_DIRECT` explicitly.
+
+`-baseline` records every version as applied **without running any SQL** — use
+it exactly once when adopting the runner on a database that was already built by
+hand (via the manual steps below), so the ledger reflects reality and the runner
+never tries to re-apply a non-idempotent statement. flag-api's own startup does
+**not** auto-migrate: running migrations stays an explicit, auditable step (CI,
+docker-compose init, or ops).
+
+### Manual (reference / fallback)
 
 ```bash
 # From repo root

@@ -22,10 +22,24 @@ services/**/main
 **/dist/
 **/.turbo/
 
+# Java / Gradle build artifacts.
+# The Gradle cache under packages/sdks/*/.gradle/ was accidentally committed and
+# is untracked in this commit: its lock files re-dirty on every `gradle test`,
+# which made `git status` permanently noisy and could abort a `git checkout`.
+**/.gradle/
+**/build/
+# Compiled class output. Only ever contained generated .class files here — the
+# pre-existing `services/*/bin/` rule above covers Go binaries.
+**/bin/
+
 # IDE
 .idea/
 .vscode/settings.json
 *.code-workspace
+# Eclipse/JetBrains project metadata (workspace-jetbrains/ regenerates these).
+**/.project
+**/.classpath
+**/.settings/
 
 # OS
 .DS_Store

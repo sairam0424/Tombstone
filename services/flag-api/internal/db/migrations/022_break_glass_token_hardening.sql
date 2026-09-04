@@ -1,0 +1,21 @@
+-- Migration 022: scope break-glass tokens to a project (SEC-3b part 2,
+-- adversarial review).
+--
+-- break_glass_tokens has no project association at all. Before this diff
+-- that was low-stakes: UseToken only logged that a token was "used" for
+-- some out-of-band manual action, granting no direct write authority of its
+-- own. Wiring it into checkRequireApprovalGate changed that — presenting a
+-- valid unused token is now the literal credential that lets a live write
+-- bypass a SPECIFIC project's require_approval policy. Without project
+-- scoping, an ADMIN-issued token from Project A (e.g. pasted into an
+-- incident Slack channel) could bypass Project B's require_approval gate
+-- for anyone who already has environments:write on Project B, even though
+-- neither Project B's admins nor the token's creator ever authorized that.
+--
+-- Nullable, not NOT NULL: existing tokens predate this column and cannot be
+-- attributed to a project after the fact (same reasoning as migrations
+-- 016/017/018). A NULL project_id is treated as "not scoped to any one
+-- project" by consumeBreakGlassTokenTx's WHERE clause — legacy tokens keep
+-- working exactly as before, project scoping only applies going forward.
+ALTER TABLE break_glass_tokens ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
+CREATE INDEX IF NOT EXISTS idx_break_glass_tokens_project_id ON break_glass_tokens(project_id);

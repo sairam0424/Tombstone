@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // OrphanDetector runs a periodic background scan for ACTIVE flags whose
@@ -46,36 +48,22 @@ func (od *OrphanDetector) Run(ctx context.Context) {
 // the active scim_users set, logs the count, and creates a PENDING
 // change_request for each orphaned flag.
 func (od *OrphanDetector) detectAndReport(ctx context.Context) {
-	rows, err := od.db.QueryContext(ctx, `
-		SELECT f.key, f.owner_id
-		FROM flags f
-		WHERE f.state = 'ACTIVE'
-		  AND NOT EXISTS (
-		      SELECT 1 FROM scim_users su
-		      WHERE su.email = f.owner_id
-		        AND su.active = true
-		  )
-		ORDER BY f.key
-	`)
+	q := sqlcgen.New(od.db)
+	rows, err := q.ListOrphanedFlags(ctx)
 	if err != nil {
 		od.logger.Error("orphan detector query failed", zap.Error(err))
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
 	type orphan struct {
-		flagKey string
-		ownerID string
+		flagKey   string
+		ownerID   string
+		projectID string
 	}
 
-	var orphans []orphan
-	for rows.Next() {
-		var o orphan
-		if err := rows.Scan(&o.flagKey, &o.ownerID); err != nil {
-			od.logger.Error("orphan detector scan", zap.Error(err))
-			continue
-		}
-		orphans = append(orphans, o)
+	orphans := make([]orphan, 0, len(rows))
+	for _, r := range rows {
+		orphans = append(orphans, orphan{flagKey: r.Key, ownerID: r.OwnerID, projectID: r.ProjectID})
 	}
 
 	od.logger.Info("orphan detector scan complete",
@@ -88,17 +76,20 @@ func (od *OrphanDetector) detectAndReport(ctx context.Context) {
 
 	for _, o := range orphans {
 		payload := map[string]string{
-			"reason":     "orphan_detected",
+			"reason":      "orphan_detected",
 			"owner_email": o.ownerID,
 			"detected_at": time.Now().UTC().Format(time.RFC3339),
 		}
 		payloadJSON, _ := json.Marshal(payload)
 
-		_, err := od.db.ExecContext(ctx, `
-			INSERT INTO change_requests
-			    (flag_key, environment, requested_by, status, change_payload)
-			VALUES ($1, 'production', 'system-orphan-detector', 'PENDING', $2)
-		`, o.flagKey, payloadJSON)
+		// change_requests.project_id is nullable (TEN-1a-3: legacy rows), so
+		// sqlc infers this parameter as sql.NullString too -- o.projectID
+		// here always came from flags.project_id, which is NOT NULL.
+		err := q.CreateOrphanChangeRequest(ctx, sqlcgen.CreateOrphanChangeRequestParams{
+			FlagKey:       o.flagKey,
+			ChangePayload: payloadJSON,
+			ProjectID:     sql.NullString{String: o.projectID, Valid: true},
+		})
 		if err != nil {
 			od.logger.Error("orphan detector create change_request",
 				zap.Error(err),

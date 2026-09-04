@@ -18,13 +18,13 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
+	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 	"github.com/tombstone/evaluator/internal/blast"
 	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
-	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 )
 
 func main() {
@@ -75,7 +75,7 @@ func main() {
 	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
 		db, _ = sql.Open("postgres", dbURL)
 		if db != nil {
-			db.SetMaxOpenConns(3)                  // Neon free tier — evaluator uses DB rarely
+			db.SetMaxOpenConns(3) // Neon free tier — evaluator uses DB rarely
 			db.SetMaxIdleConns(1)
 			db.SetConnMaxLifetime(5 * time.Minute) // recycle before Neon idle timeout
 			db.SetConnMaxIdleTime(2 * time.Minute)
@@ -109,8 +109,23 @@ func main() {
 		blastCalc = blast.NewCalculator(db, flagAPIURL)
 	}
 
+	// OBS-1 (rollout): pull-based, no OTLP_ENDPOINT/collector needed —
+	// unlike InitTracer, there's no "unset means no-op" branch. Mirrors
+	// flag-api/gateway's OBS-1 slices exactly (same middleware, same
+	// metric names/labels) so every service's RED metrics are directly
+	// comparable in one dashboard.
+	meter, metricsHandler, err := telemetry.InitMeter("evaluator")
+	if err != nil {
+		logger.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		logger.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
+	r.Use(httpMetrics)
 	r.Use(rateMw.RateLimit)
 	// Load shedding runs AFTER rate limiting: rate limiting rejects
 	// over-quota callers first, regardless of system load; load shedding
@@ -126,6 +141,10 @@ func main() {
 	// as healthy, so readiness never fails on an absent-and-optional dependency.
 	healthChecker := &health.Checker{DB: db, RDB: rdb}
 	r.Get("/readyz", healthChecker.Readyz)
+
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 
 	// SDK telemetry ingest endpoint
 	r.Post("/api/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -161,12 +180,17 @@ func main() {
 		r.Get("/api/v1/blast-radius", blast.HandleBlastRadius(blastCalc))
 	}
 
-	// Circuit breaker state endpoint
+	// Circuit breaker state endpoint. Circuit state is environment-scoped, so the
+	// caller selects the environment via ?environment=; defaults to production.
 	r.Get("/api/v1/circuit/{flagKey}", func(w http.ResponseWriter, r *http.Request) {
 		flagKey := chi.URLParam(r, "flagKey")
-		state := breaker.GetState(r.Context(), flagKey)
+		env := r.URL.Query().Get("environment")
+		if env == "" {
+			env = "production"
+		}
+		state := breaker.GetState(r.Context(), flagKey, env)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"flag_key":%q,"state":%q}`, flagKey, state)
+		fmt.Fprintf(w, `{"flag_key":%q,"environment":%q,"state":%q}`, flagKey, env, state)
 	})
 
 	// Per-flag SLO dashboard endpoint

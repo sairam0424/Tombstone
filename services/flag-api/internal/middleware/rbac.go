@@ -13,6 +13,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/open-policy-agent/opa/rego"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 type Role string
@@ -81,11 +83,11 @@ var permissionMatrix = map[Role][]Permission{
 
 // opaEvaluator holds a compiled OPA query that can be swapped atomically on hot-reload.
 type opaEvaluator struct {
-	mu          sync.RWMutex
-	preparedQ   *rego.PreparedEvalQuery
-	available   bool
-	policyDir   string
-	query       string
+	mu        sync.RWMutex
+	preparedQ *rego.PreparedEvalQuery
+	available bool
+	policyDir string
+	query     string
 }
 
 func newOPAEvaluator(policyDir, query string, logger *zap.Logger) *opaEvaluator {
@@ -159,9 +161,9 @@ func (e *opaEvaluator) evaluate(ctx context.Context, input map[string]interface{
 // RBACMiddleware enforces role-based access control via OPA (primary) with a
 // hardcoded permission matrix as fallback.
 type RBACMiddleware struct {
-	db          *sql.DB
-	logger      *zap.Logger
-	flagsEval   *opaEvaluator
+	db        *sql.DB
+	logger    *zap.Logger
+	flagsEval *opaEvaluator
 }
 
 func NewRBACMiddleware(db *sql.DB, logger *zap.Logger) *RBACMiddleware {
@@ -228,6 +230,22 @@ type contextKeyRole string
 
 const ContextKeyRole contextKeyRole = "role"
 
+// PolicySource reports which authorization source is actually live: "opa" when
+// Rego policies are compiled and loaded, "fallback_matrix" when the hardcoded
+// permissionMatrix is in use. Compliance evidence reports this instead of
+// asserting a hardcoded rbac_enabled=true (AUD-1).
+func (r *RBACMiddleware) PolicySource() string {
+	if r.flagsEval == nil {
+		return "fallback_matrix"
+	}
+	r.flagsEval.mu.RLock()
+	defer r.flagsEval.mu.RUnlock()
+	if r.flagsEval.available && r.flagsEval.preparedQ != nil {
+		return "opa"
+	}
+	return "fallback_matrix"
+}
+
 // RequirePermission returns a middleware that enforces resource+action permission.
 // It first tries OPA evaluation; if unavailable, falls back to the hardcoded matrix.
 func (r *RBACMiddleware) RequirePermission(resource, action string) func(http.Handler) http.Handler {
@@ -276,11 +294,22 @@ func (r *RBACMiddleware) checkPermissionWithOPA(req *http.Request, role Role, re
 	actor := actorFromContext(req.Context())
 	pathParts := splitPath(req.URL.Path)
 
+	// resource/action are the SAME two strings the route handler passed to
+	// RequirePermission(resource, action) — this is the permission actually
+	// being checked. Before this fix they were dropped here, leaving OPA to
+	// approximate the decision from method+path alone; that approximation
+	// (flags.rego) was looser than permissionMatrix on every gated route
+	// (e.g. any role could GET anything, any operator could POST/PATCH
+	// anything under /api/...), so a merged SEC-1 fix was silently defeated
+	// at runtime whenever OPA was live — which is the default, since
+	// POLICY_DIR defaults to "policies/" and that directory ships in the repo.
 	input := map[string]interface{}{
-		"method": req.Method,
-		"path":   pathParts,
-		"role":   strings.ToLower(string(role)),
-		"actor":  actor,
+		"method":   req.Method,
+		"path":     pathParts,
+		"role":     strings.ToLower(string(role)),
+		"actor":    actor,
+		"resource": resource,
+		"action":   action,
 	}
 
 	if allow, ok := r.flagsEval.evaluate(req.Context(), input); ok {
@@ -302,13 +331,31 @@ func (r *RBACMiddleware) LoadRole(next http.Handler) http.Handler {
 }
 
 func (r *RBACMiddleware) resolveRole(ctx context.Context, actor string) Role {
-	// Service tokens are always OPERATOR
+	// Service tokens carry a per-token role, resolved by AuthMiddleware at
+	// token-validation time (SEC-1). Previously every service token was
+	// hardcoded to OPERATOR, so any SDK token could write flags and change
+	// production rollouts. Absent/unknown role => VIEWER (least privilege).
 	if strings.HasPrefix(actor, "sdk:") {
-		return RoleOperator
+		if role, ok := ctx.Value(ContextKeyServiceRole).(Role); ok {
+			if _, known := permissionMatrix[role]; known {
+				return role
+			}
+		}
+		return RoleViewer
 	}
-	var role string
-	err := r.db.QueryRowContext(ctx,
-		"SELECT role FROM user_roles WHERE user_id = $1", actor).Scan(&role)
+
+	// user_roles' primary key is (user_id, project_id) — a user can hold
+	// different roles in different projects. Querying by user_id alone (as
+	// this did before TEN-1a) is nondeterministic whenever a user belongs to
+	// more than one project: Postgres returns SOME row with no defined
+	// ordering, so which project's role applies could vary request to
+	// request. RequireProjectID runs before LoadRole precisely so a specific,
+	// validated project_id is available here.
+	projectID, ok := ProjectIDFromContext(ctx)
+	if !ok {
+		return RoleViewer // no resolved project => least privilege, never a guess
+	}
+	role, err := sqlcgen.New(r.db).GetUserRole(ctx, sqlcgen.GetUserRoleParams{UserID: actor, ProjectID: projectID})
 	if err != nil {
 		return RoleViewer // default to least privilege
 	}

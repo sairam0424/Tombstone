@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 // PrerequisiteHandler manages flag prerequisites — the GrowthBook ParentConditions pattern.
@@ -53,6 +55,18 @@ type AddPrerequisiteRequest struct {
 func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 
+	// TEN-1a: every query in this handler (parent lookup, prereq-existence
+	// check, cycle walk) previously matched by key alone across ALL projects.
+	// That meant a caller could attach a prerequisite gate to another
+	// project's flag by guessing its key, or point a prerequisite AT another
+	// project's flag key — making one project's flag evaluation depend on a
+	// foreign flag's state, which also leaks that foreign flag's variation as
+	// a side channel (whether your own flag gets gated reveals its value).
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var req AddPrerequisiteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -70,11 +84,11 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 		gate = *req.Gate
 	}
 
+	q := sqlcgen.New(h.db)
+
 	// Resolve parent flag ID.
-	var flagID string
-	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT id FROM flags WHERE key = $1`, key,
-	).Scan(&flagID); errors.Is(err, sql.ErrNoRows) {
+	flagID, err := q.ResolveFlagIDByKey(r.Context(), sqlcgen.ResolveFlagIDByKeyParams{Key: key, ProjectID: projectID})
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
 	} else if err != nil {
@@ -83,11 +97,10 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Verify the prerequisite flag itself exists.
-	var prereqExists bool
-	_ = h.db.QueryRowContext(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM flags WHERE key = $1)`, req.PrereqFlagKey,
-	).Scan(&prereqExists)
+	// Verify the prerequisite flag exists IN THE SAME PROJECT — a
+	// prerequisite pointing at another project's flag is never valid, not
+	// even if that flag key also happens to exist there.
+	prereqExists, _ := q.FlagExistsInProject(r.Context(), sqlcgen.FlagExistsInProjectParams{Key: req.PrereqFlagKey, ProjectID: projectID})
 	if !prereqExists {
 		writeError(w, http.StatusUnprocessableEntity, "prereq_flag_key does not exist")
 		return
@@ -96,24 +109,32 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 	// Circular dependency check (depth-first, max 5 hops).
 	// We walk the prerequisite graph starting from prereq_flag_key and ensure we
 	// never arrive back at key.
-	if err := h.detectCycle(r, key, req.PrereqFlagKey, 0); err != nil {
+	if err := h.detectCycle(r, projectID, key, req.PrereqFlagKey, 0); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
-	var p Prerequisite
-	err := h.db.QueryRowContext(r.Context(), `
-		INSERT INTO flag_prerequisites (flag_id, prereq_flag_key, required_variation, gate, priority)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, flag_id, prereq_flag_key, required_variation, gate, priority,
-		          EXTRACT(EPOCH FROM created_at)::bigint
-	`, flagID, req.PrereqFlagKey, req.RequiredVariation, gate, req.Priority).
-		Scan(&p.ID, &p.FlagID, &p.PrereqFlagKey, &p.RequiredVariation, &p.Gate, &p.Priority, &p.CreatedAt)
+	inserted, err := q.InsertPrerequisite(r.Context(), sqlcgen.InsertPrerequisiteParams{
+		FlagID:            flagID,
+		PrereqFlagKey:     req.PrereqFlagKey,
+		RequiredVariation: req.RequiredVariation,
+		Gate:              gate,
+		Priority:          int32(req.Priority),
+	})
 	if err != nil {
 		h.logger.Error("insert prerequisite", zap.Error(err))
 		// Unique-constraint violation (duplicate prereq for same flag).
 		writeError(w, http.StatusConflict, "prerequisite already exists for this flag+prereq_flag_key pair")
 		return
+	}
+	p := Prerequisite{
+		ID:                inserted.ID,
+		FlagID:            inserted.FlagID,
+		PrereqFlagKey:     inserted.PrereqFlagKey,
+		RequiredVariation: inserted.RequiredVariation,
+		Gate:              inserted.Gate,
+		Priority:          int(inserted.Priority),
+		CreatedAt:         inserted.CreatedAt,
 	}
 
 	writeJSON(w, http.StatusCreated, p)
@@ -123,30 +144,29 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 func (h *PrerequisiteHandler) ListPrerequisites(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT fp.id, fp.flag_id, fp.prereq_flag_key, fp.required_variation, fp.gate, fp.priority,
-		       EXTRACT(EPOCH FROM fp.created_at)::bigint
-		FROM flag_prerequisites fp
-		JOIN flags f ON f.id = fp.flag_id
-		WHERE f.key = $1
-		ORDER BY fp.priority ASC, fp.created_at ASC
-	`, key)
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := sqlcgen.New(h.db).ListPrerequisitesForFlag(r.Context(), sqlcgen.ListPrerequisitesForFlagParams{Key: key, ProjectID: projectID})
 	if err != nil {
 		h.logger.Error("list prerequisites", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
 
 	prereqs := []Prerequisite{}
-	for rows.Next() {
-		var p Prerequisite
-		if err := rows.Scan(&p.ID, &p.FlagID, &p.PrereqFlagKey, &p.RequiredVariation,
-			&p.Gate, &p.Priority, &p.CreatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
-		}
-		prereqs = append(prereqs, p)
+	for _, r := range rows {
+		prereqs = append(prereqs, Prerequisite{
+			ID:                r.ID,
+			FlagID:            r.FlagID,
+			PrereqFlagKey:     r.PrereqFlagKey,
+			RequiredVariation: r.RequiredVariation,
+			Gate:              r.Gate,
+			Priority:          int(r.Priority),
+			CreatedAt:         r.CreatedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"prerequisites": prereqs, "total": len(prereqs)})
 }
@@ -156,19 +176,20 @@ func (h *PrerequisiteHandler) DeletePrerequisite(w http.ResponseWriter, r *http.
 	key := chi.URLParam(r, "key")
 	prereqID := chi.URLParam(r, "id")
 
-	res, err := h.db.ExecContext(r.Context(), `
-		DELETE FROM flag_prerequisites fp
-		USING flags f
-		WHERE f.id = fp.flag_id
-		  AND f.key = $1
-		  AND fp.id = $2
-	`, key, prereqID)
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	n, err := sqlcgen.New(h.db).DeletePrerequisite(r.Context(), sqlcgen.DeletePrerequisiteParams{
+		Key: key, ID: prereqID, ProjectID: projectID,
+	})
 	if err != nil {
 		h.logger.Error("delete prerequisite", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		writeError(w, http.StatusNotFound, "prerequisite not found")
 		return
 	}
@@ -177,34 +198,29 @@ func (h *PrerequisiteHandler) DeletePrerequisite(w http.ResponseWriter, r *http.
 
 // detectCycle performs a depth-first search to detect circular prerequisite chains.
 // It starts from startKey (the new prereq) and checks whether flagKey (the parent)
-// is reachable within maxDepth hops.
-func (h *PrerequisiteHandler) detectCycle(r *http.Request, flagKey, startKey string, depth int) error {
+// is reachable within maxDepth hops. The walk is confined to a single project —
+// TEN-1a: without the project filter, this walked the ENTIRE cross-project
+// prerequisite graph, so an unrelated flag in a different project sharing a
+// key with one hop of a real chain could produce a false cycle rejection.
+func (h *PrerequisiteHandler) detectCycle(r *http.Request, projectID, flagKey, startKey string, depth int) error {
 	const maxDepth = 5
 	if depth > maxDepth {
 		return errors.New("prerequisite chain exceeds maximum depth of 5 hops")
 	}
 
 	// Fetch all prerequisites of startKey.
-	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT fp.prereq_flag_key
-		FROM flag_prerequisites fp
-		JOIN flags f ON f.id = fp.flag_id
-		WHERE f.key = $1
-	`, startKey)
+	nextKeys, err := sqlcgen.New(h.db).ListPrereqFlagKeysForFlag(r.Context(), sqlcgen.ListPrereqFlagKeysForFlagParams{
+		Key: startKey, ProjectID: projectID,
+	})
 	if err != nil {
 		return nil // non-fatal: allow the insert if we can't walk the graph
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var nextKey string
-		if err := rows.Scan(&nextKey); err != nil {
-			continue
-		}
+	for _, nextKey := range nextKeys {
 		if nextKey == flagKey {
 			return errors.New("circular prerequisite dependency detected")
 		}
-		if err := h.detectCycle(r, flagKey, nextKey, depth+1); err != nil {
+		if err := h.detectCycle(r, projectID, flagKey, nextKey, depth+1); err != nil {
 			return err
 		}
 	}

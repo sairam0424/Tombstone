@@ -17,7 +17,7 @@ export function getConfig(): TombstoneConfig {
     apiUrl: cfg.get<string>("apiUrl", "http://localhost:8081").replace(/\/$/, ""),
     apiToken: cfg.get<string>("apiToken", ""),
     environment: cfg.get<string>("environment", "production"),
-    intelligenceApiUrl: cfg.get<string>("intelligenceApiUrl", "http://localhost:8082").replace(/\/$/, ""),
+    intelligenceApiUrl: cfg.get<string>("intelligenceApiUrl", "http://localhost:8083").replace(/\/$/, ""),
   };
 }
 
@@ -120,7 +120,7 @@ export async function killSwitch(flagKey: string, reason: string): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
-// Intelligence service endpoints  (intelligence, default :8082)
+// Intelligence service endpoints  (intelligence, default :8083)
 // ---------------------------------------------------------------------------
 
 export async function listStaleFlags(): Promise<StaleFlag[]> {

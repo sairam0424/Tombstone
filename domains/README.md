@@ -58,3 +58,4 @@ lives in the artifacts it links, not here.
 | `incident-response` | Correlate production incidents to causal flags; auto-rollback within SLO | on-trigger | `evaluator /api/v1/flags/{key}/slo` |
 | `rollout-advisor` | Maximize experiment velocity and minimize collision risk | daily | `intelligence /api/v1/anomaly/{key}` |
 | `governance` (planned) | Enforce approval workflows, OPA policy coverage, and audit trail completeness | weekly | `flag-api /api/v1/audit` |
+| `audit-retention` | Keep audit_log's hot table bounded via checkpointed partition archiving (DATA-2) | daily | `flag-api /api/v1/audit/retention/run` |

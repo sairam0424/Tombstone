@@ -2,33 +2,35 @@ package v1
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"go.uber.org/zap"
 )
 
 // ScheduledHandler handles the Scheduled Changes API.
 // Routes:
-//   POST   /api/v1/flags/{key}/schedule
-//   GET    /api/v1/flags/{key}/schedule?environment=&status=
-//   DELETE /api/v1/flags/{key}/schedule/{id}
+//
+//	POST   /api/v1/flags/{key}/schedule
+//	GET    /api/v1/flags/{key}/schedule?environment=&status=
+//	DELETE /api/v1/flags/{key}/schedule/{id}
 type ScheduledHandler struct {
 	db     *sql.DB
 	rdb    *redis.Client
 	logger *zap.Logger
+	audit  *audit.Writer
 }
 
 // NewScheduledHandler constructs a ScheduledHandler.
-func NewScheduledHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *ScheduledHandler {
-	return &ScheduledHandler{db: db, rdb: rdb, logger: logger}
+func NewScheduledHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) *ScheduledHandler {
+	return &ScheduledHandler{db: db, rdb: rdb, logger: logger, audit: auditW}
 }
 
 // ScheduledChange is the API representation of a scheduled_changes row.
@@ -64,6 +66,15 @@ type CreateScheduleRequest struct {
 func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 
+	// TEN-1a: the existence check below matched key alone across ALL
+	// projects, so a caller could schedule a change against a flag that only
+	// exists in a different project — and the background scheduler would
+	// then execute it (see scheduler.go), a real cross-tenant write.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	var req CreateScheduleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -88,11 +99,12 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the flag exists
-	var flagExists bool
-	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM flags WHERE key=$1 AND state != 'ARCHIVED')`, key,
-	).Scan(&flagExists); err != nil || !flagExists {
+	// Verify the flag exists IN THE CALLER'S OWN PROJECT.
+	flagExists, err := sqlcgen.New(h.db).FlagExistsInProjectNotArchived(r.Context(), sqlcgen.FlagExistsInProjectNotArchivedParams{
+		Key:       key,
+		ProjectID: projectID,
+	})
+	if err != nil || !flagExists {
 		writeError(w, http.StatusNotFound, "flag not found")
 		return
 	}
@@ -104,42 +116,40 @@ func (h *ScheduledHandler) CreateSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var sc ScheduledChange
-	var executedAt sql.NullTime
-	var errorMsg sql.NullString
-
-	err = h.db.QueryRowContext(r.Context(), `
-		INSERT INTO scheduled_changes
-		    (id, flag_key, environment, scheduled_for, change_payload, created_by, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
-		RETURNING
-		    id, flag_key, environment,
-		    EXTRACT(EPOCH FROM scheduled_for)::bigint,
-		    change_payload, created_by, status,
-		    executed_at,
-		    error_message,
-		    EXTRACT(EPOCH FROM created_at)::bigint
-	`, uuid.New().String(), key, req.Environment, scheduledAt, payloadJSON, actor).
-		Scan(
-			&sc.ID, &sc.FlagKey, &sc.Environment, &sc.ScheduledFor,
-			&sc.ChangePayload, &sc.CreatedBy, &sc.Status,
-			&executedAt, &errorMsg, &sc.CreatedAt,
-		)
+	row, err := sqlcgen.New(h.db).CreateScheduledChange(r.Context(), sqlcgen.CreateScheduledChangeParams{
+		ID:            uuid.New().String(),
+		FlagKey:       key,
+		Environment:   req.Environment,
+		ScheduledFor:  scheduledAt,
+		ChangePayload: payloadJSON,
+		CreatedBy:     actor,
+		ProjectID:     sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		h.logger.Error("create scheduled change", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	if executedAt.Valid {
-		ts := executedAt.Time.Unix()
+	sc := ScheduledChange{
+		ID:            row.ID,
+		FlagKey:       row.FlagKey,
+		Environment:   row.Environment,
+		ScheduledFor:  row.ScheduledFor,
+		ChangePayload: row.ChangePayload,
+		CreatedBy:     row.CreatedBy,
+		Status:        row.Status,
+		CreatedAt:     row.CreatedAt,
+	}
+	if row.ExecutedAt.Valid {
+		ts := row.ExecutedAt.Time.Unix()
 		sc.ExecutedAt = &ts
 	}
-	if errorMsg.Valid {
-		sc.ErrorMessage = &errorMsg.String
+	if row.ErrorMessage.Valid {
+		sc.ErrorMessage = &row.ErrorMessage.String
 	}
 
-	h.writeAudit(r.Context(), key, req.Environment, actor, "scheduled_change_created",
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "scheduled_change_created",
 		nil, &sc, ipFromRequest(r))
 
 	writeJSON(w, http.StatusCreated, sc)
@@ -152,65 +162,46 @@ func (h *ScheduledHandler) ListSchedule(w http.ResponseWriter, r *http.Request) 
 	envFilter := r.URL.Query().Get("environment")
 	statusFilter := r.URL.Query().Get("status")
 
-	query := `
-		SELECT
-		    id, flag_key, environment,
-		    EXTRACT(EPOCH FROM scheduled_for)::bigint,
-		    change_payload, created_by, status,
-		    executed_at,
-		    error_message,
-		    EXTRACT(EPOCH FROM created_at)::bigint
-		FROM scheduled_changes
-		WHERE flag_key = $1
-	`
-	args := []any{key}
-	argIdx := 2
-
-	if envFilter != "" {
-		query += ` AND environment = $` + itoa(argIdx)
-		args = append(args, envFilter)
-		argIdx++
+	// TEN-1a: this previously matched flag_key alone across ALL projects — a
+	// VIEWER in one project could read another project's pending scheduled
+	// change_payload (future enabled/rollout_pct) for a same-keyed flag.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
 	}
-	if statusFilter != "" {
-		query += ` AND status = $` + itoa(argIdx)
-		args = append(args, statusFilter)
-	}
-	query += ` ORDER BY scheduled_for ASC`
 
-	rows, err := h.db.QueryContext(r.Context(), query, args...)
+	rows, err := sqlcgen.New(h.db).ListScheduledChanges(r.Context(), sqlcgen.ListScheduledChangesParams{
+		FlagKey:           key,
+		ProjectID:         sql.NullString{String: projectID, Valid: true},
+		EnvironmentFilter: envFilter,
+		StatusFilter:      statusFilter,
+	})
 	if err != nil {
 		h.logger.Error("list scheduled changes", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	defer rows.Close()
 
 	changes := []ScheduledChange{}
-	for rows.Next() {
-		var sc ScheduledChange
-		var executedAt sql.NullTime
-		var errorMsg sql.NullString
-
-		if err := rows.Scan(
-			&sc.ID, &sc.FlagKey, &sc.Environment, &sc.ScheduledFor,
-			&sc.ChangePayload, &sc.CreatedBy, &sc.Status,
-			&executedAt, &errorMsg, &sc.CreatedAt,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
+	for _, row := range rows {
+		sc := ScheduledChange{
+			ID:            row.ID,
+			FlagKey:       row.FlagKey,
+			Environment:   row.Environment,
+			ScheduledFor:  row.ScheduledFor,
+			ChangePayload: row.ChangePayload,
+			CreatedBy:     row.CreatedBy,
+			Status:        row.Status,
+			CreatedAt:     row.CreatedAt,
 		}
-		if executedAt.Valid {
-			ts := executedAt.Time.Unix()
+		if row.ExecutedAt.Valid {
+			ts := row.ExecutedAt.Time.Unix()
 			sc.ExecutedAt = &ts
 		}
-		if errorMsg.Valid {
-			sc.ErrorMessage = &errorMsg.String
+		if row.ErrorMessage.Valid {
+			sc.ErrorMessage = &row.ErrorMessage.String
 		}
 		changes = append(changes, sc)
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "rows iteration failed")
-		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"scheduled_changes": changes, "total": len(changes)})
@@ -222,26 +213,35 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 	key := chi.URLParam(r, "key")
 	id := chi.URLParam(r, "id")
 
+	// TEN-1a: this previously matched id+flag_key alone across ALL projects —
+	// a caller with flags:write in their own project could cancel another
+	// project's scheduled change if they knew (e.g. via the ListSchedule leak
+	// this same fix closes) its id.
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
 	actor := actorFromContext(r.Context())
 
-	res, err := h.db.ExecContext(r.Context(), `
-		UPDATE scheduled_changes
-		SET status = 'CANCELLED'
-		WHERE id = $1 AND flag_key = $2 AND status = 'PENDING'
-	`, id, key)
+	n, err := sqlcgen.New(h.db).CancelScheduledChange(r.Context(), sqlcgen.CancelScheduledChangeParams{
+		ID:        id,
+		FlagKey:   key,
+		ProjectID: sql.NullString{String: projectID, Valid: true},
+	})
 	if err != nil {
 		h.logger.Error("cancel scheduled change", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	n, _ := res.RowsAffected()
 	if n == 0 {
-		// Might not exist or might already be non-PENDING
-		var status string
-		scanErr := h.db.QueryRowContext(r.Context(),
-			`SELECT status FROM scheduled_changes WHERE id=$1 AND flag_key=$2`, id, key,
-		).Scan(&status)
+		// Might not exist, might already be non-PENDING, or belongs to another project.
+		status, scanErr := sqlcgen.New(h.db).GetScheduledChangeStatus(r.Context(), sqlcgen.GetScheduledChangeStatusParams{
+			ID:        id,
+			FlagKey:   key,
+			ProjectID: sql.NullString{String: projectID, Valid: true},
+		})
 		if scanErr == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "scheduled change not found")
 			return
@@ -250,7 +250,7 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.writeAudit(r.Context(), key, "", actor, "scheduled_change_cancelled",
+	h.writeAudit(r.Context(), projectID, key, "", actor, "scheduled_change_cancelled",
 		map[string]any{"id": id}, map[string]any{"status": "CANCELLED"}, ipFromRequest(r))
 
 	w.WriteHeader(http.StatusNoContent)
@@ -259,36 +259,28 @@ func (h *ScheduledHandler) CancelSchedule(w http.ResponseWriter, r *http.Request
 // writeAudit writes an append-only audit entry with Merkle hash linking.
 // Mirrors v1.FlagHandler.writeAudit exactly so ScheduledHandler can log without
 // holding a reference to FlagHandler.
-func (h *ScheduledHandler) writeAudit(ctx context.Context, flagKey, env, actor, eventType string, prev, curr any, ip string) {
+func (h *ScheduledHandler) writeAudit(ctx context.Context, projectID, flagKey, env, actor, eventType string, prev, curr any, ip string) {
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	var lastID, lastTs string
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT id, EXTRACT(EPOCH FROM created_at)::text FROM audit_log
-		WHERE flag_key=$1 ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastTs)
-
-	prevHash := ""
-	if lastID != "" {
-		hb := sha256.Sum256([]byte(lastID + lastTs))
-		prevHash = fmt.Sprintf("%x", hb)
+	// AUD-1: this used to hash sha256(lastID + lastTs) — two fields, no
+	// separator — while flags.go and scheduler.go hashed six pipe-joined fields.
+	// Any chain containing a scheduled-change entry was therefore unverifiable.
+	// All writers now share one keyed, advisory-locked implementation.
+	if h.audit == nil {
+		h.logger.Warn("audit log write skipped — no audit writer configured")
+		return
 	}
-
-	if _, err := h.db.ExecContext(ctx, `
-		INSERT INTO audit_log (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, uuid.New().String(), flagKey, env, actor, eventType, prevJSON, currJSON, ip, prevHash); err != nil {
+	if _, _, err := h.audit.Append(ctx, audit.Entry{
+		FlagKey:     flagKey,
+		Environment: env,
+		Actor:       actor,
+		EventType:   eventType,
+		PrevState:   prevJSON,
+		NewState:    currJSON,
+		IPAddress:   ip,
+		ProjectID:   projectID,
+	}); err != nil {
 		h.logger.Warn("audit log write failed", zap.Error(err))
 	}
-}
-
-// itoa converts a small integer to its decimal string — avoids importing strconv just for this.
-func itoa(n int) string {
-	const digits = "0123456789"
-	if n < 10 {
-		return string(digits[n])
-	}
-	// For arg indices beyond 9 (unlikely in this codebase, but correct).
-	return string(digits[n/10]) + string(digits[n%10])
 }

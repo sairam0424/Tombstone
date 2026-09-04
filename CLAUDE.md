@@ -217,6 +217,7 @@ Charter, backlog, and timeline live in `domains/<name>/README.md`.
 | incident-response | circuit trip event | `scripts/loop-incident-response.sh <key> <env>` | Post-mortem doc + causal correlation + repeat-offender signal |
 | rollout-advisor | weekdays 08:00 UTC | `scripts/loop-rollout-advisor.sh` | ML recommendation review + blast radius check + signals |
 | governance | weekly Monday 06:00 UTC | `scripts/loop-governance.sh` | Health score + stale count + SOC2 evidence + alert signals |
+| audit-retention | daily | `scripts/loop-audit-retention.sh` | Archives audit_log partitions past AUDIT_LOG_RETENTION_DAYS via a signed checkpoint (DATA-2) — the only mutating loop; read-only loops above never touch Postgres directly |
 
 ### Activation (set these GitHub Actions repo variables)
 - `TOMBSTONE_INTELLIGENCE_URL` → flag-cleanup, rollout-advisor, governance
@@ -224,6 +225,7 @@ Charter, backlog, and timeline live in `domains/<name>/README.md`.
 - `TOMBSTONE_API_URL` → flag-api base URL for all loops
 - `SLACK_BOT_TOKEN` + `SLACK_SIGNING_SECRET` → interactive Slack app
 - `ANTHROPIC_API_KEY` → Argos rule generation endpoint
+- `AUDIT_RETENTION_ADMIN_TOKEN` → admin-scoped bearer token for audit-retention (the run is skipped, not silently treated as success, if unset)
 
 ### Dev stack
 ```bash
@@ -245,6 +247,7 @@ scripts/dev-local.sh logs <svc>
 | marketplace | 8086 |
 | dashboard | 3000 |
 | PostgreSQL | 5432 |
+| PgBouncer (pooled, DATA-2) | 5432 (host: 6432) |
 | Redis | 6379 |
 | Kafka | 9092 |
 | tombstone-operator | (in-cluster only) |

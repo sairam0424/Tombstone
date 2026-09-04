@@ -1,0 +1,192 @@
+package main
+
+import (
+	"os"
+	"reflect"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// TestSplitCommaList is the direct regression proof for SEC-5's AllowedDomains
+// wiring gap: SSOConfig.AllowedDomains was always read and enforced by
+// isAllowedDomain, but nothing in main.go ever populated it from an env var,
+// so every deployment's domain allowlist silently had zero effect.
+func TestSplitCommaList(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty string returns nil (unrestricted)", "", nil},
+		{"single domain", "example.com", []string{"example.com"}},
+		{"multiple domains", "example.com,other.com", []string{"example.com", "other.com"}},
+		{"whitespace around entries is trimmed", " example.com , other.com ", []string{"example.com", "other.com"}},
+		{"empty entries from stray commas are dropped", "example.com,,other.com,", []string{"example.com", "other.com"}},
+		{"whitespace-only input returns nil", "   ", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitCommaList(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("splitCommaList(%q) = %#v, want %#v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSSOConfigWiresAllowedDomains is a structural regression guard,
+// mirroring TestEveryAPIRouteIsPermissionGated's source-parsing technique
+// (authz_routes_test.go): unit-testing the wiring inside main() directly
+// isn't possible without a live DB/server, so this parses main.go's source
+// and fails if the SSOConfig{...} literal ever stops setting
+// AllowedDomains — the exact class of silent regression (TestSplitCommaList
+// proves the parser works; nothing proves anything still calls it here)
+// that let this gap go unnoticed for as long as it did.
+func TestSSOConfigWiresAllowedDomains(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	block := ssoConfigBlock(t, string(src))
+	if !regexp.MustCompile(`AllowedDomains:\s*allowedDomains`).MatchString(block) {
+		t.Errorf("SSOConfig{...} literal no longer sets AllowedDomains — this silently reopens the exact gap "+
+			"SEC-5 fixed (any successfully-authenticated OIDC user from any domain could log in):\n%s", block)
+	}
+}
+
+// TestOBS1MetricsAreWired is a structural regression guard, mirroring
+// TestSSOConfigWiresAllowedDomains's technique: OBS-1's two new wiring
+// facts (the httpMetrics middleware actually being registered, and
+// GET /metrics actually being routed) can't be exercised without a live
+// server, so this parses main.go's source instead. Without a guard like
+// this, a future refactor of the middleware chain or route block could
+// silently drop either line — RED metrics stop being recorded service-wide,
+// or the Prometheus scrape endpoint starts 404ing — with nothing but a
+// blank dashboard in production to notice.
+func TestOBS1MetricsAreWired(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	if !regexp.MustCompile(`r\.Use\(httpMetrics\)`).MatchString(string(src)) {
+		t.Error("main.go no longer registers r.Use(httpMetrics) — RED metrics would silently stop being recorded for every request")
+	}
+	if !regexp.MustCompile(`r\.Get\("/metrics",\s*metricsHandler\.ServeHTTP\)`).MatchString(string(src)) {
+		t.Error("main.go no longer routes GET /metrics to metricsHandler — the Prometheus scrape endpoint would start 404ing")
+	}
+}
+
+// TestInitTracerIsWired is a structural regression guard, mirroring
+// TestOBS1MetricsAreWired's own technique: unit-testing whether main()
+// actually calls telemetry.InitTracer isn't possible without a live
+// server, so this parses main.go's source instead. Without this,
+// internal/telemetry/otel_test.go proving InitTracer sets the global
+// TextMapPropagator correctly WHEN CALLED gives no signal at all about
+// whether main() still calls it — a future refactor could drop the call
+// entirely and every existing test, including that one, would stay green.
+func TestInitTracerIsWired(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	body := string(src)
+
+	if !regexp.MustCompile(`telemetry\.InitTracer\(`).MatchString(body) {
+		t.Error("main.go no longer calls telemetry.InitTracer — distributed trace propagation (both inbound spans via otelhttp.NewHandler and outbound via ResilientClient) would silently stop working, since the global TextMapPropagator is only ever set inside InitTracer")
+	}
+	if !regexp.MustCompile(`shutdownTracer\(`).MatchString(body) {
+		t.Error("main.go no longer calls the shutdown function InitTracer returns — the tracer provider (and any buffered spans) would never be flushed on shutdown")
+	}
+}
+
+// TestEnvIntOrDefault is the direct regression proof for DATA-2's
+// env-tunable pooling: an unset/empty env var must reproduce today's
+// hardcoded default exactly, and a malformed or non-positive value must
+// warn and fall back rather than passing a nonsensical value straight to
+// sql.DB.SetMaxOpenConns/SetMaxIdleConns.
+func TestEnvIntOrDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		def  int
+		want int
+	}{
+		{"unset env var uses the default", "", 5, 5},
+		{"valid positive value overrides the default", "20", 5, 20},
+		{"zero is invalid, falls back to default", "0", 5, 5},
+		{"negative is invalid, falls back to default", "-3", 5, 5},
+		{"non-numeric is invalid, falls back to default", "not-a-number", 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.in != "" {
+				t.Setenv("TEST_ENV_INT_VAR", tc.in)
+			}
+			got := envIntOrDefault("TEST_ENV_INT_VAR", tc.def, zap.NewNop())
+			if got != tc.want {
+				t.Errorf("envIntOrDefault(%q, %d) = %d, want %d", tc.in, tc.def, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnvSecondsOrDefault mirrors TestEnvIntOrDefault for the
+// duration-valued pool settings (ConnMaxLifetime/ConnMaxIdleTime).
+func TestEnvSecondsOrDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		def  time.Duration
+		want time.Duration
+	}{
+		{"unset env var uses the default", "", 5 * time.Minute, 5 * time.Minute},
+		{"valid positive value overrides the default", "600", 5 * time.Minute, 10 * time.Minute},
+		{"zero is invalid, falls back to default", "0", 5 * time.Minute, 5 * time.Minute},
+		{"negative is invalid, falls back to default", "-1", 5 * time.Minute, 5 * time.Minute},
+		{"non-numeric is invalid, falls back to default", "not-a-number", 5 * time.Minute, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.in != "" {
+				t.Setenv("TEST_ENV_SECONDS_VAR", tc.in)
+			}
+			got := envSecondsOrDefault("TEST_ENV_SECONDS_VAR", tc.def, zap.NewNop())
+			if got != tc.want {
+				t.Errorf("envSecondsOrDefault(%q, %s) = %s, want %s", tc.in, tc.def, got, tc.want)
+			}
+		})
+	}
+}
+
+// ssoConfigBlock returns the body of the middleware.SSOConfig{...} composite
+// literal by brace-matching from its opening "{" to the matching close.
+func ssoConfigBlock(t *testing.T, src string) string {
+	t.Helper()
+	const marker = "middleware.SSOConfig{"
+	start := strings.Index(src, marker)
+	if start == -1 {
+		t.Fatalf("could not find %q in main.go", marker)
+	}
+	open := start + len(marker) - 1 // index of the literal's opening "{"
+
+	depth := 0
+	for i := open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[open : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces in SSOConfig{...} literal")
+	return ""
+}

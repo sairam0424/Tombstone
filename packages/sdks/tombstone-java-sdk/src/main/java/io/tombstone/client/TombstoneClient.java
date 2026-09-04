@@ -6,6 +6,10 @@ import io.tombstone.evaluation.EvaluationEngine;
 import io.tombstone.types.*;
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TombstoneClient implements Closeable {
@@ -21,6 +25,13 @@ public class TombstoneClient implements Closeable {
     private final AtomicBoolean connected;
     private Thread sseThread;
 
+    // Debounced recovery from gateway "lag" events. A slow client can receive a
+    // burst of lag frames back-to-back; coalesce them into a single snapshot
+    // refetch via cancel+reschedule on a single-thread scheduler.
+    private static final long LAG_REFETCH_DEBOUNCE_MS = 500L;
+    private final ScheduledExecutorService lagScheduler;
+    private ScheduledFuture<?> pendingLagRefetch;
+
     public TombstoneClient(String sdkKey, String environment, String apiUrl,
                           String gatewayUrl, Map<String, Object> defaults) {
         this.sdkKey = sdkKey;
@@ -33,6 +44,11 @@ public class TombstoneClient implements Closeable {
         this.http = new OkHttpClient();
         this.mapper = new ObjectMapper();
         this.connected = new AtomicBoolean(false);
+        this.lagScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "tombstone-lag-refetch");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public void connect() throws IOException {
@@ -56,7 +72,10 @@ public class TombstoneClient implements Closeable {
     public boolean isConnected() { return connected.get(); }
     public Set<String> flagKeys() { return cache.flagKeys(); }
 
-    private void fetchSnapshot() throws IOException {
+    // Package-private (not private) so the SSE-recovery unit test can override it
+    // to observe refetch calls without touching the network. connect(), reconnect,
+    // and lag-recovery all funnel through this single snapshot-fetch path.
+    void fetchSnapshot() throws IOException {
         Request req = new Request.Builder()
             .url(apiUrl + "/api/v1/environments/snapshot?environment=" + environment)
             .header("Authorization", "Bearer " + sdkKey)
@@ -93,10 +112,22 @@ public class TombstoneClient implements Closeable {
                         if (resp.body() == null) continue;
                         BufferedReader reader = new BufferedReader(new InputStreamReader(resp.body().byteStream()));
                         String line;
+                        String eventType = "message";
                         while ((line = reader.readLine()) != null && connected.get()) {
-                            if (line.startsWith("data:")) {
+                            if (line.isEmpty()) {
+                                eventType = "message"; // blank line ends the SSE frame — reset
+                            } else if (line.startsWith("event:")) {
+                                eventType = line.substring(6).trim();
+                            } else if (line.startsWith("data:")) {
                                 String json = line.substring(5).trim();
-                                applyEvent(json);
+                                if ("lag".equals(eventType)) {
+                                    // Gateway dropped a buffered flag update for this slow client
+                                    // (its 64-slot buffer was full). Recover the lost update by
+                                    // refetching the full snapshot, debounced to coalesce bursts.
+                                    scheduleLagRefetch();
+                                } else {
+                                    applyEvent(json);
+                                }
                             }
                         }
                     }
@@ -121,14 +152,38 @@ public class TombstoneClient implements Closeable {
         } catch (Exception ignored) {}
     }
 
+    // Coalesce a burst of lag events into a single snapshot refetch: each lag
+    // event cancels any pending refetch and reschedules one debounce window out.
+    // synchronized to stay consistent with close(), which shuts the scheduler down.
+    synchronized void scheduleLagRefetch() {
+        if (lagScheduler.isShutdown()) return;
+        if (pendingLagRefetch != null) pendingLagRefetch.cancel(false);
+        pendingLagRefetch = lagScheduler.schedule(this::runLagRefetch,
+            lagRefetchDebounceMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void runLagRefetch() {
+        try {
+            fetchSnapshot();
+        } catch (IOException e) {
+            // Best-effort recovery: a failed refetch leaves the cache unchanged;
+            // the next event or reconnect refreshes it. Mirrors applyEvent's swallow.
+        }
+    }
+
+    // Overridable so tests can shrink the debounce window; 500ms in production.
+    long lagRefetchDebounceMillis() { return LAG_REFETCH_DEBOUNCE_MS; }
+
     private static String str(Map<?, ?> m, String k) {
         Object v = m.get(k);
         return v != null ? v.toString() : "";
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         connected.set(false);
         if (sseThread != null) sseThread.interrupt();
+        if (pendingLagRefetch != null) pendingLagRefetch.cancel(false);
+        lagScheduler.shutdownNow();
     }
 }

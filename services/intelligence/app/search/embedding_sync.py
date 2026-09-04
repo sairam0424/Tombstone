@@ -42,7 +42,9 @@ async def sync_flag_embedding(
     vecs = await model.embed([text])
     embedding = vecs[0] if vecs and vecs[0] else None
     if embedding is None:
-        logger.warning("sync_flag_embedding: empty vector for flag %s — skipping update", flag_key)
+        logger.warning(
+            "sync_flag_embedding: empty vector for flag %s — skipping update", flag_key
+        )
         return
 
     await db_pool.execute(
@@ -73,26 +75,40 @@ class EmbeddingSyncService:
     Pass embedding_model=None to disable embedding sync entirely (lexical-only mode).
     """
 
-    def __init__(self, db_url: str, embedding_model: EmbeddingModel | None = None) -> None:
+    def __init__(
+        self, db_url: str, embedding_model: EmbeddingModel | None = None
+    ) -> None:
         self._db_url = db_url
         self._pool: asyncpg.Pool | None = None
         self._embedding_model: EmbeddingModel | None = embedding_model
 
     async def initialize(self) -> None:
         """Initialize the DB pool, the embedding model, and start the background backfill task."""
-        self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+        # statement_cache_size=0: pooler-safe under DATA-2's PgBouncer
+        # (transaction pooling) — see search/retriever.py's initialize()
+        # for the full explanation.
+        self._pool = await asyncpg.create_pool(
+            self._db_url,
+            min_size=1,
+            max_size=3,
+            max_inactive_connection_lifetime=30.0,
+            statement_cache_size=0,
+        )
         if self._embedding_model is not None:
             try:
                 await self._embedding_model.initialize()
                 logger.info("EmbeddingSyncService: embedding model initialized")
             except Exception as exc:
                 logger.warning(
-                    "EmbeddingSyncService: model initialization failed (%s) — embedding sync disabled", exc
+                    "EmbeddingSyncService: model initialization failed (%s) — embedding sync disabled",
+                    exc,
                 )
                 self._embedding_model = None
                 return
         else:
-            logger.warning("EmbeddingSyncService: no embedding model — embedding sync disabled")
+            logger.warning(
+                "EmbeddingSyncService: no embedding model — embedding sync disabled"
+            )
             return
 
         asyncio.create_task(self._backfill())
@@ -129,7 +145,9 @@ class EmbeddingSyncService:
             )
         except Exception as exc:
             logger.warning(
-                "EmbeddingSyncService: failed to sync embedding for %s (%s)", flag_key, exc
+                "EmbeddingSyncService: failed to sync embedding for %s (%s)",
+                flag_key,
+                exc,
             )
 
     # ------------------------------------------------------------------
@@ -175,7 +193,9 @@ class EmbeddingSyncService:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "EmbeddingSyncService: backfill failed for %s (%s)", row["key"], exc
+                        "EmbeddingSyncService: backfill failed for %s (%s)",
+                        row["key"],
+                        exc,
                     )
             logger.debug(
                 "EmbeddingSyncService: backfilled batch %d/%d",

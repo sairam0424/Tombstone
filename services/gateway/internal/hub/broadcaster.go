@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -18,10 +17,28 @@ type Broadcaster struct {
 	rdb    *redis.Client
 	hub    *Hub
 	logger *zap.Logger
+	// group is this replica's own dedicated consumer group (GW-1) — set
+	// once at construction, from this process's hostname.
+	group   string
+	deduper *eventDeduper
 }
 
 func NewBroadcaster(rdb *redis.Client, hub *Hub, logger *zap.Logger) *Broadcaster {
-	return &Broadcaster{rdb: rdb, hub: hub, logger: logger}
+	hostname, _ := os.Hostname()
+	return &Broadcaster{
+		rdb:     rdb,
+		hub:     hub,
+		logger:  logger,
+		group:   ReplicaGroupName(hostname),
+		deduper: newEventDeduper(dedupWindow),
+	}
+}
+
+// Group returns this replica's own dedicated consumer group name, for
+// callers (cmd/main.go) that need it to seed the group or destroy it on
+// shutdown.
+func (b *Broadcaster) Group() string {
+	return b.group
 }
 
 // Run starts the broadcaster. Reconnects with exponential backoff on failure.
@@ -86,6 +103,12 @@ func (b *Broadcaster) handleMessage(msg *redis.Message) {
 		return
 	}
 
+	// GW-1 (dedup.go): the same logical event also arrives via this
+	// replica's own Streams consumer group — suppress whichever copy
+	// arrives second.
+	if !b.deduper.claim(event) {
+		return
+	}
 	b.hub.Broadcast(environment, event)
 }
 
@@ -93,8 +116,6 @@ func (b *Broadcaster) handleMessage(msg *redis.Message) {
 // Runs concurrently with the pub/sub broadcaster (Run). Call in a goroutine per
 // known environment. XACK is called after successful hub.Broadcast — not before.
 func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string) {
-	hostname, _ := os.Hostname()
-	consumer := fmt.Sprintf("gateway-%s", hostname)
 	streamKey := StreamKey(environment)
 	backoff := time.Second
 
@@ -102,7 +123,7 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 		if ctx.Err() != nil {
 			return
 		}
-		msgs, err := ReadStreamEvents(ctx, b.rdb, streamKey, consumer)
+		msgs, err := ReadStreamEvents(ctx, b.rdb, streamKey, b.group, replicaConsumerName)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -126,7 +147,7 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 		for _, msg := range msgs {
 			payload, ok := msg.Values["payload"].(string)
 			if !ok {
-				AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+				AckStreamMessage(ctx, b.rdb, streamKey, b.group, msg.ID)
 				continue
 			}
 			var event FlagEvent
@@ -142,8 +163,12 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 					zap.Error(err), zap.String("id", msg.ID))
 				continue
 			}
-			b.hub.Broadcast(environment, event)
-			AckStreamMessage(ctx, b.rdb, streamKey, msg.ID)
+			// GW-1 (dedup.go): the same logical event also arrives via the
+			// legacy pub/sub path — suppress whichever copy arrives second.
+			if b.deduper.claim(event) {
+				b.hub.Broadcast(environment, event)
+			}
+			AckStreamMessage(ctx, b.rdb, streamKey, b.group, msg.ID)
 		}
 	}
 }

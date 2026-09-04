@@ -18,23 +18,23 @@ package scheduler
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+
+	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 )
 
 const tickInterval = 30 * time.Second
 
 // Start launches the background scheduler goroutine.
 // It blocks until ctx is cancelled (intended to be called as: go scheduler.Start(ctx, db, rdb, logger)).
-func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
+func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) {
 	logger.Info("scheduled-change executor starting", zap.Duration("interval", tickInterval))
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -45,7 +45,7 @@ func Start(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logge
 			logger.Info("scheduled-change executor stopped")
 			return
 		case <-ticker.C:
-			runDue(ctx, db, rdb, logger)
+			runDue(ctx, db, rdb, logger, auditW)
 		}
 	}
 }
@@ -56,6 +56,11 @@ type pendingChange struct {
 	flagKey       string
 	environment   string
 	changePayload []byte
+	// projectID is "" for rows written before migration 016 (legacy rows —
+	// see that migration's comment for why they are never backfilled).
+	// applyChange refuses to execute a row with no project_id rather than
+	// falling back to a project-blind match.
+	projectID string
 }
 
 // changePayloadFields mirrors the API struct — enabled and/or rollout_pct.
@@ -81,7 +86,7 @@ type flagEvent struct {
 // FOR UPDATE SKIP LOCKED ensures that when flag-api runs as multiple replicas
 // each instance claims a disjoint batch of rows — preventing duplicate audit
 // entries and duplicate Redis events from concurrent execution of the same row.
-func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger) {
+func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		logger.Error("scheduler: begin transaction failed", zap.Error(err))
@@ -89,32 +94,25 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, flag_key, environment, change_payload
-		FROM scheduled_changes
-		WHERE (status = 'PENDING' AND scheduled_for <= NOW())
-		   OR (status = 'FAILED' AND retry_count < max_retries AND next_retry_at <= NOW())
-		ORDER BY scheduled_for ASC
-		FOR UPDATE SKIP LOCKED
-	`)
+	rows, err := sqlcgen.New(tx).SelectDueScheduledChanges(ctx)
 	if err != nil {
 		logger.Error("scheduler: query pending changes failed", zap.Error(err))
 		return
 	}
-	defer rows.Close()
 
-	var due []pendingChange
-	for rows.Next() {
-		var pc pendingChange
-		if err := rows.Scan(&pc.id, &pc.flagKey, &pc.environment, &pc.changePayload); err != nil {
-			logger.Error("scheduler: scan row failed", zap.Error(err))
-			continue
-		}
-		due = append(due, pc)
-	}
-	if err := rows.Err(); err != nil {
-		logger.Error("scheduler: rows iteration error", zap.Error(err))
-		return
+	due := make([]pendingChange, 0, len(rows))
+	for _, r := range rows {
+		due = append(due, pendingChange{
+			id:            r.ID,
+			flagKey:       r.FlagKey,
+			environment:   r.Environment,
+			changePayload: r.ChangePayload,
+			// project_id is nullable (legacy pre-migration-016 rows are left
+			// NULL, never backfilled) -- sql.NullString.String is "" when
+			// NULL, matching this field's "" == "no project" convention.
+			// applyChange's own check refuses to execute such a row.
+			projectID: r.ProjectID.String,
+		})
 	}
 	// Commit the lock-acquisition transaction before executing changes
 	// (each applyChange opens its own sub-operation).
@@ -124,14 +122,14 @@ func runDue(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logg
 	}
 
 	for _, pc := range due {
-		applyChange(ctx, db, rdb, logger, pc)
+		applyChange(ctx, db, rdb, logger, auditW, pc)
 	}
 }
 
 // applyChange executes a single scheduled change.
 // On success: updates flag_environments, marks EXECUTED, writes audit + Redis event.
 // On failure: marks FAILED with error_message, logs the error, and returns (does not panic).
-func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, pc pendingChange) {
+func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer, pc pendingChange) {
 	log := logger.With(
 		zap.String("scheduled_change_id", pc.id),
 		zap.String("flag_key", pc.flagKey),
@@ -148,16 +146,21 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		return
 	}
 
+	// TEN-1a: a row with no project_id (written before migration 016) cannot
+	// be matched to a flag safely — flags.key is unique only per
+	// (project_id, key), so matching by key alone risks mutating a DIFFERENT
+	// project's same-keyed flag. Refuse rather than guess.
+	if pc.projectID == "" {
+		markFailed(ctx, db, log, pc.id, "scheduled change has no project_id (legacy row) — cannot execute safely")
+		return
+	}
+	projectID := pc.projectID
+
 	// Read current flag environment state for audit and to fill in unchanged fields.
-	var curEnabled bool
-	var curRollout int
-	var flagID string
-	err := db.QueryRowContext(ctx, `
-		SELECT fe.enabled, fe.rollout_pct, fe.flag_id
-		FROM flag_environments fe
-		JOIN flags f ON f.id = fe.flag_id
-		WHERE f.key = $1 AND fe.environment = $2
-	`, pc.flagKey, pc.environment).Scan(&curEnabled, &curRollout, &flagID)
+	q := sqlcgen.New(db)
+	state, err := q.GetCurrentFlagEnvironmentState(ctx, sqlcgen.GetCurrentFlagEnvironmentStateParams{
+		Key: pc.flagKey, Environment: pc.environment, ProjectID: projectID,
+	})
 	if err == sql.ErrNoRows {
 		markFailed(ctx, db, log, pc.id,
 			fmt.Sprintf("flag %q environment %q not found", pc.flagKey, pc.environment))
@@ -167,6 +170,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 		markFailed(ctx, db, log, pc.id, "read current state failed: "+err.Error())
 		return
 	}
+	curEnabled, curRollout := state.Enabled, int(state.RolloutPct)
 
 	// Merge: apply only the fields present in the payload.
 	newEnabled := curEnabled
@@ -179,28 +183,25 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	}
 
 	// Apply the flag environment update (same logic as handlers.UpdateEnvironment).
-	res, err := db.ExecContext(ctx, `
-		UPDATE flag_environments fe
-		SET enabled = $1, rollout_pct = $2, updated_at = now(), updated_by = 'scheduler'
-		FROM flags f
-		WHERE f.id = fe.flag_id AND f.key = $3 AND fe.environment = $4
-	`, newEnabled, newRollout, pc.flagKey, pc.environment)
+	n, err := q.ApplyScheduledFlagEnvironmentUpdate(ctx, sqlcgen.ApplyScheduledFlagEnvironmentUpdateParams{
+		Enabled:     newEnabled,
+		RolloutPct:  int32(newRollout),
+		Key:         pc.flagKey,
+		Environment: pc.environment,
+		ProjectID:   projectID,
+	})
 	if err != nil {
 		markFailed(ctx, db, log, pc.id, "flag environment update failed: "+err.Error())
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		markFailed(ctx, db, log, pc.id,
 			fmt.Sprintf("flag %q environment %q not found during update", pc.flagKey, pc.environment))
 		return
 	}
 
 	// Mark EXECUTED.
-	if _, err := db.ExecContext(ctx, `
-		UPDATE scheduled_changes
-		SET status = 'EXECUTED', executed_at = NOW()
-		WHERE id = $1
-	`, pc.id); err != nil {
+	if err := q.MarkScheduledChangeExecuted(ctx, pc.id); err != nil {
 		// The flag update already happened — log but don't fail the whole pipeline.
 		log.Error("scheduler: failed to mark EXECUTED (flag was updated)", zap.Error(err))
 	}
@@ -208,7 +209,7 @@ func applyChange(ctx context.Context, db *sql.DB, rdb *redis.Client, logger *zap
 	// Write audit log entry.
 	prev := map[string]any{"enabled": curEnabled, "rollout_pct": curRollout}
 	curr := map[string]any{"enabled": newEnabled, "rollout_pct": newRollout, "scheduled_change_id": pc.id}
-	writeAudit(ctx, db, log, pc.flagKey, pc.environment, "scheduler",
+	writeAudit(ctx, auditW, log, projectID, pc.flagKey, pc.environment, "scheduler",
 		"scheduled_change_applied", prev, curr)
 
 	// Publish Redis event on the same channel as manual updates.
@@ -287,20 +288,18 @@ func backoffDuration(retryCount int) time.Duration {
 func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg string) {
 	log.Error("scheduler: change failed", zap.String("error", errMsg))
 
-	var retryCount, maxRetries int
-	if err := db.QueryRowContext(ctx, `
-		SELECT retry_count, max_retries FROM scheduled_changes WHERE id = $1
-	`, id).Scan(&retryCount, &maxRetries); err != nil {
+	q := sqlcgen.New(db)
+	retryState, err := q.GetScheduledChangeRetryState(ctx, id)
+	if err != nil {
 		log.Error("scheduler: failed to read retry state, marking terminal FAILED", zap.Error(err))
-		if _, execErr := db.ExecContext(ctx, `
-			UPDATE scheduled_changes
-			SET status = 'FAILED', error_message = $1
-			WHERE id = $2
-		`, errMsg, id); execErr != nil {
+		if execErr := q.MarkScheduledChangeFailedNoRetryState(ctx, sqlcgen.MarkScheduledChangeFailedNoRetryStateParams{
+			ErrorMessage: sql.NullString{String: errMsg, Valid: true}, ID: id,
+		}); execErr != nil {
 			log.Error("scheduler: failed to mark FAILED", zap.Error(execErr))
 		}
 		return
 	}
+	retryCount, maxRetries := int(retryState.RetryCount), int(retryState.MaxRetries)
 
 	retryCount++
 
@@ -314,11 +313,12 @@ func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg str
 			zap.Int("max_retries", maxRetries),
 			zap.Time("next_retry_at", nextRetryAt))
 
-		if _, err := db.ExecContext(ctx, `
-			UPDATE scheduled_changes
-			SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = $3
-			WHERE id = $4
-		`, errMsg, retryCount, nextRetryAt, id); err != nil {
+		if err := q.MarkScheduledChangeFailedRetryPending(ctx, sqlcgen.MarkScheduledChangeFailedRetryPendingParams{
+			ErrorMessage: sql.NullString{String: errMsg, Valid: true},
+			RetryCount:   int32(retryCount),
+			NextRetryAt:  sql.NullTime{Time: nextRetryAt, Valid: true},
+			ID:           id,
+		}); err != nil {
 			log.Error("scheduler: failed to mark FAILED (retry pending)", zap.Error(err))
 		}
 		return
@@ -333,11 +333,11 @@ func markFailed(ctx context.Context, db *sql.DB, log *zap.Logger, id, errMsg str
 		zap.Int("retry_count", retryCount),
 		zap.Int("max_retries", maxRetries))
 
-	if _, err := db.ExecContext(ctx, `
-		UPDATE scheduled_changes
-		SET status = 'FAILED', error_message = $1, retry_count = $2, next_retry_at = NULL
-		WHERE id = $3
-	`, errMsg, retryCount, id); err != nil {
+	if err := q.MarkScheduledChangeFailedTerminal(ctx, sqlcgen.MarkScheduledChangeFailedTerminalParams{
+		ErrorMessage: sql.NullString{String: errMsg, Valid: true},
+		RetryCount:   int32(retryCount),
+		ID:           id,
+	}); err != nil {
 		log.Error("scheduler: failed to mark FAILED (terminal)", zap.Error(err))
 	}
 }
@@ -383,40 +383,29 @@ func publishToStream(ctx context.Context, rdb *redis.Client, log *zap.Logger, en
 
 // writeAudit inserts an append-only audit log entry with Merkle hash linking.
 // Mirrors the logic in v1.FlagHandler.writeAudit.
-func writeAudit(ctx context.Context, db *sql.DB, log *zap.Logger,
-	flagKey, env, actor, eventType string, prev, curr any) {
+func writeAudit(ctx context.Context, auditW *audit.Writer, log *zap.Logger,
+	projectID, flagKey, env, actor, eventType string, prev, curr any) {
 
 	prevJSON, _ := json.Marshal(prev)
 	currJSON, _ := json.Marshal(curr)
 
-	// Fetch the most recent audit row for this flag to build the Merkle chain.
-	var lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs string
-	_ = db.QueryRowContext(ctx, `
-		SELECT id, event_type, actor,
-		       COALESCE(prev_state::text, ''),
-		       COALESCE(new_state::text, ''),
-		       EXTRACT(EPOCH FROM created_at)::text
-		FROM audit_log
-		WHERE flag_key = $1
-		ORDER BY created_at DESC LIMIT 1
-	`, flagKey).Scan(&lastID, &lastEventType, &lastActor, &lastPrevState, &lastNewState, &lastTs)
-
-	// Canonical 6-field pipe-separated Merkle formula — matches flags.go:auditEntryHash
-	// exactly so mixed-provenance chains remain verifiable.
-	// Formula: sha256(id|event_type|actor|prev_state|new_state|ts)
-	prevHash := ""
-	if lastID != "" {
-		content := strings.Join([]string{lastID, lastEventType, lastActor, lastPrevState, lastNewState, lastTs}, "|")
-		hashBytes := sha256.Sum256([]byte(content))
-		prevHash = fmt.Sprintf("%x", hashBytes)
+	// AUD-1: this function used to hand-duplicate the six-field pipe-joined
+	// formula from api/v1 (it could not import the unexported helper across the
+	// package boundary), and did an unlocked SELECT-last-then-INSERT. Both the
+	// duplication and the fork race are gone — audit.Writer is the only writer.
+	if auditW == nil {
+		log.Warn("scheduler: audit log write skipped — no audit writer configured")
+		return
 	}
-
-	newID := uuid.New().String()
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO audit_log
-		    (id, flag_key, environment, actor, event_type, prev_state, new_state, ip_address, prev_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8)
-	`, newID, flagKey, env, actor, eventType, prevJSON, currJSON, prevHash); err != nil {
+	if _, _, err := auditW.Append(ctx, audit.Entry{
+		FlagKey:     flagKey,
+		Environment: env,
+		Actor:       actor,
+		EventType:   eventType,
+		PrevState:   prevJSON,
+		NewState:    currJSON,
+		ProjectID:   projectID,
+	}); err != nil {
 		log.Warn("scheduler: audit log write failed", zap.Error(err))
 	}
 }

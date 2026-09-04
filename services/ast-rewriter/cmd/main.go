@@ -196,16 +196,34 @@ func main() {
 		port = "8085"
 	}
 
+	// OBS-1 (rollout): pull-based, no OTLP_ENDPOINT/collector needed —
+	// unlike InitTracer, there's no "unset means no-op" branch. Mirrors
+	// flag-api/gateway/evaluator's OBS-1 slices exactly (same middleware,
+	// same metric names/labels) so every service's RED metrics are
+	// directly comparable in one dashboard.
+	meter, metricsHandler, err := telemetry.InitMeter("ast-rewriter")
+	if err != nil {
+		log.Fatal("init meter", zap.Error(err))
+	}
+	httpMetrics, err := telemetry.HTTPMetrics(meter)
+	if err != nil {
+		log.Fatal("init http metrics middleware", zap.Error(err))
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(httpMetrics)
 
 	// ast-rewriter has no Postgres or Redis dependency — it is a stateless
 	// scan/rewrite worker, so Checker with both fields nil always reports ready.
 	healthChecker := &health.Checker{}
 	r.Get("/health", healthChecker.Livez)
 	r.Get("/readyz", healthChecker.Readyz)
+	// OBS-1: Prometheus scrape endpoint — public, no auth middleware,
+	// matching /health and /readyz above.
+	r.Get("/metrics", metricsHandler.ServeHTTP)
 	r.Post("/api/v1/scan", scanHandler(log))
 	r.Post("/api/v1/rewrite", rewriteHandler(log))
 

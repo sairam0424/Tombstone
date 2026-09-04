@@ -1,22 +1,33 @@
-export type FlagType = 'BOOLEAN' | 'STRING' | 'INTEGER' | 'FLOAT' | 'JSON';
-export type FlagState = 'DRAFT' | 'ACTIVE' | 'COMPLETE' | 'ARCHIVED';
+export type FlagType = "BOOLEAN" | "STRING" | "INTEGER" | "FLOAT" | "JSON";
+export type FlagState = "DRAFT" | "ACTIVE" | "COMPLETE" | "ARCHIVED";
 export type EvaluationReason =
-  | 'OFF'
-  | 'FALLTHROUGH'
-  | 'TARGET_MATCH'
-  | 'RULE_MATCH'
-  | 'PREREQUISITE_FAILED'
-  | 'ERROR';
+  | "OFF"
+  | "FALLTHROUGH"
+  | "TARGET_MATCH"
+  | "RULE_MATCH"
+  | "PREREQUISITE_FAILED"
+  | "ERROR";
 
 /** Full operator set for targeting rule evaluation. */
 export type RuleOperator =
-  | 'IN' | 'NOT_IN' | 'EQ' | 'NEQ'
-  | 'LT' | 'LTE' | 'GT' | 'GTE'
-  | 'CONTAINS' | 'PREFIX' | 'SUFFIX'
-  | 'REGEX'
-  | 'SEMVER_GTE' | 'SEMVER_LTE'
-  | 'GEO_COUNTRY' | 'GEO_REGION'
-  | 'DATE_BEFORE' | 'DATE_AFTER';
+  | "IN"
+  | "NOT_IN"
+  | "EQ"
+  | "NEQ"
+  | "LT"
+  | "LTE"
+  | "GT"
+  | "GTE"
+  | "CONTAINS"
+  | "PREFIX"
+  | "SUFFIX"
+  | "REGEX"
+  | "SEMVER_GTE"
+  | "SEMVER_LTE"
+  | "GEO_COUNTRY"
+  | "GEO_REGION"
+  | "DATE_BEFORE"
+  | "DATE_AFTER";
 
 /** Alias — identical to RuleOperator. Both names exported for compatibility. */
 export type OperatorType = RuleOperator;
@@ -50,7 +61,7 @@ export interface FlagEnvironmentState {
 
 export interface TargetingRule {
   id: string;
-  ruleType: 'USER' | 'ORG' | 'SEGMENT' | 'CUSTOM';
+  ruleType: "USER" | "ORG" | "SEGMENT" | "CUSTOM";
   /**
    * Dot-notation attribute path on EvaluationContext.
    * Examples: "userId", "orgId", "geo.country"
@@ -116,5 +127,12 @@ export interface TombstoneClientConfig {
   defaults: Record<string, unknown>;
   reconnectIntervalMs?: number;
   maxReconnectMs?: number;
+  /**
+   * Debounce window (ms) for coalescing a burst of gateway "lag" events into a
+   * single full-snapshot refetch. A slow client can receive many lag frames in
+   * quick succession; they collapse into ONE refetch this many ms after the
+   * last one. Default: 500.
+   */
+  lagRefetchDebounceMs?: number;
   telemetrySampleRate?: number;
 }

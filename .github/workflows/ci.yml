@@ -26,6 +26,15 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: services/${{ matrix.service }}/go.sum
 
+      - name: sqlc generate produces no diff (DATA-1b)
+        if: matrix.service == 'flag-api'
+        working-directory: services/flag-api
+        run: |
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+          "$(go env GOPATH)/bin/sqlc" generate
+          git diff --exit-code -- internal/db/sqlcgen || \
+            (echo "::error::internal/db/sqlcgen is stale — run 'make gen-sqlc' and commit the result" && exit 1)
+
       - name: go vet
         working-directory: services/${{ matrix.service }}
         env:
@@ -76,7 +85,7 @@ jobs:
       - name: ruff check
         run: |
           pip install ruff==0.15.9
-          ruff check . --ignore F401
+          ruff check .
 
       - name: pytest with coverage
         run: |
@@ -113,6 +122,9 @@ jobs:
 
       - name: build @tombstone/core
         run: npm run build
+
+      - name: test @tombstone/core (evaluation + contract + streaming/lag)
+        run: npm test
 
   python-sdk:
     name: Python SDK
@@ -189,3 +201,82 @@ jobs:
         env:
           GOWORK: "off"
         run: cd infra/terraform/provider && go mod tidy && go build ./... && go vet ./...
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install workspace deps
+        # npm workspaces resolve against the root lockfile; --ignore-scripts
+        # skips husky/prepare (matches the dashboard deploy workflow).
+        run: npm ci --ignore-scripts
+      - name: Typecheck + build dashboard
+        # `npm run build` is `tsc -b tsconfig.app.json && vite build` — the tsc
+        # step is the typecheck gate; vite build is the production bundle.
+        working-directory: workspace-dashboard
+        run: npm run build
+      - name: Test dashboard
+        working-directory: workspace-dashboard
+        run: npm test
+
+  flag-api-migrations:
+    name: flag-api Migration Runner
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector image — schema.sql's embedding vector(768) column needs it.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: tombstone
+          POSTGRES_PASSWORD: tombstone
+          POSTGRES_DB: tombstone
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tombstone"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+      - name: DB-backed verification (migrations, token hashing, audit chain integrity)
+        working-directory: services/flag-api
+        env:
+          GOWORK: "off"
+          # Keyword/value DSN (no URL); lib/pq reads the password from PGPASSWORD.
+          PGPASSWORD: tombstone
+          TEST_DATABASE_URL: "host=localhost port=5432 user=tombstone dbname=tombstone sslmode=disable"
+        run: |
+          go build ./cmd/migrate ./internal/db/ ./internal/audit/ ./internal/api/v1/ ./internal/middleware/
+          # SEPARATE, SEQUENTIAL invocations on purpose. `go test` runs different
+          # packages in PARALLEL, and all three suites share this one database:
+          # internal/db asserts a FRESH apply of every migration, so it must see a
+          # pristine DB and must run BEFORE the others, whose fixtures call Migrate
+          # (idempotent, but only correct to run against an already-baselined DB).
+          # A single combined invocation raced and applied the schema out from
+          # under the migration test. Do not merge these back into one line.
+          go test ./internal/db/ -v
+          go test ./internal/audit/ -v
+          # TEN-1a: proves cross-tenant isolation against a real Postgres — same
+          # key created in two different projects, every handler checked for leaks.
+          # SEC-3b: proves propose->quorum->apply actually mutates flag_environments,
+          # not just the change_requests row's own status. SEC-3b part 2: proves
+          # require_approval actually blocks UpdateEnvironment and that a valid
+          # break-glass token bypasses it exactly once. SEC-5: proves SCIM
+          # deprovisioning actually revokes the RBAC grant (user_roles), not just
+          # scim_users.active. Same package, same DB, run together (one process,
+          # sequential top-level tests, no t.Parallel) rather than separate
+          # invocations — no fixture collision between them.
+          go test ./internal/api/v1/ -run 'TestTenancyIsolation|TestChangeRequestProposeQuorumAndApply|TestRequireApprovalGate|TestSCIMDeprovisionRevokesUserRoles' -v
+          # SEC-5: proves user_mfa_log actually gets written on login (SOC 2 CC6
+          # evidence) — a separate package from the ones above, so its own
+          # invocation, but still after internal/db's fresh-apply test.
+          go test ./internal/middleware/ -run TestLogMFAEvent -v

@@ -18,7 +18,8 @@ from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
 from app.graph.builder import DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
-from app.kafka.consumer import TelemetryConsumer, create_consumer
+from app.kafka.consumer import create_consumer
+from app.observability.metrics import RedMetricsMiddleware, metrics_response
 from app.rollout.linucb import LinUCBBandit
 from app.rollout.routes import router as rollout_router
 from app.rollout.thompson import ThompsonSamplingEngine
@@ -63,7 +64,6 @@ async def _depgraph_rebuild_background(
 
     while True:
         _now_ts = asyncio.get_running_loop().time()
-        import time as _t
         import datetime as _dt
 
         now = _dt.datetime.utcnow()
@@ -275,6 +275,15 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
 )
+# OBS-1 (Python slice): added AFTER CORSMiddleware so it wraps (runs
+# outside) it, matching the Go services' convention of registering RED
+# metrics outer to CORS/rate-limiting — a CORS preflight short-circuit is
+# still recorded (as "unmatched", never the raw path; see
+# app/observability/metrics.py's _route_label docstring), not silently
+# skipped. Starlette wraps middleware in REVERSE registration order (the
+# last one added via add_middleware ends up outermost), so this ordering
+# is deliberate, not incidental.
+app.add_middleware(RedMetricsMiddleware)
 
 app.include_router(experiments_router)
 app.include_router(webhooks_router)
@@ -286,6 +295,15 @@ app.include_router(telemetry_router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "intelligence"}
+
+
+# OBS-1: Prometheus scrape endpoint — public, no auth middleware, matching
+# /health above. Distinct from app/telemetry/routes.py's POST
+# /api/v1/telemetry/ingest, which ingests SDK evaluation events, not
+# observability metrics.
+@app.get("/metrics")
+async def metrics():
+    return metrics_response()
 
 
 @app.get("/api/v1/search")
