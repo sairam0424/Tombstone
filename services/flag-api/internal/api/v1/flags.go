@@ -501,6 +501,26 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, key, "", actor, "flag_archived", nil, map[string]any{"tombstoned": true}, ipFromRequest(r))
+
+	// INT-4: notify intelligence's anomaly detector to evict this flag's
+	// state (otherwise it leaks in-process forever, with no persistence or
+	// TTL). ArchiveFlag has no single environment of its own -- it archives
+	// the flag across every environment at once -- so this deliberately
+	// publishes to "production" only, matching this repo's established
+	// single-default-environment convention elsewhere (DEFAULT_PROJECT_ID,
+	// TOMBSTONE_ENVIRONMENTS' own default). AnomalyDetector's state is
+	// keyed by flag_key alone with no per-environment split, so reaching
+	// ANY one stream intelligence is actually subscribed to is sufficient
+	// to evict all of it; Enabled/RolloutPct carry no meaning for this
+	// event and are zero-valued, matching KillSwitch's convention for
+	// fields the receiving side ignores.
+	archiveEvent := FlagEvent{
+		FlagKey: key, Enabled: false, RolloutPct: 0,
+		Reason: "archived", Ts: time.Now().Unix(), Environment: "production",
+	}
+	h.publishEvent(r.Context(), "production", archiveEvent)
+	h.publishToStream(r.Context(), "production", archiveEvent)
+
 	writeJSON(w, http.StatusOK, map[string]any{"archived": true, "tombstoned": true, "key": key})
 }
 

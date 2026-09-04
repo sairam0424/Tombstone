@@ -551,3 +551,81 @@ func assertExactlyOneChangeRequestWithID(t *testing.T, requests []ChangeRequest,
 			"the other project's change request must not appear here", wantID, len(requests), requests)
 	}
 }
+
+// TestArchiveFlagPublishesAnArchivedEventForAnomalyEviction is the
+// regression test for INT-4's flag-eviction wiring: ArchiveFlag used to
+// construct no FlagEvent and call no publish path at all, unlike
+// UpdateEnvironment/KillSwitch/ApproveChangeRequest, so intelligence's
+// AnomalyDetector never learned a flag was gone and leaked its state
+// (no persistence, no TTL) for the process lifetime. Uses its own
+// standalone project/flag/miniredis setup rather than reusing
+// TestTenancyIsolation's shared, sequential subtests, since this is a
+// different concern (event publishing, not tenancy) from a test that
+// already archives its own flag as a side effect of an earlier subtest.
+func TestArchiveFlagPublishesAnArchivedEventForAnomalyEviction(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping DB-backed test")
+	}
+
+	database, err := sql.Open("postgres", url)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if _, err := db.Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	projectID := createTestProject(ctx, t, database, "int4-archive-event-test")
+
+	logger := zap.NewNop()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	auditKey, err := secrets.NewAuditKey("int4-archive-event-test-key-00000000", "")
+	if err != nil {
+		t.Fatalf("audit key: %v", err)
+	}
+	auditW := audit.NewWriter(database, auditKey)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+
+	const flagKey = "int4-archive-event-flag"
+	createTestFlag(t, flagH, projectID, flagKey)
+
+	req := newTenancyRequest(t, http.MethodDelete, "/api/v1/flags/"+flagKey, nil, projectID,
+		map[string]string{"key": flagKey})
+	rec := httptest.NewRecorder()
+	flagH.ArchiveFlag(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ArchiveFlag status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	msgs, err := rdb.XRange(ctx, "tombstone:stream:production", "-", "+").Result()
+	if err != nil {
+		t.Fatalf("XRange: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected exactly 1 stream entry on tombstone:stream:production, got %d", len(msgs))
+	}
+
+	fields := msgs[0].Values
+	if got := fields["event"]; got != "archived" {
+		t.Errorf("event (reason) = %q, want %q", got, "archived")
+	}
+	if got := fields["flag_key"]; got != flagKey {
+		t.Errorf("flag_key = %q, want %q", got, flagKey)
+	}
+	if got := fields["environment"]; got != "production" {
+		t.Errorf("environment = %q, want %q", got, "production")
+	}
+}

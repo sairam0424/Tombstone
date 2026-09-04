@@ -10,14 +10,24 @@ from app.anomaly.ensemble import AnomalyEnsemble
 @dataclass
 class FlagMetrics:
     """Rolling window of evaluation counts and error rates for one flag."""
-    error_rates: Deque[float] = field(default_factory=lambda: deque(maxlen=672))  # 7 days × 96 windows/day
+
+    # INT-4: 672 x 10s windows = 6720s ≈ 1.87h, NOT "7 days" -- the original
+    # comment's own arithmetic (96 windows/day x 7 days = 672) assumed a
+    # 15-minute window, but record() below is called once per 10s window,
+    # not per 15-min one. Deliberately kept at this size (a true 7-day
+    # window would be ~130x larger per flag; see ensemble.py's
+    # _10S_MAXLEN comment for the capacity-planning tradeoff) -- this is
+    # only a documentation fix, not a behavior change.
+    error_rates: Deque[float] = field(default_factory=lambda: deque(maxlen=672))
     eval_counts: Deque[int] = field(default_factory=lambda: deque(maxlen=672))
 
 
 class AnomalyDetector:
     """
     Detects anomalous flag evaluation patterns using Z-score deviation.
-    Baseline: 7-day rolling window of per-flag error rates.
+    Baseline: ~1.87h rolling window of per-flag error rates (672 x 10s
+    windows -- NOT 7 days, despite this class's history of calling it one;
+    see FlagMetrics's comment above).
     Anomaly signal: current window Z-score > 2.5 std deviations from baseline.
 
     Phase 3.1 upgrade: also maintains an AnomalyEnsemble (3-model, ImDiffusion-inspired).
@@ -98,3 +108,15 @@ class AnomalyDetector:
     def get_ensemble(self) -> AnomalyEnsemble:
         """Expose the ensemble for daily retraining tasks."""
         return self._ensemble
+
+    def evict(self, flag_key: str) -> bool:
+        """
+        Remove a flag's tracked state entirely (INT-4: called when a flag
+        is archived) -- both the classic Z-score FlagMetrics and the
+        ensemble's own per-flag state, which otherwise leak forever (no
+        persistence, no TTL) for the lifetime of the process. Returns True
+        if any state existed and was removed.
+        """
+        had_metrics = self._metrics.pop(flag_key, None) is not None
+        had_ensemble = self._ensemble.evict(flag_key)
+        return had_metrics or had_ensemble
