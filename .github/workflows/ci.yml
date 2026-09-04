@@ -112,7 +112,9 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          # No cache-dependency-path — package-lock.json generated on first npm install
+          # No cache-dependency-path — npm's built-in cache isn't configured
+          # for this job (package-lock.json IS committed; verified via
+          # `git ls-files` — a prior comment here claimed otherwise)
 
       - name: npm install
         run: npm install
@@ -121,6 +123,57 @@ jobs:
         run: npm run build
 
       - name: test @tombstone/core (evaluation + contract + streaming/lag)
+        run: npm test
+
+  wasm-eval-engine:
+    name: WASM Eval Engine
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk-wasm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install workspace deps (npm workspaces resolve against the root lockfile)
+        working-directory: .
+        run: npm ci --ignore-scripts
+
+      - name: build @tombstone/eval
+        run: npm run build
+
+      - name: test @tombstone/eval (isInRollout + evaluate, against real cross-SDK contract vectors)
+        run: npm test
+
+  edge-sdk:
+    name: Edge SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Physical directory still named @flagmind (content renamed to @tomb-stone)
+        working-directory: packages/sdks/@flagmind/edge
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          # No cache-dependency-path — npm's built-in cache isn't configured
+          # for this job (package-lock.json IS committed; verified via
+          # `git ls-files` — a prior comment here claimed otherwise)
+
+      - name: npm install
+        run: npm install
+
+      - name: build @tomb-stone/edge
+        run: npm run build
+
+      - name: test @tomb-stone/edge (hash parity with real cross-SDK contract vectors)
         run: npm test
 
   python-sdk:
