@@ -63,7 +63,7 @@ cp infra/.env.example infra/.env
 >
 > | Variable | What to set | How |
 > |----------|-------------|-----|
-> | `POSTGRES_PASSWORD` | Strong random password | Any password — also update `DB_URL` to match |
+> | `POSTGRES_PASSWORD` | Strong random password | Any password — also update `DB_URL` **and** `DB_URL_DIRECT` to match (DATA-2: the latter is what `cmd/migrate` reads) |
 > | `JWT_SECRET` | 64-char random hex | `openssl rand -hex 32` |
 > | `FLAG_API_TOKEN` | Your SDK token | Any secret string your apps will use |
 >
