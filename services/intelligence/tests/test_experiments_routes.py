@@ -37,6 +37,18 @@ class FailingConnector:
         raise RuntimeError("connection refused")
 
 
+class CountingConnector:
+    """Records how many times query_experiment_metrics was actually called."""
+
+    def __init__(self, metrics: dict[str, AggregatedMetric]):
+        self._metrics = metrics
+        self.call_count = 0
+
+    async def query_experiment_metrics(self, **kwargs) -> dict[str, AggregatedMetric]:
+        self.call_count += 1
+        return self._metrics
+
+
 def _request_body(**overrides) -> dict:
     body = {
         "experiment_id": "exp-1",
@@ -201,3 +213,32 @@ def test_analyze_warehouse_failure_returns_502(mock_get_connector):
     response = client.post("/api/v1/experiments/analyze", json=_request_body())
 
     assert response.status_code == 502
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_connector):
+    """
+    Regression test for EXP-1 PR 3/3: a prior version of this branch
+    reconstructed a `[mean] * sample_size` constant-value array per variant
+    and fed it into CUPED's covariance/adjustment math -- the same
+    fabrication bug class PR1/PR2 fixed elsewhere in this file, just
+    laundered through an extra transformation. CUPED is now formally scoped
+    to POST /cuped-adjust only; /analyze must reject stat_method="cuped"
+    explicitly rather than silently computing a fabricated result.
+    """
+    connector = CountingConnector(_CLOSE_METRICS)
+    mock_get_connector.return_value = connector
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze", json=_request_body(stat_method="cuped")
+    )
+
+    assert response.status_code == 400
+    assert "cuped-adjust" in response.json()["detail"]
+    # Fail-fast: this must be rejectable purely from the request body, with
+    # zero warehouse round-trips -- a real customer warehouse query has real
+    # cost/latency (up to WAREHOUSE_QUERY_TIMEOUT_S) and this rejection needs
+    # none of that data (found by adversarial review: a prior version of
+    # this fix checked stat_method="cuped" AFTER the query already ran).
+    assert connector.call_count == 0

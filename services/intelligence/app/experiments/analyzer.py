@@ -113,10 +113,15 @@ class ExperimentAnalyzer:
         to 100%. This method uses the warehouse's own aggregates instead, so
         both statistics are computed from the real per-variant spread.
 
-        CUPED is NOT covered here — it needs per-user outcome/covariate
+        CUPED is NOT covered here, and never will be through this
+        warehouse-aggregate path — it needs real per-user outcome/covariate
         pairs to compute a covariance, which cannot be reconstructed from
-        marginal aggregates, so it still uses `analyze()`/`analyze_cuped()`
-        unchanged. mSPRT has its own sufficient-stats method,
+        marginal aggregates (EXP-1 PR 3/3 formally closed this: CUPED is
+        scoped exclusively to POST /api/v1/experiments/cuped-adjust, which
+        takes raw per-user arrays directly; `stat_method="cuped"` is
+        rejected by /analyze rather than silently computing a fabricated
+        result from a `[mean] * sample_size` reconstruction). mSPRT has its
+        own sufficient-stats method,
         `analyze_sequential_from_stats()` — it no longer routes through
         `analyze_sequential()`'s reconstruction either.
         """
@@ -252,56 +257,6 @@ class ExperimentAnalyzer:
             return "SHIP"
 
         return "CONTINUE"
-
-    def analyze_cuped(
-        self,
-        experiment: ExperimentDefinition,
-        control_data: list[float],
-        treatment_data: list[float],
-        control_covariate: list[float],
-        treatment_covariate: list[float],
-        metric_name: str,
-    ) -> MetricResult:
-        """
-        CUPED: Controlled-experiment Using Pre-Experiment Data.
-        Regresses out pre-experiment covariate to reduce variance.
-        Typical variance reduction: 30-50% -> shorter experiment runtime needed.
-
-        Steps:
-        1. Compute theta = cov(outcome, covariate) / var(covariate) on pooled data
-        2. Adjust: outcome_adj = outcome - theta * (covariate - mean(covariate))
-        3. Run standard t-test on adjusted outcomes
-        """
-        control_arr = np.array(control_data)
-        treatment_arr = np.array(treatment_data)
-        cov_c = np.array(control_covariate)
-        cov_t = np.array(treatment_covariate)
-
-        all_outcomes = np.concatenate([control_arr, treatment_arr])
-        all_covariates = np.concatenate([cov_c, cov_t])
-
-        if np.var(all_covariates) == 0:
-            return self.analyze(experiment, control_data, treatment_data, metric_name)
-
-        theta = np.cov(all_outcomes, all_covariates)[0][1] / np.var(all_covariates)
-        global_cov_mean = np.mean(all_covariates)
-
-        adjusted_control = control_arr - theta * (cov_c - global_cov_mean)
-        adjusted_treatment = treatment_arr - theta * (cov_t - global_cov_mean)
-
-        variance_reduction = (
-            1 - (np.var(adjusted_control) / np.var(control_arr))
-            if np.var(control_arr) > 0
-            else 0
-        )
-
-        result = self.analyze(
-            experiment, list(adjusted_control), list(adjusted_treatment), metric_name
-        )
-        result.metric_name = (
-            f"{metric_name}_cuped (variance_reduction={variance_reduction:.1%})"
-        )
-        return result
 
     def analyze_sequential(
         self,
