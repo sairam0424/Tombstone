@@ -2,6 +2,7 @@ package circuit
 
 import (
 	"context"
+	"net/url"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -39,13 +40,28 @@ func NewBreaker(rdb *redis.Client, logger *zap.Logger) *Breaker {
 	}
 }
 
+// EscapeKeyComponent percent-encodes a single Redis-key component (via
+// url.QueryEscape, which — unlike url.PathEscape — escapes ':') so that
+// joining two components with a bare ':' can never let a crafted pair
+// collide with a different pair (e.g. flagKey="checkout:v2", env=
+// "production" colliding with flagKey="checkout", env="v2:production").
+// Neither flagKey (a client-chosen string with no character restriction —
+// see flags.key's plain TEXT column) nor env (an unvalidated query
+// parameter) can be assumed colon-free. This is the same bug class found
+// and fixed in services/intelligence/app/graph/builder.py's depgraph_key
+// (INT-2) — exported so callers outside this package (e.g. slo.go's own
+// env-scoped keys) can use the identical escaping.
+func EscapeKeyComponent(s string) string {
+	return url.QueryEscape(s)
+}
+
 // stateKey builds the Redis key for a flag's live circuit state, scoped by
 // environment. Env scoping is a correctness requirement: without it a trip in
 // one environment (e.g. staging) overwrites another environment's state (e.g.
 // production) for the same flag key, so a staging failure could fail-open or
 // fail-closed production traffic — or mask a real production trip.
 func stateKey(flagKey, env string) string {
-	return "circuit:" + flagKey + ":" + env + ":state"
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":state"
 }
 
 // GetState returns the current circuit state for a flag in an environment.
