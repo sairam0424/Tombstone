@@ -15,6 +15,7 @@ availability notes). The important invariants pinned here:
   4. _reclaim_stale_pending XCLAIMs entries under the attempt budget and
      dead-letters (XADD + XACK) entries that exhausted it.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -26,7 +27,7 @@ def _make_consumer(**overrides):
 
     consumer = RedisStreamsEventConsumer(
         redis_url="redis://localhost:6379",
-        anomaly_detector=MagicMock(),
+        anomaly_detector=overrides.get("anomaly_detector", MagicMock()),
         environments=["production"],
         embedding_sync=overrides.get("embedding_sync"),
         graph_builder=overrides.get("graph_builder"),
@@ -43,7 +44,11 @@ class TestDispatchReturnsSuccessSignal:
         consumer = _make_consumer()
         window: dict = {}
         ok = await consumer._dispatch(
-            {"event": "flag_evaluated", "flag_key": "my-flag", "environment": "production"},
+            {
+                "event": "flag_evaluated",
+                "flag_key": "my-flag",
+                "environment": "production",
+            },
             window,
         )
         assert ok is True
@@ -72,7 +77,11 @@ class TestDispatchReturnsSuccessSignal:
         consumer = _make_consumer(graph_builder=graph_builder)
 
         ok = await consumer._dispatch(
-            {"event": "kill_switch_activated", "flag_key": "my-flag", "environment": "production"},
+            {
+                "event": "kill_switch_activated",
+                "flag_key": "my-flag",
+                "environment": "production",
+            },
             {},
         )
         assert ok is False
@@ -81,7 +90,9 @@ class TestDispatchReturnsSuccessSignal:
     async def test_successful_flag_change_returns_true(self):
         embedding_sync = AsyncMock()
         graph_builder = AsyncMock()
-        consumer = _make_consumer(embedding_sync=embedding_sync, graph_builder=graph_builder)
+        consumer = _make_consumer(
+            embedding_sync=embedding_sync, graph_builder=graph_builder
+        )
 
         ok = await consumer._dispatch(
             {
@@ -95,6 +106,78 @@ class TestDispatchReturnsSuccessSignal:
         assert ok is True
         embedding_sync.on_flag_event.assert_awaited_once()
         graph_builder.update_on_flag_change.assert_awaited_once()
+
+
+class TestArchivedEventEvictsAnomalyState:
+    """
+    Regression tests for INT-4's flag-eviction wiring: an "archived" event
+    (event.Reason="archived", published only by flag-api's ArchiveFlag) must
+    evict the flag's anomaly-detector state entirely, closing an unbounded
+    in-process memory leak (no persistence, no TTL) that existed because
+    ArchiveFlag previously published no event of any kind.
+    """
+
+    @pytest.mark.asyncio
+    async def test_archived_event_evicts_the_flag_from_a_real_detector(self):
+        from app.anomaly.detector import AnomalyDetector
+
+        detector = AnomalyDetector()
+        detector.record("my-flag", error_count=1, total_count=10)
+        assert "my-flag" in detector._metrics
+        assert "my-flag" in detector.get_ensemble()._detectors
+
+        consumer = _make_consumer(anomaly_detector=detector)
+        ok = await consumer._dispatch({"event": "archived", "flag_key": "my-flag"}, {})
+
+        assert ok is True
+        assert "my-flag" not in detector._metrics
+        assert "my-flag" not in detector.get_ensemble()._detectors
+
+    @pytest.mark.asyncio
+    async def test_archived_event_for_an_untracked_flag_is_a_noop(self):
+        from app.anomaly.detector import AnomalyDetector
+
+        detector = AnomalyDetector()
+        consumer = _make_consumer(anomaly_detector=detector)
+
+        ok = await consumer._dispatch(
+            {"event": "archived", "flag_key": "never-seen-flag"}, {}
+        )
+
+        assert ok is True
+        assert "never-seen-flag" not in detector._metrics
+
+    @pytest.mark.asyncio
+    async def test_archived_event_with_empty_string_flag_key_does_not_call_evict(self):
+        detector = MagicMock()
+        consumer = _make_consumer(anomaly_detector=detector)
+
+        ok = await consumer._dispatch({"event": "archived", "flag_key": ""}, {})
+
+        assert ok is True
+        detector.evict.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_archived_event_with_flag_key_absent_from_the_payload_does_not_call_evict(
+        self,
+    ):
+        """
+        Distinct from the empty-string case above: this payload never sets
+        "flag_key" at all. The real dispatch code (`data.get("flag_key",
+        "")`) treats both identically today, but a prior version of this
+        test suite only ever exercised the empty-string case despite its
+        name implying the key was missing -- found by adversarial review of
+        PR #210. Covering both explicitly means a future refactor that
+        distinguishes "present but empty" from "absent" (e.g. switching to
+        `if "flag_key" in data`) gets caught by whichever half it breaks.
+        """
+        detector = MagicMock()
+        consumer = _make_consumer(anomaly_detector=detector)
+
+        ok = await consumer._dispatch({"event": "archived"}, {})
+
+        assert ok is True
+        detector.evict.assert_not_called()
 
 
 class TestDLQStreamKeyConvention:
@@ -125,10 +208,22 @@ class TestReclaimStalePending:
         stream_key = "tombstone:stream:production"
 
         consumer._redis.xpending_range.return_value = [
-            {"message_id": "1-0", "consumer": "old-consumer", "time_since_delivered": 40_000, "times_delivered": 1},
+            {
+                "message_id": "1-0",
+                "consumer": "old-consumer",
+                "time_since_delivered": 40_000,
+                "times_delivered": 1,
+            },
         ]
         consumer._redis.xclaim.return_value = [
-            ("1-0", {"event": "flag_evaluated", "flag_key": "my-flag", "environment": "production"}),
+            (
+                "1-0",
+                {
+                    "event": "flag_evaluated",
+                    "flag_key": "my-flag",
+                    "environment": "production",
+                },
+            ),
         ]
 
         await consumer._reclaim_stale_pending(stream_key, "intelligence-test", {})
@@ -141,7 +236,9 @@ class TestReclaimStalePending:
             message_ids=["1-0"],
         )
         # Successful re-dispatch of the claimed message must ack it.
-        consumer._redis.xack.assert_awaited_once_with(stream_key, consumer._GROUP, "1-0")
+        consumer._redis.xack.assert_awaited_once_with(
+            stream_key, consumer._GROUP, "1-0"
+        )
         consumer._redis.xadd.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -150,10 +247,22 @@ class TestReclaimStalePending:
         stream_key = "tombstone:stream:production"
 
         consumer._redis.xpending_range.return_value = [
-            {"message_id": "2-0", "consumer": "old-consumer", "time_since_delivered": 90_000, "times_delivered": 3},
+            {
+                "message_id": "2-0",
+                "consumer": "old-consumer",
+                "time_since_delivered": 90_000,
+                "times_delivered": 3,
+            },
         ]
         consumer._redis.xrange.return_value = [
-            ("2-0", {"event": "flag_evaluated", "flag_key": "poison-flag", "payload": "{not valid json"}),
+            (
+                "2-0",
+                {
+                    "event": "flag_evaluated",
+                    "flag_key": "poison-flag",
+                    "payload": "{not valid json",
+                },
+            ),
         ]
 
         await consumer._reclaim_stale_pending(stream_key, "intelligence-test", {})
@@ -167,7 +276,9 @@ class TestReclaimStalePending:
         assert kwargs.get("maxlen") == 10_000
         assert kwargs.get("approximate") is True
 
-        consumer._redis.xack.assert_awaited_once_with(stream_key, consumer._GROUP, "2-0")
+        consumer._redis.xack.assert_awaited_once_with(
+            stream_key, consumer._GROUP, "2-0"
+        )
 
     @pytest.mark.asyncio
     async def test_no_pending_entries_is_noop(self):
@@ -192,7 +303,12 @@ class TestReclaimStalePending:
         stream_key = "tombstone:stream:production"
 
         consumer._redis.xpending_range.return_value = [
-            {"message_id": "3-0", "consumer": "old-consumer", "time_since_delivered": 40_000, "times_delivered": 2},
+            {
+                "message_id": "3-0",
+                "consumer": "old-consumer",
+                "time_since_delivered": 40_000,
+                "times_delivered": 2,
+            },
         ]
         consumer._redis.xclaim.return_value = [
             (
@@ -226,11 +342,29 @@ class TestRunAcksOnlyOnDispatchSuccess:
                 return [
                     (
                         "tombstone:stream:production",
-                        [("1-0", {"event": "flag_evaluated", "flag_key": "ok-flag", "environment": "production"})],
+                        [
+                            (
+                                "1-0",
+                                {
+                                    "event": "flag_evaluated",
+                                    "flag_key": "ok-flag",
+                                    "environment": "production",
+                                },
+                            )
+                        ],
                     ),
                     (
                         "tombstone:stream:production",
-                        [("2-0", {"event": "flag_created", "flag_key": "bad-flag", "payload": "{bad"})],
+                        [
+                            (
+                                "2-0",
+                                {
+                                    "event": "flag_created",
+                                    "flag_key": "bad-flag",
+                                    "payload": "{bad",
+                                },
+                            )
+                        ],
                     ),
                 ]
             consumer._running = False

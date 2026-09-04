@@ -7,7 +7,11 @@ output) + majority voting dramatically outperforms single-model approaches (+11.
 Microsoft scale with 5,000+ metrics).
 
 Models:
-  1. Z-score over 7-day rolling window (baseline — matches existing AnomalyDetector)
+  1. Z-score over a ~1.87h rolling window (672 x 10s samples — see
+     _10S_MAXLEN below; despite this module's and AnomalyDetector's history
+     of calling it a "7-day" window, it never has been one — deliberately
+     kept at this size rather than widened, see the comment on
+     _10S_MAXLEN)
   2. Isolation Forest (scikit-learn, contamination=0.05)
   3. EWMA + adaptive threshold (exponentially weighted, fast drift detection)
 
@@ -31,9 +35,20 @@ from sklearn.ensemble import IsolationForest
 # Per-flag state
 # ---------------------------------------------------------------------------
 
-_10S_MAXLEN = 672       # 7 days × 86400s/day / 10s  = 60480 → capped at 672 (≈ 1d12h)
-_60S_MAXLEN = 168 * 6   # 7 days × 60min/day / 1min  = 10080 → 1008 stored
-_5M_MAXLEN = 168 * 2    # 7 days × 24h × 12 buckets  = 2016  → 336 stored
+# NOTE (INT-4): these were previously commented as "7 days" targets capped
+# down to smaller stored sizes -- that framing was wrong on both sides of
+# the arrow: the "7 days" figures were never the actual configured/stored
+# window, and the comments' own arithmetic for the STORED size didn't match
+# either (672 x 10s = 1.87h, not "1d12h"). Stated honestly below: these are
+# the real, deliberately-chosen window sizes today, not a truncated form of
+# something bigger. At 5,000+ tracked flags (this product's own scale
+# claim), a true 7-day window for _10S_MAXLEN alone would be 60,480 float64
+# entries per flag (~480KB/flag, ~2.4GB aggregate) -- a real capacity
+# decision, not a bug fix, so deliberately NOT widened; revisit only with an
+# explicit capacity-planning decision, not by "fixing" this number back up.
+_10S_MAXLEN = 672  # 672 x 10s = 6720s ≈ 1.87h (NOT 7 days, despite history)
+_60S_MAXLEN = 168 * 6  # 1008 x 60s = 60480s ≈ 16.8h (NOT 7 days)
+_5M_MAXLEN = 168 * 2  # 336 x 300s = 100800s ≈ 28h / 1.17 days (NOT 7 days)
 
 
 @dataclass
@@ -50,7 +65,8 @@ class EnsembleDetector:
     # Isolation Forest
     iso_forest: IsolationForest = field(
         default_factory=lambda: IsolationForest(
-            n_estimators=100, contamination=0.05,  # type: ignore[call-arg]  # sklearn stubs incorrectly type contamination as str-only random_state=42
+            n_estimators=100,
+            contamination=0.05,  # type: ignore[call-arg]  # sklearn stubs incorrectly type contamination as str-only random_state=42
         )
     )
     iso_trained: bool = False
@@ -63,13 +79,13 @@ class EnsembleDetector:
     # Down-sampling accumulators
     _buf_60s: list[float] = field(default_factory=list)
     _buf_5m: list[float] = field(default_factory=list)
-    _obs_count: int = 0          # total observations recorded
+    _obs_count: int = 0  # total observations recorded
 
     def _update_ewma(self, value: float) -> None:
         """Update exponentially-weighted mean and variance (online, O(1))."""
         delta = value - self.ewma
         self.ewma += self.alpha * delta
-        self.ewma_var = (1 - self.alpha) * (self.ewma_var + self.alpha * delta ** 2)
+        self.ewma_var = (1 - self.alpha) * (self.ewma_var + self.alpha * delta**2)
 
     def record(self, error_rate: float) -> None:
         """Ingest one 10-second observation and update all granularity windows."""
@@ -94,6 +110,7 @@ class EnsembleDetector:
 # Z-score helper (reusable across granularities)
 # ---------------------------------------------------------------------------
 
+
 def _zscore_signal(window: Deque[float], min_obs: int = 10) -> tuple[float, bool]:
     """
     Compute Z-score of the latest value against the rolling baseline.
@@ -114,6 +131,7 @@ def _zscore_signal(window: Deque[float], min_obs: int = 10) -> tuple[float, bool
 # ---------------------------------------------------------------------------
 # Main ensemble class
 # ---------------------------------------------------------------------------
+
 
 class AnomalyEnsemble:
     """
@@ -136,6 +154,17 @@ class AnomalyEnsemble:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def evict(self, flag_key: str) -> bool:
+        """
+        Remove a flag's detector state entirely (INT-4: called when a flag
+        is archived). All state here is in-process with no persistence and
+        no TTL/expiry of any kind, so an archived flag's detector would
+        otherwise linger in memory for the lifetime of the process --
+        an unbounded leak at 5,000+ flags with routine archival churn.
+        Returns True if a detector existed and was removed.
+        """
+        return self._detectors.pop(flag_key, None) is not None
 
     def record(self, flag_key: str, error_rate: float, ts: datetime) -> None:
         """Record a 10-second observation. Called from the Kafka consumer."""
@@ -230,7 +259,8 @@ class AnomalyEnsemble:
 
     def retrain_isolation_forest(self, flag_key: str) -> None:
         """
-        Retrain Isolation Forest on 7-day history. Called daily (at 2am) by the
+        Retrain Isolation Forest on window_10s's ~1.87h history (NOT 7 days
+        -- see _10S_MAXLEN's comment). Called daily (at 2am) by the
         background task in main.py lifespan.
         """
         det = self._detectors.get(flag_key)
@@ -268,7 +298,7 @@ class AnomalyEnsemble:
             det.iso_trained = True
 
         sample = np.array([[current_rate]])
-        pred = det.iso_forest.predict(sample)[0]          # 1 = normal, -1 = anomaly
+        pred = det.iso_forest.predict(sample)[0]  # 1 = normal, -1 = anomaly
         decision = float(det.iso_forest.decision_function(sample)[0])
         # Negate so that higher = more anomalous (decision_function > 0 = inlier)
         raw_score = -decision

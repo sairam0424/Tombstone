@@ -173,6 +173,16 @@ class TelemetryConsumer:
         Performs two independent operations:
         1. Sync pgvector embedding when a flag is created or updated.
         2. Update the Redis dep-graph sorted sets incrementally.
+
+        INT-4's flag-archival eviction (AnomalyDetector.evict()) is
+        deliberately NOT wired here: this method's own Kafka topic
+        (tombstone.flag.changed) has no publisher anywhere in the Go
+        services -- confirmed via a repo-wide search -- so this whole
+        consumer path is already dead in any real deployment (the live
+        path is RedisStreamsEventConsumer._dispatch below, where eviction
+        IS wired). Not fixing that pre-existing dead-Kafka-topic gap here;
+        flagging it rather than adding untested, unreachable-in-practice
+        code to a confirmed-dead path.
         """
         event_type: str = payload.get("event_type", "")
         flag_key: str = payload.get("flag_key") or payload.get("key", "")
@@ -446,6 +456,22 @@ class RedisStreamsEventConsumer(EventConsumer):
                 window[wk]["total"] += 1
                 if is_error:
                     window[wk]["errors"] += 1
+
+        # flag.archived -> evict anomaly-detector state entirely (INT-4).
+        # This is a NEW, dedicated event value (event.Reason="archived",
+        # set only by flag-api's ArchiveFlag) rather than being folded into
+        # the "flag_created"/"flag_environment_updated"/"kill_switch_activated"
+        # branch below -- those values are never actually produced by any
+        # real publisher (flag-api's Reason values are "manual" or an
+        # arbitrary kill reason string, never those audit_log-style event
+        # names), a pre-existing, separate bug this fix does not attempt to
+        # unwind. "archived" is deliberately a value this fix controls on
+        # both the publish and dispatch side, so it works regardless of
+        # that other mismatch.
+        elif event_type == "archived":
+            flag_key = data.get("flag_key", "")
+            if flag_key:
+                self._detector.evict(flag_key)
 
         # flag.created or flag.updated -> trigger embedding sync
         elif event_type in (

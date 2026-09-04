@@ -69,7 +69,7 @@ Inspired by ImDiffusion (VLDB 2024). Three models vote; 2/3 must agree:
 
 | Model | Algorithm | Sensitivity |
 |-------|-----------|-------------|
-| Z-score | 2.5σ over 7-day rolling window | Drift detection |
+| Z-score | 2.5σ over a ~1.87h rolling window (672 x 10s samples) | Drift detection |
 | Isolation Forest | scikit-learn, contamination=0.05, daily retraining | Non-linear anomalies |
 | EWMA + adaptive threshold | Online Welford variance, α=0.1, 3σ adaptive | Recent trend shifts |
 
