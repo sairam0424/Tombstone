@@ -219,6 +219,178 @@ class TestMinSampleSizeGuard:
         assert result.is_significant is False
 
 
+class TestConversionCountClamping:
+    def test_conversion_count_exceeding_sample_size_does_not_crash_bayesian(self):
+        """
+        Regression test for a bug found by adversarial review: an
+        AggregatedMetric with conversion_count > sample_size (e.g. from a
+        future/alternate connector or data anomaly -- the real connectors'
+        SQL always upholds the invariant) used to compute a negative Beta
+        shape parameter, and np.random.beta() raised an uncaught ValueError.
+        analyze_from_stats() must clamp instead of crashing.
+        """
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=100,
+            mean=1.5,
+            std=0.3,
+            variance=0.09,
+            sum=150.0,
+            conversion_count=150,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=100,
+            mean=1.0,
+            std=0.3,
+            variance=0.09,
+            sum=100.0,
+            conversion_count=100,
+        )
+        experiment = _make_experiment("bayesian", min_sample_size=10)
+
+        result = ExperimentAnalyzer().analyze_from_stats(
+            experiment, control, treatment, "conversion"
+        )
+
+        assert result.control.conversion_rate <= 1.0
+        assert result.treatment.conversion_rate <= 1.0
+        assert result.probability_beats_control is not None
+
+    def test_negative_conversion_count_does_not_crash_bayesian(self):
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=100,
+            mean=0.1,
+            std=0.3,
+            variance=0.09,
+            sum=10.0,
+            conversion_count=-5,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=100,
+            mean=0.2,
+            std=0.3,
+            variance=0.09,
+            sum=20.0,
+            conversion_count=20,
+        )
+        experiment = _make_experiment("bayesian", min_sample_size=10)
+
+        result = ExperimentAnalyzer().analyze_from_stats(
+            experiment, control, treatment, "conversion"
+        )
+
+        assert result.control.conversion_rate >= 0.0
+        assert result.probability_beats_control is not None
+
+
+class TestZeroVarianceSafetyValve:
+    def test_both_variants_zero_variance_reports_non_computable_not_p_zero(self):
+        """
+        Regression test: ttest_ind_from_stats(std1=0, std2=0, ...) returns
+        t=inf/p=0.0 with no warning for ANY nonzero mean difference -- e.g. a
+        fixed per-plan price that genuinely never varies within a variant.
+        That's a real difference, but not one a t-test can validly infer
+        significance for; analyze_from_stats() must report it as
+        non-computable (p_value=None) instead of a misleadingly exact 0.0.
+        """
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=1000,
+            mean=10.0,
+            std=0.0,
+            variance=0.0,
+            sum=10000.0,
+            conversion_count=1000,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=1000,
+            mean=12.0,
+            std=0.0,
+            variance=0.0,
+            sum=12000.0,
+            conversion_count=1000,
+        )
+        experiment = _make_experiment("frequentist", min_sample_size=10)
+
+        result = ExperimentAnalyzer().analyze_from_stats(
+            experiment, control, treatment, "price"
+        )
+
+        assert result.p_value is None
+        assert result.is_significant is False
+
+    def test_one_variant_with_real_variance_still_computes_normally(self):
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=500,
+            mean=10.0,
+            std=2.0,
+            variance=4.0,
+            sum=5000.0,
+            conversion_count=500,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=500,
+            mean=10.0,
+            std=0.0,
+            variance=0.0,
+            sum=5000.0,
+            conversion_count=500,
+        )
+        experiment = _make_experiment("frequentist", min_sample_size=10)
+
+        result = ExperimentAnalyzer().analyze_from_stats(
+            experiment, control, treatment, "metric"
+        )
+
+        assert result.p_value is not None
+
+
+class TestStdReportingConvention:
+    def test_reported_std_uses_population_convention_matching_analyze(self):
+        """
+        analyze()'s VariantStats.std uses np.std(arr) (ddof=0, population).
+        analyze_from_stats() derives std from the warehouse's sample (ddof=1)
+        VARIANCE() aggregate -- it must convert to the same population
+        convention when reporting VariantStats.std, so the same field means
+        the same thing regardless of which stat_method branch produced it.
+        """
+        n = 100
+        sample_variance = 1.0
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=n,
+            mean=10.0,
+            std=1.0,
+            variance=sample_variance,
+            sum=1000.0,
+            conversion_count=50,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=n,
+            mean=10.0,
+            std=1.0,
+            variance=sample_variance,
+            sum=1000.0,
+            conversion_count=50,
+        )
+        experiment = _make_experiment("frequentist", min_sample_size=10)
+
+        result = ExperimentAnalyzer().analyze_from_stats(
+            experiment, control, treatment, "metric"
+        )
+
+        expected_population_std = np.sqrt(sample_variance * (n - 1) / n)
+        assert result.control.std == pytest.approx(float(expected_population_std))
+        assert result.control.std != pytest.approx(1.0)  # not the raw sample std
+
+
 class TestRelativeLift:
     def test_relative_lift_computed_from_real_means(self):
         control = AggregatedMetric(

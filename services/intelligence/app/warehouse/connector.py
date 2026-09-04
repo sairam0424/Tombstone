@@ -102,7 +102,13 @@ class PostgresConnector(WarehouseConnector):
             )
             SELECT
                 variant,
-                COUNT(*) AS sample_size,
+                -- COUNT(metric_value), not COUNT(*): must match the population
+                -- AVG/STDDEV/VARIANCE are computed over (they silently skip NULL
+                -- metric_value rows) so sample_size stays a valid nobs for a
+                -- t-test against this variance -- COUNT(*) would overcount rows
+                -- where metric_sql evaluated to NULL, understating the standard
+                -- error and fabricating significance.
+                COUNT(metric_value) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
                 VARIANCE(metric_value) AS variance,
@@ -215,7 +221,13 @@ class SnowflakeConnector(WarehouseConnector):
             )
             SELECT
                 variant,
-                COUNT(*) AS sample_size,
+                -- COUNT(metric_value), not COUNT(*): must match the population
+                -- AVG/STDDEV/VARIANCE are computed over (they silently skip NULL
+                -- metric_value rows) so sample_size stays a valid nobs for a
+                -- t-test against this variance -- COUNT(*) would overcount rows
+                -- where metric_sql evaluated to NULL, understating the standard
+                -- error and fabricating significance.
+                COUNT(metric_value) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
                 VARIANCE(metric_value) AS variance,
@@ -345,7 +357,13 @@ class BigQueryConnector(WarehouseConnector):
             )
             SELECT
                 variant,
-                COUNT(*) AS sample_size,
+                -- COUNT(metric_value), not COUNT(*): must match the population
+                -- AVG/STDDEV/VARIANCE are computed over (they silently skip NULL
+                -- metric_value rows) so sample_size stays a valid nobs for a
+                -- t-test against this variance -- COUNT(*) would overcount rows
+                -- where metric_sql evaluated to NULL, understating the standard
+                -- error and fabricating significance.
+                COUNT(metric_value) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
                 VARIANCE(metric_value) AS variance,

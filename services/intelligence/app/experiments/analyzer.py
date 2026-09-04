@@ -118,17 +118,43 @@ class ExperimentAnalyzer:
         reconstructed from marginal aggregates; both continue to use
         `analyze()`/`analyze_cuped()`/`analyze_sequential()` unchanged.
         """
+        # conversion_count must satisfy 0 <= conversion_count <= sample_size to be a
+        # meaningful count of "successes" out of the same trials sample_size counts.
+        # The real warehouse connectors always uphold this (both are computed in the
+        # same GROUP BY over the same rows), but analyze_from_stats() also accepts a
+        # bare AggregatedMetric directly -- clamp defensively so a future/alternate
+        # connector or data anomaly can't feed a negative Beta shape parameter into
+        # np.random.beta() (an uncaught ValueError -> unhandled 500) or report a
+        # conversion_rate outside [0, 1].
+        control_conv = max(0, min(control.conversion_count, control.sample_size))
+        treat_conv = max(0, min(treatment.conversion_count, treatment.sample_size))
+
+        # Sample variance (ddof=1, matching the warehouse's VARIANCE() aggregate and
+        # what ttest_ind_from_stats expects for its own test statistic).
         control_std = float(np.sqrt(control.variance)) if control.variance > 0 else 0.0
         treatment_std = (
             float(np.sqrt(treatment.variance)) if treatment.variance > 0 else 0.0
+        )
+        # VariantStats.std is reported in analyze()'s population (ddof=0) convention
+        # for consistency across stat_method branches -- converted from the sample
+        # value above, not recomputed, since the warehouse never returns raw rows.
+        control_std_reported = (
+            control_std * np.sqrt((control.sample_size - 1) / control.sample_size)
+            if control.sample_size > 1
+            else 0.0
+        )
+        treatment_std_reported = (
+            treatment_std * np.sqrt((treatment.sample_size - 1) / treatment.sample_size)
+            if treatment.sample_size > 1
+            else 0.0
         )
 
         control_stats = VariantStats(
             variant="control",
             sample_size=control.sample_size,
             mean=control.mean,
-            std=control_std,
-            conversion_rate=(control.conversion_count / control.sample_size)
+            std=float(control_std_reported),
+            conversion_rate=(control_conv / control.sample_size)
             if control.sample_size > 0
             else 0.0,
         )
@@ -136,8 +162,8 @@ class ExperimentAnalyzer:
             variant="treatment",
             sample_size=treatment.sample_size,
             mean=treatment.mean,
-            std=treatment_std,
-            conversion_rate=(treatment.conversion_count / treatment.sample_size)
+            std=float(treatment_std_reported),
+            conversion_rate=(treat_conv / treatment.sample_size)
             if treatment.sample_size > 0
             else 0.0,
         )
@@ -153,7 +179,15 @@ class ExperimentAnalyzer:
         is_significant = False
 
         if experiment.stat_method == "frequentist":
-            if control.sample_size >= 2 and treatment.sample_size >= 2:
+            # Both variances collapsing to exactly zero (e.g. a fixed per-plan price,
+            # or a variant that's uniformly 100%/0% on a binary metric) makes the
+            # t-test's within-group-variance prerequisite genuinely unmet, not just
+            # "very significant" -- ttest_ind_from_stats would otherwise return
+            # t=inf/p=0.0 with no warning, overstating confidence in a deterministic
+            # (not statistically inferred) difference. Treat as non-computable,
+            # matching how insufficient sample size is already reported below.
+            has_variance = control_std > 0 or treatment_std > 0
+            if control.sample_size >= 2 and treatment.sample_size >= 2 and has_variance:
                 _, p_value = stats.ttest_ind_from_stats(
                     mean1=treatment.mean,
                     std1=treatment_std,
@@ -165,10 +199,8 @@ class ExperimentAnalyzer:
                 is_significant = float(p_value) < (1 - 0.95)
 
         elif experiment.stat_method == "bayesian":
-            # Beta-Binomial conjugate for conversion metrics, using the
-            # warehouse's real conversion_count — not a reconstructed array.
-            control_conv = control.conversion_count
-            treat_conv = treatment.conversion_count
+            # Beta-Binomial conjugate for conversion metrics, using the warehouse's
+            # real (clamped) conversion_count — not a reconstructed array.
             control_total = control.sample_size
             treat_total = treatment.sample_size
 
