@@ -89,7 +89,7 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 	windowLabel := fmt.Sprintf("%dd", windowDays)
 	windowHours := windowDays * hoursPerDay
 
-	totalCount, errorCount, p99, err := h.aggregateTelemetry(ctx, flagKey, windowHours)
+	totalCount, errorCount, p99, err := h.aggregateTelemetry(ctx, flagKey, env, windowHours)
 	if err != nil {
 		h.logger.Warn("failed to aggregate telemetry", zap.String("flag", flagKey), zap.Error(err))
 	}
@@ -113,7 +113,7 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 	}
 	budgetRemaining = roundFloat(budgetRemaining, 4)
 
-	circuitTrips, _ := h.countCircuitTrips(ctx, flagKey, windowHours)
+	circuitTrips, _ := h.countCircuitTrips(ctx, flagKey, env, windowHours)
 	history := h.buildHistory(ctx, flagKey, env, windowHours)
 
 	resp := SLOResponse{
@@ -137,20 +137,23 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 // aggregateTelemetry reads windowed telemetry buckets from Redis and returns
 // aggregate totals + estimated p99 latency.
 //
-// Redis key convention (written by the aggregator flush loop):
+// Redis key convention (written by the aggregator flush loop), scoped by
+// environment for the same reason circuit.Breaker's stateKey is (EVAL-1):
+// without it, staging and production telemetry for the same flag key would
+// collide in the same hourly bucket.
 //
-//	telemetry:{flagKey}:hour:{unix_hour}        → JSON: {"total":N,"errors":E,"p99_ms":F}
+//	telemetry:{flagKey}:{env}:hour:{unix_hour}  → JSON: {"total":N,"errors":E,"p99_ms":F}
 //
 // The aggregator does not yet write these keys — we read them with graceful
 // fallback so the endpoint returns zeroes rather than 500.
-func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey string, hours int) (totalCount, errorCount int64, p99 float64, err error) {
+func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey, env string, hours int) (totalCount, errorCount int64, p99 float64, err error) {
 	now := time.Now().UTC()
 	var maxP99 float64
 
 	for i := 0; i < hours; i++ {
 		hour := now.Add(-time.Duration(i) * time.Hour).Truncate(time.Hour)
 		unixHour := hour.Unix() / 3600
-		key := fmt.Sprintf("telemetry:%s:hour:%d", flagKey, unixHour)
+		key := fmt.Sprintf("telemetry:%s:%s:hour:%d", flagKey, env, unixHour)
 
 		val, redisErr := h.rdb.Get(ctx, key).Result()
 		if redisErr == redis.Nil {
@@ -181,17 +184,18 @@ func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey string, hours 
 
 // countCircuitTrips reads circuit trip events recorded in Redis.
 //
-// Redis key convention:
+// Redis key convention, env-scoped for the same reason as aggregateTelemetry
+// above:
 //
-//	circuit:{flagKey}:trips:{unix_hour} → integer count of trips in that hour
-func (h *Handler) countCircuitTrips(ctx context.Context, flagKey string, hours int) (int64, error) {
+//	circuit:{flagKey}:{env}:trips:{unix_hour} → integer count of trips in that hour
+func (h *Handler) countCircuitTrips(ctx context.Context, flagKey, env string, hours int) (int64, error) {
 	now := time.Now().UTC()
 	var total int64
 
 	for i := 0; i < hours; i++ {
 		hour := now.Add(-time.Duration(i) * time.Hour).Truncate(time.Hour)
 		unixHour := hour.Unix() / 3600
-		key := fmt.Sprintf("circuit:%s:trips:%d", flagKey, unixHour)
+		key := fmt.Sprintf("circuit:%s:%s:trips:%d", flagKey, env, unixHour)
 
 		n, err := h.rdb.Get(ctx, key).Int64()
 		if err == redis.Nil {
@@ -220,7 +224,7 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey, env string, hours i
 		unixHour := hour.Unix() / 3600
 
 		errorRate := 0.0
-		telKey := fmt.Sprintf("telemetry:%s:hour:%d", flagKey, unixHour)
+		telKey := fmt.Sprintf("telemetry:%s:%s:hour:%d", flagKey, env, unixHour)
 		if val, err := h.rdb.Get(ctx, telKey).Result(); err == nil {
 			var bucket struct {
 				Total  int64 `json:"total"`
@@ -233,7 +237,7 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey, env string, hours i
 
 		// Determine circuit state for this hour from snapshot key.
 		// Falls back to current state when no snapshot is available.
-		cStateKey := fmt.Sprintf("circuit:%s:state:%d", flagKey, unixHour)
+		cStateKey := fmt.Sprintf("circuit:%s:%s:state:%d", flagKey, env, unixHour)
 		cStateVal, err := h.rdb.Get(ctx, cStateKey).Result()
 		if err != nil || cStateVal == "" {
 			cStateVal = string(h.breaker.GetState(ctx, flagKey, env))
