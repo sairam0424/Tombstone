@@ -181,11 +181,9 @@ async def analyze_experiment(req: RunExperimentRequest):
             metric_name=req.metric_name,
         )
     elif req.stat_method == "sequential":
-        control_data = [control.mean] * control.sample_size
-        treatment_data = [treatment.mean] * treatment.sample_size
-        result = analyzer.analyze_sequential(
-            control_data=control_data,
-            treatment_data=treatment_data,
+        result = analyzer.analyze_sequential_from_stats(
+            control=control,
+            treatment=treatment,
             metric_name=req.metric_name,
         )
     else:
