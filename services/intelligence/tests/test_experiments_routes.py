@@ -201,3 +201,25 @@ def test_analyze_warehouse_failure_returns_502(mock_get_connector):
     response = client.post("/api/v1/experiments/analyze", json=_request_body())
 
     assert response.status_code == 502
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_connector):
+    """
+    Regression test for EXP-1 PR 3/3: a prior version of this branch
+    reconstructed a `[mean] * sample_size` constant-value array per variant
+    and fed it into CUPED's covariance/adjustment math -- the same
+    fabrication bug class PR1/PR2 fixed elsewhere in this file, just
+    laundered through an extra transformation. CUPED is now formally scoped
+    to POST /cuped-adjust only; /analyze must reject stat_method="cuped"
+    explicitly rather than silently computing a fabricated result.
+    """
+    mock_get_connector.return_value = FakeConnector(_CLOSE_METRICS)
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze", json=_request_body(stat_method="cuped")
+    )
+
+    assert response.status_code == 400
+    assert "cuped-adjust" in response.json()["detail"]
