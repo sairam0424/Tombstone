@@ -33,12 +33,29 @@ class FlagSearchRetriever:
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+        # statement_cache_size=0: DATA-2's PgBouncer runs in transaction
+        # pooling mode, which can hand two calls on the same asyncpg
+        # Connection different physical backend connections — asyncpg's
+        # default server-side prepared-statement cache assumes a stable
+        # backend and errors ("prepared statement does not exist") once
+        # that assumption breaks. Disabling it falls back to unnamed
+        # (unprepared) statements, which are pooler-safe.
+        self._pool = await asyncpg.create_pool(
+            self._db_url,
+            min_size=1,
+            max_size=3,
+            max_inactive_connection_lifetime=30.0,
+            statement_cache_size=0,
+        )
         if self._embedding_model is not None:
             await self._embedding_model.initialize()
-            logger.info("FlagSearchRetriever: embedding model initialized — dense vector search enabled")
+            logger.info(
+                "FlagSearchRetriever: embedding model initialized — dense vector search enabled"
+            )
         else:
-            logger.warning("FlagSearchRetriever: no embedding model — falling back to lexical-only search")
+            logger.warning(
+                "FlagSearchRetriever: no embedding model — falling back to lexical-only search"
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -49,7 +66,11 @@ class FlagSearchRetriever:
         pool = await self._get_pool()
 
         # Run all three retrieval arms; dense is skipped if model absent or pgvector fails
-        dense_task = self._vector_search(pool, query, limit * 2) if self._embedding_model else asyncio.coroutine(lambda: [])()
+        dense_task = (
+            self._vector_search(pool, query, limit * 2)
+            if self._embedding_model
+            else asyncio.coroutine(lambda: [])()
+        )
         lexical_task = self._fulltext_search(pool, query, limit * 2)
         fallback_task = self._ilike_search(pool, query, limit * 2)
 
@@ -57,14 +78,18 @@ class FlagSearchRetriever:
             dense_task, lexical_task, fallback_task
         )
 
-        fused = self._rrf_merge([dense_results, lexical_results, fallback_results], limit)
+        fused = self._rrf_merge(
+            [dense_results, lexical_results, fallback_results], limit
+        )
         return fused
 
     # ------------------------------------------------------------------
     # Retrieval arms
     # ------------------------------------------------------------------
 
-    async def _vector_search(self, pool: asyncpg.Pool, query: str, limit: int) -> list[dict]:
+    async def _vector_search(
+        self, pool: asyncpg.Pool, query: str, limit: int
+    ) -> list[dict]:
         """Dense retrieval via pgvector cosine similarity. Falls back to [] on any error."""
         try:
             vecs = await self._embedding_model.embed([query])
@@ -96,11 +121,14 @@ class FlagSearchRetriever:
             ]
         except Exception as exc:
             logger.warning(
-                "pgvector dense search failed (%s) — dense arm skipped for this query", exc
+                "pgvector dense search failed (%s) — dense arm skipped for this query",
+                exc,
             )
             return []
 
-    async def _fulltext_search(self, pool: asyncpg.Pool, query: str, limit: int) -> list[dict]:
+    async def _fulltext_search(
+        self, pool: asyncpg.Pool, query: str, limit: int
+    ) -> list[dict]:
         """Lexical retrieval via PostgreSQL to_tsvector / ts_rank."""
         rows = await pool.fetch(
             """
@@ -129,7 +157,9 @@ class FlagSearchRetriever:
             for row in rows
         ]
 
-    async def _ilike_search(self, pool: asyncpg.Pool, query: str, limit: int) -> list[dict]:
+    async def _ilike_search(
+        self, pool: asyncpg.Pool, query: str, limit: int
+    ) -> list[dict]:
         """ILIKE substring fallback for exact partial matches (key names, typos)."""
         rows = await pool.fetch(
             """
@@ -175,11 +205,10 @@ class FlagSearchRetriever:
                 if key not in meta:
                     meta[key] = item
 
-        ranked_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:limit]
-        return [
-            {**meta[key], "rrf_score": scores[key]}
-            for key in ranked_keys
+        ranked_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[
+            :limit
         ]
+        return [{**meta[key], "rrf_score": scores[key]} for key in ranked_keys]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -187,5 +216,14 @@ class FlagSearchRetriever:
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+            # statement_cache_size=0: pooler-safe under DATA-2's PgBouncer
+            # (transaction pooling) — see initialize() above for the full
+            # explanation.
+            self._pool = await asyncpg.create_pool(
+                self._db_url,
+                min_size=1,
+                max_size=3,
+                max_inactive_connection_lifetime=30.0,
+                statement_cache_size=0,
+            )
         return self._pool

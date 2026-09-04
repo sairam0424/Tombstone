@@ -8,11 +8,11 @@ import asyncpg
 class CorrelationCandidate:
     flag_key: str
     environment: str
-    changed_at: int           # unix timestamp of the flag change
+    changed_at: int  # unix timestamp of the flag change
     actor: str
     event_type: str
     minutes_before_incident: float
-    recency_score: float       # exp(-lambda * minutes)
+    recency_score: float  # exp(-lambda * minutes)
     total_score: float
     rollback_url: str
 
@@ -24,7 +24,7 @@ class IncidentCorrelator:
     by recency. Returns top-3 ranked candidates.
     """
 
-    LAMBDA = 0.1   # exponential decay factor for recency
+    LAMBDA = 0.1  # exponential decay factor for recency
     WINDOW_MINUTES = 30
 
     def __init__(self, db_url: str, pagerduty_token: str = ""):
@@ -34,7 +34,16 @@ class IncidentCorrelator:
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+            # statement_cache_size=0: pooler-safe under DATA-2's PgBouncer
+            # (transaction pooling) — see search/retriever.py's initialize()
+            # for the full explanation.
+            self._pool = await asyncpg.create_pool(
+                self._db_url,
+                min_size=1,
+                max_size=3,
+                max_inactive_connection_lifetime=30.0,
+                statement_cache_size=0,
+            )
         return self._pool
 
     async def correlate(
@@ -95,7 +104,11 @@ class IncidentCorrelator:
                 "event_type": c.event_type,
                 "minutes_before_incident": round(c.minutes_before_incident, 1),
                 "correlation_score": round(c.total_score, 3),
-                "confidence": "HIGH" if c.total_score > 0.7 else "MEDIUM" if c.total_score > 0.3 else "LOW",
+                "confidence": "HIGH"
+                if c.total_score > 0.7
+                else "MEDIUM"
+                if c.total_score > 0.3
+                else "LOW",
                 "rollback_url": c.rollback_url,
             }
             for c in candidates[:3]

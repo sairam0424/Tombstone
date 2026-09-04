@@ -50,7 +50,16 @@ class DependencyGraphBuilder:
 
     async def _get_pool(self):
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+            # statement_cache_size=0: pooler-safe under DATA-2's PgBouncer
+            # (transaction pooling) — see search/retriever.py's initialize()
+            # for the full explanation.
+            self._pool = await asyncpg.create_pool(
+                self._db_url,
+                min_size=1,
+                max_size=3,
+                max_inactive_connection_lifetime=30.0,
+                statement_cache_size=0,
+            )
         return self._pool
 
     # ------------------------------------------------------------------
@@ -117,17 +126,21 @@ class DependencyGraphBuilder:
         """
         redis_key = DEPGRAPH_KEY.format(flag_key=flag_key)
         # ZRANGEBYSCORE with scores, sorted by score desc
-        raw = await redis_client.zrangebyscore(
-            redis_key, 0, "+inf", withscores=True
-        )
+        raw = await redis_client.zrangebyscore(redis_key, 0, "+inf", withscores=True)
         if not raw:
             return None  # type: ignore[return-value]  # sentinel for cold-start
 
         # raw is list of (member, score); sort descending
         results = sorted(
-            [{"flag_key": member.decode() if isinstance(member, bytes) else member,
-              "weight": round(score, 4)}
-             for member, score in raw],
+            [
+                {
+                    "flag_key": member.decode()
+                    if isinstance(member, bytes)
+                    else member,
+                    "weight": round(score, 4),
+                }
+                for member, score in raw
+            ],
             key=lambda x: x["weight"],
             reverse=True,
         )
@@ -203,7 +216,9 @@ class DependencyGraphBuilder:
     # Original full-graph build (visual graph endpoint — DB scan, unchanged)
     # ------------------------------------------------------------------
 
-    async def build(self, environment: str, from_unix: int, to_unix: int) -> CausalGraph:
+    async def build(
+        self, environment: str, from_unix: int, to_unix: int
+    ) -> CausalGraph:
         pool = await self._get_pool()
         rows = await pool.fetch(
             """
@@ -218,7 +233,9 @@ class DependencyGraphBuilder:
               AND event_type IN ('flag_environment_updated','kill_switch_activated','flag_created')
             ORDER BY created_at ASC
             """,
-            environment, float(from_unix), float(to_unix),
+            environment,
+            float(from_unix),
+            float(to_unix),
         )
         if not rows:
             return CausalGraph(generated_at=to_unix, event_count=0)
@@ -243,28 +260,41 @@ class DependencyGraphBuilder:
                 else:
                     edge_map[key] = {"weight": round(weight, 4), "count": 1}
 
-        flag_rows = await pool.fetch(
-            """
+        flag_rows = (
+            await pool.fetch(
+                """
             SELECT f.key, f.owner_id, f.state, fe.enabled, fe.rollout_pct
             FROM flags f
             LEFT JOIN flag_environments fe ON fe.flag_id = f.id AND fe.environment = $1
             WHERE f.key = ANY($2::text[])
             """,
-            environment, list(unique_flags),
-        ) if unique_flags else []
+                environment,
+                list(unique_flags),
+            )
+            if unique_flags
+            else []
+        )
 
         nodes = [
             GraphNode(
-                flag_key=r["key"], enabled=bool(r["enabled"] or False),
-                rollout_pct=int(r["rollout_pct"] or 0), state=r["state"] or "UNKNOWN",
-                owner_id=r["owner_id"] or "unknown", environment=environment,
-            ) for r in flag_rows
+                flag_key=r["key"],
+                enabled=bool(r["enabled"] or False),
+                rollout_pct=int(r["rollout_pct"] or 0),
+                state=r["state"] or "UNKNOWN",
+                owner_id=r["owner_id"] or "unknown",
+                environment=environment,
+            )
+            for r in flag_rows
         ]
         edges = [
-            GraphEdge(source=k[0], target=k[1], weight=v["weight"], co_change_count=v["count"])
+            GraphEdge(
+                source=k[0], target=k[1], weight=v["weight"], co_change_count=v["count"]
+            )
             for k, v in sorted(edge_map.items(), key=lambda x: -x[1]["weight"])[:50]
         ]
-        return CausalGraph(nodes=nodes, edges=edges, generated_at=to_unix, event_count=len(rows))
+        return CausalGraph(
+            nodes=nodes, edges=edges, generated_at=to_unix, event_count=len(rows)
+        )
 
     # ------------------------------------------------------------------
     # Original get_impact — kept as DB fallback
@@ -293,13 +323,19 @@ class DependencyGraphBuilder:
             )
             SELECT * FROM nearby
             """,
-            flag_key, environment, float(from_unix),
+            flag_key,
+            environment,
+            float(from_unix),
         )
         return {
             "flag_key": flag_key,
             "environment": environment,
             "co_changed_with": [
-                {"flag_key": r["flag_key"], "co_change_count": int(r["co_count"]), "avg_seconds_apart": round(float(r["avg_apart"]), 1)}
+                {
+                    "flag_key": r["flag_key"],
+                    "co_change_count": int(r["co_count"]),
+                    "avg_seconds_apart": round(float(r["avg_apart"]), 1),
+                }
                 for r in rows
             ],
         }

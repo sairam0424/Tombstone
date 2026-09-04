@@ -9,7 +9,7 @@ class StaleFlag:
     days_at_100_pct: float
     last_eval_days_ago: float | None
     owner_id: str
-    stale_score: float   # 0.0–1.0, higher = more stale
+    stale_score: float  # 0.0–1.0, higher = more stale
     recommended_action: str
 
 
@@ -59,17 +59,28 @@ class StaleFlagDetector:
             elif days_at_100 > 30:
                 action = "NOTIFY_OWNER"
 
-            stale_flags.append({
-                "flag_key": row["key"],
-                "owner_id": row["owner_id"],
-                "days_at_100_pct": round(days_at_100, 1),
-                "stale_score": round(stale_score, 3),
-                "recommended_action": action,
-            })
+            stale_flags.append(
+                {
+                    "flag_key": row["key"],
+                    "owner_id": row["owner_id"],
+                    "days_at_100_pct": round(days_at_100, 1),
+                    "stale_score": round(stale_score, 3),
+                    "recommended_action": action,
+                }
+            )
 
         return stale_flags
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._db_url, min_size=1, max_size=3, max_inactive_connection_lifetime=30.0)
+            # statement_cache_size=0: pooler-safe under DATA-2's PgBouncer
+            # (transaction pooling) — see search/retriever.py's initialize()
+            # for the full explanation.
+            self._pool = await asyncpg.create_pool(
+                self._db_url,
+                min_size=1,
+                max_size=3,
+                max_inactive_connection_lifetime=30.0,
+                statement_cache_size=0,
+            )
         return self._pool

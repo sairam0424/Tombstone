@@ -46,9 +46,18 @@ flag-api replicas can't double-apply.
 
 ```bash
 cd services/flag-api
-DB_URL="$DATABASE_URL" go run ./cmd/migrate            # apply all pending
-DB_URL="$DATABASE_URL" go run ./cmd/migrate -baseline  # adopt on a hand-built DB
+DB_URL_DIRECT="$DATABASE_URL" go run ./cmd/migrate            # apply all pending
+DB_URL_DIRECT="$DATABASE_URL" go run ./cmd/migrate -baseline  # adopt on a hand-built DB
 ```
+
+Set `DB_URL_DIRECT`, not `DB_URL` — this tool uses a session-scoped Postgres
+advisory lock (`pg_advisory_lock`/`pg_advisory_unlock`, pinned to one physical
+connection for the whole run), which a transaction-pooling proxy (PgBouncer,
+Neon's own "-pooler" endpoint) can silently break by handing the lock and
+unlock calls different physical backends (DATA-2). `DB_URL` is meant for
+flag-api's/intelligence's own app traffic, which IS safe to run through a
+pooler. `cmd/migrate` falls back to `DB_URL` if `DB_URL_DIRECT` is unset, for
+backward compatibility — but always prefer setting `DB_URL_DIRECT` explicitly.
 
 `-baseline` records every version as applied **without running any SQL** — use
 it exactly once when adopting the runner on a database that was already built by
