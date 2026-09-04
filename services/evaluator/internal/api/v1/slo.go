@@ -113,7 +113,10 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 	}
 	budgetRemaining = roundFloat(budgetRemaining, 4)
 
-	circuitTrips, _ := h.countCircuitTrips(ctx, flagKey, env, windowHours)
+	circuitTrips, err := h.countCircuitTrips(ctx, flagKey, env, windowHours)
+	if err != nil {
+		h.logger.Warn("failed to count circuit trips", zap.String("flag", flagKey), zap.Error(err))
+	}
 	history := h.buildHistory(ctx, flagKey, env, windowHours)
 
 	resp := SLOResponse{
@@ -140,7 +143,11 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 // Redis key convention (written by the aggregator flush loop), scoped by
 // environment for the same reason circuit.Breaker's stateKey is (EVAL-1):
 // without it, staging and production telemetry for the same flag key would
-// collide in the same hourly bucket.
+// collide in the same hourly bucket. Both components are percent-encoded
+// via circuit.EscapeKeyComponent -- without it, a colon inside flagKey OR
+// env could make two DIFFERENT (flagKey, env) pairs format to the
+// IDENTICAL key (the same bug class INT-2 fixed in depgraph_key; found by
+// adversarial review of this same PR).
 //
 //	telemetry:{flagKey}:{env}:hour:{unix_hour}  → JSON: {"total":N,"errors":E,"p99_ms":F}
 //
@@ -149,11 +156,12 @@ func (h *Handler) HandleFlagSLO(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey, env string, hours int) (totalCount, errorCount int64, p99 float64, err error) {
 	now := time.Now().UTC()
 	var maxP99 float64
+	ek, ee := circuit.EscapeKeyComponent(flagKey), circuit.EscapeKeyComponent(env)
 
 	for i := 0; i < hours; i++ {
 		hour := now.Add(-time.Duration(i) * time.Hour).Truncate(time.Hour)
 		unixHour := hour.Unix() / 3600
-		key := fmt.Sprintf("telemetry:%s:%s:hour:%d", flagKey, env, unixHour)
+		key := fmt.Sprintf("telemetry:%s:%s:hour:%d", ek, ee, unixHour)
 
 		val, redisErr := h.rdb.Get(ctx, key).Result()
 		if redisErr == redis.Nil {
@@ -184,29 +192,37 @@ func (h *Handler) aggregateTelemetry(ctx context.Context, flagKey, env string, h
 
 // countCircuitTrips reads circuit trip events recorded in Redis.
 //
-// Redis key convention, env-scoped for the same reason as aggregateTelemetry
-// above:
+// Redis key convention, env-scoped and escaped for the same reason as
+// aggregateTelemetry above:
 //
 //	circuit:{flagKey}:{env}:trips:{unix_hour} → integer count of trips in that hour
-func (h *Handler) countCircuitTrips(ctx context.Context, flagKey, env string, hours int) (int64, error) {
+//
+// On a genuine (non-Nil) Redis error for one hour, continues aggregating
+// the remaining hours rather than aborting the whole window -- matching
+// aggregateTelemetry's best-effort behavior (a partial SLO answer is more
+// useful than none) instead of the prior inconsistency where this function
+// discarded every other hour's data on the first error while
+// aggregateTelemetry kept going.
+func (h *Handler) countCircuitTrips(ctx context.Context, flagKey, env string, hours int) (total int64, err error) {
 	now := time.Now().UTC()
-	var total int64
+	ek, ee := circuit.EscapeKeyComponent(flagKey), circuit.EscapeKeyComponent(env)
 
 	for i := 0; i < hours; i++ {
 		hour := now.Add(-time.Duration(i) * time.Hour).Truncate(time.Hour)
 		unixHour := hour.Unix() / 3600
-		key := fmt.Sprintf("circuit:%s:%s:trips:%d", flagKey, env, unixHour)
+		key := fmt.Sprintf("circuit:%s:%s:trips:%d", ek, ee, unixHour)
 
-		n, err := h.rdb.Get(ctx, key).Int64()
-		if err == redis.Nil {
+		n, redisErr := h.rdb.Get(ctx, key).Int64()
+		if redisErr == redis.Nil {
 			continue
 		}
-		if err != nil {
-			return total, err
+		if redisErr != nil {
+			err = redisErr
+			continue
 		}
 		total += n
 	}
-	return total, nil
+	return total, err
 }
 
 // buildHistory returns at most historyHoursMax hourly data points (oldest first).
@@ -218,13 +234,14 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey, env string, hours i
 
 	now := time.Now().UTC()
 	points := make([]SLOHistoryPoint, 0, hours)
+	ek, ee := circuit.EscapeKeyComponent(flagKey), circuit.EscapeKeyComponent(env)
 
 	for i := hours - 1; i >= 0; i-- {
 		hour := now.Add(-time.Duration(i) * time.Hour).Truncate(time.Hour)
 		unixHour := hour.Unix() / 3600
 
 		errorRate := 0.0
-		telKey := fmt.Sprintf("telemetry:%s:%s:hour:%d", flagKey, env, unixHour)
+		telKey := fmt.Sprintf("telemetry:%s:%s:hour:%d", ek, ee, unixHour)
 		if val, err := h.rdb.Get(ctx, telKey).Result(); err == nil {
 			var bucket struct {
 				Total  int64 `json:"total"`
@@ -237,7 +254,7 @@ func (h *Handler) buildHistory(ctx context.Context, flagKey, env string, hours i
 
 		// Determine circuit state for this hour from snapshot key.
 		// Falls back to current state when no snapshot is available.
-		cStateKey := fmt.Sprintf("circuit:%s:%s:state:%d", flagKey, env, unixHour)
+		cStateKey := fmt.Sprintf("circuit:%s:%s:state:%d", ek, ee, unixHour)
 		cStateVal, err := h.rdb.Get(ctx, cStateKey).Result()
 		if err != nil || cStateVal == "" {
 			cStateVal = string(h.breaker.GetState(ctx, flagKey, env))
