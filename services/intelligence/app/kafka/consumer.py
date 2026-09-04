@@ -191,6 +191,9 @@ class TelemetryConsumer:
                     name=payload.get("name", ""),
                     description=payload.get("description", ""),
                     tags=payload.get("tags", []),
+                    # project_id: same FlagEvent-has-no-project_id limitation
+                    # as update_on_flag_change above.
+                    project_id=DEFAULT_PROJECT_ID,
                 )
                 logger.debug(
                     "Embedding sync triggered for %s (event=%s)", flag_key, event_type
@@ -467,6 +470,7 @@ class RedisStreamsEventConsumer(EventConsumer):
                         name=payload.get("name", flag_key),
                         description=payload.get("description", ""),
                         tags=payload.get("tags", []),
+                        project_id=DEFAULT_PROJECT_ID,
                     )
                 except Exception as exc:
                     logger.warning(

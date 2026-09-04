@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.graph.builder import DEPGRAPH_KEY, DependencyGraphBuilder
+from app.graph.builder import DependencyGraphBuilder, depgraph_key
 
 
 class MockRedisPipeline:
@@ -47,13 +47,23 @@ class MockRedisClient:
 
 
 class MockDBPool:
+    """
+    `rows` is either a single response reused for every fetch() call, or a
+    list of per-call responses (one per successive fetch(), by call order) --
+    needed to test build(), which only issues its second (flags-table) query
+    when the first (audit_log) query returns non-empty rows.
+    """
+
     def __init__(self, rows):
-        self._rows = rows
+        self._responses = rows
         self.fetch_calls: list[tuple[str, tuple]] = []
 
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
-        return self._rows
+        if self._responses and isinstance(self._responses[0], list):
+            index = min(len(self.fetch_calls) - 1, len(self._responses) - 1)
+            return self._responses[index]
+        return self._responses
 
 
 @pytest.fixture
@@ -115,14 +125,8 @@ class TestRebuildAllCrossTenantIsolation:
         await builder.rebuild_all(pool, redis_client)
 
         written_keys = {call[0] for call in redis_client.pipe.zadd_calls}
-        assert (
-            DEPGRAPH_KEY.format(project_id="project-a", flag_key="checkout-v2")
-            in written_keys
-        )
-        assert (
-            DEPGRAPH_KEY.format(project_id="project-a", flag_key="fraud-check")
-            in written_keys
-        )
+        assert depgraph_key("project-a", "checkout-v2") in written_keys
+        assert depgraph_key("project-a", "fraud-check") in written_keys
         # And never under an unscoped or wrong-project key.
         assert all("project-a" in k or "fraud-check" not in k for k in written_keys)
 
@@ -164,10 +168,10 @@ class TestRebuildAllCrossTenantIsolation:
         await builder.rebuild_all(pool, redis_client)
 
         written_keys = {call[0] for call in redis_client.pipe.zadd_calls}
-        assert DEPGRAPH_KEY.format(project_id="p1", flag_key="x") in written_keys
-        assert DEPGRAPH_KEY.format(project_id="p1", flag_key="y") in written_keys
-        assert DEPGRAPH_KEY.format(project_id="p2", flag_key="x") in written_keys
-        assert DEPGRAPH_KEY.format(project_id="p2", flag_key="z") in written_keys
+        assert depgraph_key("p1", "x") in written_keys
+        assert depgraph_key("p1", "y") in written_keys
+        assert depgraph_key("p2", "x") in written_keys
+        assert depgraph_key("p2", "z") in written_keys
         # p1's "x" paired with p2's "x"/"z" would show up as extra keys beyond
         # the 4 expected above -- there are none.
         assert len(written_keys) == 4
@@ -194,14 +198,46 @@ class TestQueryScoping:
 
     @pytest.mark.asyncio
     async def test_build_filters_audit_log_and_flags_by_project_id(self, builder):
-        pool = MockDBPool([])
+        """
+        build() only issues its second (flags-table) query when the first
+        (audit_log) query returns non-empty rows -- MockDBPool([]) alone
+        would make this test never reach that second query at all (a real
+        gap found by adversarial review). Uses two distinct per-call
+        responses so both queries are actually exercised and asserted on.
+        """
+        audit_log_rows = [
+            {
+                "flag_key": "checkout-v2",
+                "ts": 1000,
+                "event_type": "flag_environment_updated",
+            }
+        ]
+        flags_rows = [
+            {
+                "key": "checkout-v2",
+                "owner_id": "alice",
+                "state": "ACTIVE",
+                "enabled": True,
+                "rollout_pct": 50,
+            }
+        ]
+        pool = MockDBPool([audit_log_rows, flags_rows])
         builder._pool = pool
 
-        await builder.build("project-a", "production", 0, 100)
+        graph = await builder.build("project-a", "production", 0, 100)
 
-        query, args = pool.fetch_calls[0]
-        assert "project_id" in query
-        assert "project-a" in args
+        assert len(pool.fetch_calls) == 2
+
+        audit_query, audit_args = pool.fetch_calls[0]
+        assert "project_id = $" in audit_query
+        assert "project-a" in audit_args
+
+        flags_query, flags_args = pool.fetch_calls[1]
+        assert "f.project_id = $" in flags_query
+        assert "project-a" in flags_args
+
+        assert len(graph.nodes) == 1
+        assert graph.nodes[0].flag_key == "checkout-v2"
 
     @pytest.mark.asyncio
     async def test_get_impact_filters_both_ctes_by_project_id(self, builder):
@@ -211,7 +247,9 @@ class TestQueryScoping:
         await builder.get_impact("checkout-v2", "production", "project-a", days=30)
 
         query, args = pool.fetch_calls[0]
-        assert query.count("project_id") >= 2  # flag_changes CTE + nearby CTE
+        # A real equality predicate on project_id, not just the word appearing
+        # anywhere (e.g. in a comment) -- one in flag_changes, one in nearby.
+        assert query.count("project_id = $") >= 2
         assert "project-a" in args
 
     @pytest.mark.asyncio
@@ -231,7 +269,7 @@ class TestQueryScoping:
         )
 
         query, args = pool.fetch_calls[0]
-        assert "project_id" in query
+        assert "project_id = $" in query
         assert "project-a" in args
 
 
@@ -249,9 +287,7 @@ class TestRedisKeyNamespacing:
         redis_client = RecordingRedis()
         await builder.get_impact_fast("checkout-v2", redis_client, "project-a")
 
-        assert redis_client.requested_key == DEPGRAPH_KEY.format(
-            project_id="project-a", flag_key="checkout-v2"
-        )
+        assert redis_client.requested_key == depgraph_key("project-a", "checkout-v2")
 
     @pytest.mark.asyncio
     async def test_different_projects_get_different_redis_keys_for_the_same_flag(
@@ -270,3 +306,44 @@ class TestRedisKeyNamespacing:
         await builder.get_impact_fast("checkout-v2", redis_client, "project-b")
 
         assert redis_client.requested_keys[0] != redis_client.requested_keys[1]
+
+    def test_colon_in_flag_key_does_not_collide_with_a_different_project_split(self):
+        """
+        Regression test for a real collision found by adversarial review:
+        DEPGRAPH_KEY used to join project_id and flag_key with a bare ':',
+        so project_id="X", flag_key="checkout:new-flow" formatted to the
+        SAME string as project_id="X:checkout", flag_key="new-flow" --
+        letting a crafted flag_key/project_id pair read another tenant's
+        data. depgraph_key() must percent-encode both components so no
+        two DIFFERENT (project_id, flag_key) pairs can ever collide.
+        """
+        key_a = depgraph_key(
+            "11111111-1111-1111-1111-111111111111", "checkout:new-flow"
+        )
+        key_b = depgraph_key(
+            "11111111-1111-1111-1111-111111111111:checkout", "new-flow"
+        )
+
+        assert key_a != key_b
+
+    def test_depgraph_key_round_trips_a_variety_of_special_characters(self):
+        for project_id, flag_key in [
+            ("a:b", "c:d"),
+            ("a", "b:c:d"),
+            ("proj/1", "flag/2"),
+            ("proj a", "flag b"),
+        ]:
+            key = depgraph_key(project_id, flag_key)
+            # Every distinct input pair must produce a key that no OTHER
+            # input pair in this list also produces.
+            others = [
+                depgraph_key(p, f)
+                for p, f in [
+                    ("a:b", "c:d"),
+                    ("a", "b:c:d"),
+                    ("proj/1", "flag/2"),
+                    ("proj a", "flag b"),
+                ]
+                if (p, f) != (project_id, flag_key)
+            ]
+            assert key not in others

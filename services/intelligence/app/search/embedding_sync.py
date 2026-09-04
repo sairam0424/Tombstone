@@ -11,6 +11,7 @@ import logging
 
 import asyncpg
 
+from app.graph.builder import DEFAULT_PROJECT_ID
 from app.search.embedding_model import EmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ async def sync_flag_embedding(
     tags: list[str],
     db_pool: asyncpg.Pool,
     model: EmbeddingModel,
+    project_id: str,
 ) -> None:
     """Generate an embedding for the flag and persist it to PostgreSQL.
 
@@ -37,6 +39,10 @@ async def sync_flag_embedding(
 
     Uses the injected EmbeddingModel protocol — works with LocalEmbeddingModel
     (SentenceTransformer) or BedrockEmbeddingModel (AWS Titan V2) transparently.
+
+    flags.key is only unique per (project_id, key) -- matching by key alone
+    would update every project's identically-keyed flag's embedding in one
+    call, so project_id is a required scoping parameter, not optional.
     """
     text = f"{name} {description} {' '.join(tags)}"
     vecs = await model.embed([text])
@@ -48,9 +54,10 @@ async def sync_flag_embedding(
         return
 
     await db_pool.execute(
-        "UPDATE flags SET embedding = $1::vector WHERE key = $2",
+        "UPDATE flags SET embedding = $1::vector WHERE key = $2 AND project_id = $3",
         str(embedding),
         flag_key,
+        project_id,
     )
     logger.debug("Synced embedding for flag %s (dim=%d)", flag_key, len(embedding))
 
@@ -128,8 +135,15 @@ class EmbeddingSyncService:
         name: str,
         description: str,
         tags: list[str],
+        project_id: str = DEFAULT_PROJECT_ID,
     ) -> None:
-        """Handle flag.created and flag.updated events."""
+        """Handle flag.created and flag.updated events.
+
+        project_id defaults to DEFAULT_PROJECT_ID because the Kafka/Redis-
+        Streams event payload this is called from carries no project_id
+        field today -- same deferred-scoping limitation documented on
+        kafka/consumer.py's update_on_flag_change call sites.
+        """
         if event_type not in {"flag.created", "flag.updated"}:
             return
         if self._embedding_model is None or self._pool is None:
@@ -142,6 +156,7 @@ class EmbeddingSyncService:
                 tags=tags,
                 db_pool=self._pool,
                 model=self._embedding_model,
+                project_id=project_id,
             )
         except Exception as exc:
             logger.warning(
@@ -165,7 +180,7 @@ class EmbeddingSyncService:
 
         rows = await self._pool.fetch(
             """
-            SELECT key, name, description
+            SELECT key, name, description, project_id
             FROM flags
             WHERE embedding IS NULL
               AND state IN ('ACTIVE', 'DRAFT', 'COMPLETE')
@@ -190,6 +205,7 @@ class EmbeddingSyncService:
                         tags=[],
                         db_pool=self._pool,
                         model=self._embedding_model,
+                        project_id=row["project_id"],
                     )
                 except Exception as exc:
                     logger.warning(

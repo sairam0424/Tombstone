@@ -5,12 +5,12 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import quote
 
 import asyncpg
 
 logger = logging.getLogger(__name__)
 
-DEPGRAPH_KEY = "tombstone:depgraph:{project_id}:{flag_key}"
 DEPGRAPH_TTL = 90 * 24 * 3600  # 90 days
 
 # Matches the default already used by GET /api/v1/stale's project_id param
@@ -19,6 +19,22 @@ DEPGRAPH_TTL = 90 * 24 * 3600  # 90 days
 # default exists only so a single-project deployment (the only kind that
 # exists today) keeps working with no client changes.
 DEFAULT_PROJECT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def depgraph_key(project_id: str, flag_key: str) -> str:
+    """Redis key for a (project_id, flag_key) pair in the dependency graph.
+
+    Percent-encodes both components (safe='') before joining with ':' --
+    without this, a colon inside either raw component could make two
+    DIFFERENT (project_id, flag_key) pairs format to the IDENTICAL Redis
+    key string (e.g. project_id="X", flag_key="a:b" collides with
+    project_id="X:a", flag_key="b"), letting a crafted flag_key/project_id
+    pair read another tenant's data despite this being a project-scoped key.
+    Neither field is validated to exclude colons at the HTTP layer, and
+    flag_key is a customer-chosen string, so this can't be ruled out by
+    convention alone.
+    """
+    return f"tombstone:depgraph:{quote(project_id, safe='')}:{quote(flag_key, safe='')}"
 
 
 @dataclass
@@ -111,14 +127,14 @@ class DependencyGraphBuilder:
             return
 
         pipe = redis_client.pipeline()
-        src_redis_key = DEPGRAPH_KEY.format(project_id=project_id, flag_key=flag_key)
+        src_redis_key = depgraph_key(project_id, flag_key)
 
         for row in rows:
             co_key = row["flag_key"]
             delta_minutes = abs(changed_at_ts - float(row["ts"])) / 60.0
             weight = math.exp(-self.LAMBDA * delta_minutes)
 
-            dst_redis_key = DEPGRAPH_KEY.format(project_id=project_id, flag_key=co_key)
+            dst_redis_key = depgraph_key(project_id, co_key)
 
             # GT flag: only update score if the new value is higher
             pipe.zadd(src_redis_key, {co_key: weight}, gt=True)
@@ -136,7 +152,7 @@ class DependencyGraphBuilder:
         Falls back to None if the key is missing (cold start) — caller
         must detect None and fall back to get_impact().
         """
-        redis_key = DEPGRAPH_KEY.format(project_id=project_id, flag_key=flag_key)
+        redis_key = depgraph_key(project_id, flag_key)
         # ZRANGEBYSCORE with scores, sorted by score desc
         raw = await redis_client.zrangebyscore(redis_key, 0, "+inf", withscores=True)
         if not raw:
@@ -220,8 +236,8 @@ class DependencyGraphBuilder:
 
         pipe = redis_client.pipeline()
         for (project_id, flag_a, flag_b), weight in edge_map.items():
-            key_a = DEPGRAPH_KEY.format(project_id=project_id, flag_key=flag_a)
-            key_b = DEPGRAPH_KEY.format(project_id=project_id, flag_key=flag_b)
+            key_a = depgraph_key(project_id, flag_a)
+            key_b = depgraph_key(project_id, flag_b)
             pipe.zadd(key_a, {flag_b: weight}, gt=True)
             pipe.expire(key_a, DEPGRAPH_TTL)
             pipe.zadd(key_b, {flag_a: weight}, gt=True)

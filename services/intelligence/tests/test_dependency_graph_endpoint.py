@@ -16,31 +16,46 @@ from fastapi.testclient import TestClient
 class MockPool:
     """Mock asyncpg pool for flags table query."""
 
+    def __init__(self):
+        self.fetch_calls: list[tuple[str, tuple]] = []
+
     async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
         # Return empty list — the test doesn't need node metadata
         return []
 
 
 class MockGraphBuilder:
     """Minimal mock for DependencyGraphBuilder matching the public API
-    that GET /api/v1/graph/dependencies consumes."""
+    that GET /api/v1/graph/dependencies consumes.
+
+    Records the project_id it was actually called with on every method --
+    not just accepting the parameter, so a future argument-order regression
+    in main.py (e.g. transposing project_id with environment) is caught by
+    asserting the RECORDED value, not merely that a call succeeded.
+    """
 
     def __init__(self):
         self.redis_data: dict[str, list[dict]] = {}
         self.db_fallback_data: dict[str, dict] = {}
+        self.get_impact_fast_calls: list[tuple[str, str]] = []
+        self.get_impact_calls: list[tuple[str, str, str, int]] = []
+        self.pool = MockPool()
 
     async def _get_pool(self):
         """Mock pool for the endpoint's flags table query."""
-        return MockPool()
+        return self.pool
 
     async def get_impact_fast(
         self, flag_key: str, redis_client, project_id: str
     ) -> list[dict] | None:
+        self.get_impact_fast_calls.append((flag_key, project_id))
         return self.redis_data.get(flag_key)
 
     async def get_impact(
         self, flag_key: str, environment: str, project_id: str, days: int
     ) -> dict:
+        self.get_impact_calls.append((flag_key, environment, project_id, days))
         return self.db_fallback_data.get(
             flag_key,
             {
@@ -141,3 +156,62 @@ def test_dependencies_endpoint_depth_2_traversal(app_with_mocked_builder):
     edge_pairs = {(e["source"], e["target"]) for e in data["edges"]}
     assert ("A", "B") in edge_pairs
     assert ("B", "C") in edge_pairs
+
+
+def test_dependencies_endpoint_passes_explicit_project_id_to_builder(
+    app_with_mocked_builder,
+):
+    """
+    Regression test for a gap found by adversarial review: the mocks used
+    above never verified the ACTUAL project_id value reaching the builder,
+    so a control/treatment-style argument-order regression in main.py
+    (e.g. swapping project_id and environment) would ship undetected.
+    """
+    from app import main
+
+    main.app.state.graph_builder = app_with_mocked_builder.state.graph_builder
+    main.app.state.redis = app_with_mocked_builder.state.redis
+
+    mock_builder: MockGraphBuilder = main.app.state.graph_builder
+    mock_builder.redis_data["payments.checkout"] = [
+        {"flag_key": "payments.processor", "weight": 0.8},
+    ]
+
+    client = TestClient(main.app)
+    response = client.get(
+        "/api/v1/graph/dependencies"
+        "?flag_key=payments.checkout&depth=1&project_id=explicit-project-xyz"
+    )
+
+    assert response.status_code == 200
+    assert mock_builder.get_impact_fast_calls == [
+        ("payments.checkout", "explicit-project-xyz")
+    ]
+    # The final flags-table lookup must receive the same project_id too.
+    flags_query, flags_args = mock_builder.pool.fetch_calls[0]
+    assert "explicit-project-xyz" in flags_args
+
+
+def test_dependencies_endpoint_defaults_project_id_when_absent(
+    app_with_mocked_builder,
+):
+    """When the caller omits project_id, the default must reach the builder
+    unchanged -- not an empty string, not None."""
+    from app import main
+    from app.graph.builder import DEFAULT_PROJECT_ID
+
+    main.app.state.graph_builder = app_with_mocked_builder.state.graph_builder
+    main.app.state.redis = app_with_mocked_builder.state.redis
+
+    mock_builder: MockGraphBuilder = main.app.state.graph_builder
+    mock_builder.redis_data["payments.checkout"] = []
+
+    client = TestClient(main.app)
+    response = client.get(
+        "/api/v1/graph/dependencies?flag_key=payments.checkout&depth=1"
+    )
+
+    assert response.status_code == 200
+    assert mock_builder.get_impact_fast_calls == [
+        ("payments.checkout", DEFAULT_PROJECT_ID)
+    ]

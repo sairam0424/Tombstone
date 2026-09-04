@@ -679,13 +679,17 @@ async def get_critical_flags(
 
 @app.post("/api/v1/correlate")
 async def correlate_incident(
-    incident_id: str, affected_service: str, incident_start_unix: int
+    incident_id: str,
+    affected_service: str,
+    incident_start_unix: int,
+    project_id: str = DEFAULT_PROJECT_ID,
 ):
     """Correlate a PagerDuty incident with recent flag changes."""
     candidates = await app.state.correlator.correlate(
         incident_id=incident_id,
         affected_service=affected_service,
         incident_start_unix=incident_start_unix,
+        project_id=project_id,
     )
     return {"incident_id": incident_id, "candidates": candidates}
 

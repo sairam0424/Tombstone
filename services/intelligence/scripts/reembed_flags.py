@@ -11,6 +11,7 @@ Usage:
     DB_URL=postgresql://... \
     python scripts/reembed_flags.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -56,12 +57,13 @@ async def main() -> None:
     while True:
         rows = await pool.fetch(
             """
-            SELECT key, name, description, tags
+            SELECT key, name, description, tags, project_id
             FROM flags
             ORDER BY created_at
             LIMIT $1 OFFSET $2
             """,
-            BATCH_SIZE, offset,
+            BATCH_SIZE,
+            offset,
         )
         if not rows:
             break
@@ -70,15 +72,21 @@ async def main() -> None:
             f"{row['name']} {row['description']} {' '.join(row['tags'] or [])}"
             for row in rows
         ]
-        keys = [row["key"] for row in rows]
+        # flags.key is only unique per (project_id, key) -- matching the UPDATE
+        # below by key alone would silently overwrite another project's
+        # identically-keyed flag's embedding, so project_id travels alongside
+        # key rather than being dropped after the text/vector step.
+        keys_and_projects = [(row["key"], row["project_id"]) for row in rows]
 
         try:
             vectors = await model.embed(texts)
-            for key, vec in zip(keys, vectors):
+            for (key, project_id), vec in zip(keys_and_projects, vectors):
                 if vec:
                     await pool.execute(
-                        "UPDATE flags SET embedding = $1::vector WHERE key = $2",
-                        vec, key,
+                        "UPDATE flags SET embedding = $1::vector WHERE key = $2 AND project_id = $3",
+                        vec,
+                        key,
+                        project_id,
                     )
                     processed += 1
         except Exception as exc:
