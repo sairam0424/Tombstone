@@ -37,6 +37,18 @@ class FailingConnector:
         raise RuntimeError("connection refused")
 
 
+class CountingConnector:
+    """Records how many times query_experiment_metrics was actually called."""
+
+    def __init__(self, metrics: dict[str, AggregatedMetric]):
+        self._metrics = metrics
+        self.call_count = 0
+
+    async def query_experiment_metrics(self, **kwargs) -> dict[str, AggregatedMetric]:
+        self.call_count += 1
+        return self._metrics
+
+
 def _request_body(**overrides) -> dict:
     body = {
         "experiment_id": "exp-1",
@@ -214,7 +226,8 @@ def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_con
     to POST /cuped-adjust only; /analyze must reject stat_method="cuped"
     explicitly rather than silently computing a fabricated result.
     """
-    mock_get_connector.return_value = FakeConnector(_CLOSE_METRICS)
+    connector = CountingConnector(_CLOSE_METRICS)
+    mock_get_connector.return_value = connector
 
     client = TestClient(main.app)
     response = client.post(
@@ -223,3 +236,9 @@ def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_con
 
     assert response.status_code == 400
     assert "cuped-adjust" in response.json()["detail"]
+    # Fail-fast: this must be rejectable purely from the request body, with
+    # zero warehouse round-trips -- a real customer warehouse query has real
+    # cost/latency (up to WAREHOUSE_QUERY_TIMEOUT_S) and this rejection needs
+    # none of that data (found by adversarial review: a prior version of
+    # this fix checked stat_method="cuped" AFTER the query already ran).
+    assert connector.call_count == 0

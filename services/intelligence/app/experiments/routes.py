@@ -132,6 +132,35 @@ async def analyze_experiment(req: RunExperimentRequest):
     Run warehouse-native experiment analysis.
     Aggregation happens in the customer's warehouse — no raw data sent to Tombstone.
     """
+    if req.stat_method == "cuped":
+        # EXP-1 PR 3/3 formally closed this: CUPED needs real per-user
+        # outcome/covariate pairs to compute a covariance, which cannot be
+        # reconstructed from warehouse aggregates. A prior version of this
+        # branch reconstructed a `[control.mean] * control.sample_size`
+        # constant-value array per variant and fed it into CUPED's
+        # covariance/adjustment math -- the exact same fabrication bug class
+        # EXP-1 PR1/PR2 fixed for the frequentist/Bayesian/mSPRT paths, just
+        # laundered through an extra transformation before reaching the
+        # t-test. Rather than silently computing a fabricated result,
+        # reject explicitly and point callers at the endpoint that actually
+        # works correctly with real data. Checked BEFORE the warehouse query
+        # below (not after) -- this is fully derivable from the request body
+        # alone, so there is no reason to spend a real round-trip against
+        # the customer's own warehouse_dsn (up to WAREHOUSE_QUERY_TIMEOUT_S)
+        # only to reject the request anyway (found by adversarial review).
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "stat_method='cuped' is not supported via /analyze: this "
+                "endpoint only resolves warehouse-aggregated statistics "
+                "(mean/variance per variant), not individual per-user "
+                "observations, which CUPED's covariance calculation "
+                "requires. Use POST /api/v1/experiments/cuped-adjust with "
+                "raw per-user treatment/control/pre_treatment/pre_control "
+                "arrays instead."
+            ),
+        )
+
     try:
         connector = get_connector(req.warehouse_type, req.warehouse_dsn)
         metrics = await connector.query_experiment_metrics(
@@ -168,31 +197,7 @@ async def analyze_experiment(req: RunExperimentRequest):
         min_sample_size=req.min_sample_size,
     )
 
-    if req.stat_method == "cuped":
-        # EXP-1 PR 3/3 formally closed this: CUPED needs real per-user
-        # outcome/covariate pairs to compute a covariance, which cannot be
-        # reconstructed from warehouse aggregates. A prior version of this
-        # branch reconstructed a `[control.mean] * control.sample_size`
-        # constant-value array per variant and fed it into CUPED's
-        # covariance/adjustment math -- the exact same fabrication bug class
-        # EXP-1 PR1/PR2 fixed for the frequentist/Bayesian/mSPRT paths, just
-        # laundered through an extra transformation before reaching the
-        # t-test. Rather than silently computing a fabricated result,
-        # reject explicitly and point callers at the endpoint that actually
-        # works correctly with real data.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "stat_method='cuped' is not supported via /analyze: this "
-                "endpoint only resolves warehouse-aggregated statistics "
-                "(mean/variance per variant), not individual per-user "
-                "observations, which CUPED's covariance calculation "
-                "requires. Use POST /api/v1/experiments/cuped-adjust with "
-                "raw per-user treatment/control/pre_treatment/pre_control "
-                "arrays instead."
-            ),
-        )
-    elif req.stat_method == "sequential":
+    if req.stat_method == "sequential":
         result = analyzer.analyze_sequential_from_stats(
             control=control,
             treatment=treatment,
