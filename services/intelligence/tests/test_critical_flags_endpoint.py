@@ -368,3 +368,59 @@ def test_critical_flags_scoring_formula_a_b_c_d_ranking(
     assert 1.4 < flags[3]["score"] < 1.7, (
         f"D score should be ~1.52, got {flags[3]['score']}"
     )
+
+
+@patch("app.main.httpx.AsyncClient.get")
+def test_critical_flags_passes_project_id_to_audit_log_query_and_evaluator_call(
+    mock_evaluator_get, app_with_critical_flags_mock
+):
+    """
+    Regression test for a gap found by adversarial review: prior tests never
+    verified the ACTUAL project_id value reaching either the audit_log query
+    or the evaluator's blast-radius call, so an argument-order regression in
+    main.py would ship undetected.
+    """
+    from app import main
+
+    main.app.state.graph_builder = app_with_critical_flags_mock.state.graph_builder
+    main.app.state.redis = app_with_critical_flags_mock.state.redis
+
+    recorded_pool_calls: list[tuple[str, tuple]] = []
+
+    class RecordingPool:
+        async def fetch(self, query: str, *args):
+            recorded_pool_calls.append((query, args))
+            if "audit_log" in query:
+                return [
+                    {"flag_key": "payments.checkout", "ts": 1000},
+                    {"flag_key": "fraud.detection", "ts": 1050},
+                ]
+            return []
+
+    main.app.state.graph_builder._get_pool = AsyncMock(return_value=RecordingPool())
+
+    recorded_evaluator_calls: list[dict] = []
+
+    def mock_evaluator_call(url: str, **kwargs):
+        from types import SimpleNamespace
+
+        recorded_evaluator_calls.append(kwargs.get("params", {}))
+        return SimpleNamespace(
+            status_code=200, json=lambda: {"result": {"risk_score": "LOW"}}
+        )
+
+    mock_evaluator_get.side_effect = mock_evaluator_call
+
+    client = TestClient(main.app)
+    response = client.get(
+        "/api/v1/graph/critical-flags?limit=10&project_id=explicit-project-xyz"
+    )
+
+    assert response.status_code == 200
+
+    audit_query, audit_args = recorded_pool_calls[0]
+    assert "explicit-project-xyz" in audit_args
+
+    assert len(recorded_evaluator_calls) >= 1
+    for params in recorded_evaluator_calls:
+        assert params.get("project_id") == "explicit-project-xyz"
