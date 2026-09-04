@@ -78,8 +78,34 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		clientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
 	}
 
+	// GW-2: Subscribe BEFORE computing the replay window below, not after.
+	// Any event broadcast in the gap between "replay window computed" and
+	// "live delivery begins" is then guaranteed to reach this client via
+	// EITHER this channel OR the XRANGE replay (delivered twice) rather than
+	// falling through a gap between the two (missed entirely). SSE's
+	// id:/Last-Event-ID contract is at-least-once by design, so an
+	// occasional duplicate flag_updated delivery here is within spec, not a
+	// bug — clients must already treat re-applying the same flag state as a
+	// no-op.
 	ch := h.hub.Subscribe(environment, clientID)
 	defer h.hub.Unsubscribe(environment, clientID, ch)
+
+	// A reconnecting EventSource client automatically sends back the id: of
+	// the last frame it received via this header — honor it to replay only
+	// what was missed (XRANGE, O(delta)) instead of forcing a full resync on
+	// every transient disconnect. A fresh (non-reconnecting) client sends no
+	// such header, so this is a pure addition for clients that opt in by
+	// tracking it — see GW-2's scope note: no SDK does yet, so this has no
+	// client-visible effect until one is updated to.
+	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+		frames := h.hub.ReplayOrSnapshot(r.Context(), environment, lastEventID)
+		for _, frame := range frames {
+			_, _ = w.Write(frame)
+		}
+		if len(frames) > 0 {
+			flusher.Flush()
+		}
+	}
 
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()

@@ -109,7 +109,9 @@ func (b *Broadcaster) handleMessage(msg *redis.Message) {
 	if !b.deduper.claim(event) {
 		return
 	}
-	b.hub.Broadcast(environment, event)
+	// GW-2: pub/sub carries no durable, replayable position -- "" means
+	// this frame gets no id: line.
+	b.hub.Broadcast(environment, event, "")
 }
 
 // RunStreamConsumer reads from a Redis Stream consumer group for one environment.
@@ -165,8 +167,11 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 			}
 			// GW-1 (dedup.go): the same logical event also arrives via the
 			// legacy pub/sub path — suppress whichever copy arrives second.
+			// GW-2: msg.ID is the real Redis-assigned stream entry ID for
+			// this delivery -- pass it through so the SSE frame carries a
+			// replayable id: line.
 			if b.deduper.claim(event) {
-				b.hub.Broadcast(environment, event)
+				b.hub.Broadcast(environment, event, msg.ID)
 			}
 			AckStreamMessage(ctx, b.rdb, streamKey, b.group, msg.ID)
 		}

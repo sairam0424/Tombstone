@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -26,10 +28,10 @@ type FlagEvent struct {
 // It uses a sync.Map for lock-free client registration and atomic counters
 // for metrics — safe for concurrent reads from many goroutines.
 type EnvironmentBroadcaster struct {
-	clients      sync.Map       // clientID (string) → chan []byte
-	count        atomic.Int64   // live connection count
-	totalSent    atomic.Int64   // cumulative events delivered
-	totalDropped atomic.Int64   // cumulative events dropped (backpressure)
+	clients      sync.Map     // clientID (string) → chan []byte
+	count        atomic.Int64 // live connection count
+	totalSent    atomic.Int64 // cumulative events delivered
+	totalDropped atomic.Int64 // cumulative events dropped (backpressure)
 }
 
 // Add registers a new client channel under the given ID.
@@ -92,10 +94,24 @@ type Hub struct {
 	envs      sync.Map // environment (string) → *EnvironmentBroadcaster
 	snapshots sync.Map // environment (string) → []byte (last-known full snapshot JSON, set by the reconciler)
 	logger    *zap.Logger
+	// rdb is used only for GW-2 catch-up-on-reconnect (ReplayOrSnapshot's
+	// XRANGE/XREVRANGE calls). nil is safe -- ReplayOrSnapshot no-ops when
+	// unset, which is what relay_proxy.go's localHub wants: a relay has no
+	// Redis Streams of its own to replay from, it only forwards frames it
+	// already received from an upstream region.
+	rdb *redis.Client
 }
 
 func NewHub(logger *zap.Logger) *Hub {
 	return &Hub{logger: logger}
+}
+
+// SetRedis wires the Redis client GW-2's ReplayOrSnapshot uses to serve
+// reconnecting clients. Kept as a setter rather than a NewHub parameter so
+// every existing NewHub(logger) call site (tests, relay_proxy's localHub)
+// keeps compiling unchanged.
+func (h *Hub) SetRedis(rdb *redis.Client) {
+	h.rdb = rdb
 }
 
 // getOrCreateEnv returns the EnvironmentBroadcaster for the given environment,
@@ -135,23 +151,27 @@ func (h *Hub) Unsubscribe(environment, clientID string, ch chan []byte) {
 // Broadcast serializes a FlagEvent into a pre-formed SSE frame and fans it
 // out to all clients in the given environment via EnvironmentBroadcaster.
 // Backpressure: slow clients receive a lag warning, then the event is dropped.
-func (h *Hub) Broadcast(environment string, event FlagEvent) {
+//
+// streamMsgID is the real Redis Stream entry ID this event was read at (GW-2),
+// or "" when the caller has no such ID (the legacy pub/sub path, the
+// reconciler's synthetic drift events, and relay-forwarded events all pass
+// "" today). It becomes the SSE frame's id: line, which is what lets a
+// reconnecting client's Last-Event-ID header drive ReplayOrSnapshot's XRANGE
+// catch-up below. It is deliberately NOT a field on FlagEvent: eventDeduper
+// (dedup.go) keys claim() on the full FlagEvent value, and this same logical
+// event arrives via both pub/sub (no ID) and streams (real ID) within the
+// same dedup window -- making the ID part of FlagEvent would make those two
+// deliveries hash as different map keys and defeat dedup entirely.
+func (h *Hub) Broadcast(environment string, event FlagEvent, streamMsgID string) {
 	v, ok := h.envs.Load(environment)
 	if !ok {
 		return // no clients subscribed to this environment
 	}
 	eb := v.(*EnvironmentBroadcaster)
 
-	eventType := "flag_updated"
-	if !event.Enabled && (event.Reason == "circuit_breaker" ||
-		event.Reason == "manual_kill_switch" ||
-		event.Reason == "slo_burn_rate") {
-		eventType = "kill_switch"
-	}
-
 	// Pre-serialize once; all clients receive the same byte slice (read-only).
 	// JSON marshaling is done inline to avoid an extra import cycle.
-	payload := sseFrame(eventType, event)
+	payload := sseFrame(eventTypeFor(event), event, streamMsgID)
 
 	sent, dropped := eb.Broadcast(payload)
 	if dropped > 0 {
@@ -214,9 +234,24 @@ func (h *Hub) SetLastSnapshot(environment string, snapshot []byte) {
 	h.snapshots.Store(environment, snapshot)
 }
 
+// eventTypeFor derives the SSE event: name from a FlagEvent's fields. Shared
+// by Broadcast and ReplayOrSnapshot's replayed-message path so a flag change
+// gets the same event: name whether it is delivered live or replayed after a
+// reconnect.
+func eventTypeFor(event FlagEvent) string {
+	if !event.Enabled && (event.Reason == "circuit_breaker" ||
+		event.Reason == "manual_kill_switch" ||
+		event.Reason == "slo_burn_rate") {
+		return "kill_switch"
+	}
+	return "flag_updated"
+}
+
 // sseFrame builds a raw SSE wire-format frame for a FlagEvent.
-// Format: "event: <type>\ndata: <json>\n\n"
-func sseFrame(eventType string, event FlagEvent) []byte {
+// Format: "id: <id>\nevent: <type>\ndata: <json>\n\n" (id: line omitted when
+// id is "" -- SSE's id: field is optional, and only the Streams delivery
+// path has a real, XRANGE-replayable ID to offer).
+func sseFrame(eventType string, event FlagEvent, id string) []byte {
 	data := fmt.Sprintf(
 		`{"flag_key":%q,"enabled":%v,"rollout_pct":%d,"reason":%q,"ts":%d,"environment":%q}`,
 		event.FlagKey,
@@ -226,5 +261,62 @@ func sseFrame(eventType string, event FlagEvent) []byte {
 		event.Ts,
 		event.Environment,
 	)
-	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, data))
+	return []byte(fmt.Sprintf("%sevent: %s\ndata: %s\n\n", idLine(id), eventType, data))
+}
+
+// snapshotFrame builds an SSE "snapshot" frame carrying a full flag-state
+// JSON payload (as already produced by the reconciler/flag-api's snapshot
+// endpoint) plus, when known, the stream's current newest entry ID so the
+// client's Last-Event-ID cursor advances to "now" instead of staying stuck
+// at the (already-trimmed) ID it reconnected with.
+func snapshotFrame(snapshot []byte, newestID string) []byte {
+	return []byte(fmt.Sprintf("%sevent: snapshot\ndata: %s\n\n", idLine(newestID), snapshot))
+}
+
+func idLine(id string) string {
+	if id == "" {
+		return ""
+	}
+	return fmt.Sprintf("id: %s\n", id)
+}
+
+// ReplayOrSnapshot catches an SSE client up after it reconnects with a
+// Last-Event-ID value (GW-2). It returns ready-to-write SSE frames, in
+// order:
+//   - the events published to environment's stream strictly after lastID,
+//     each carrying its own real id: line (XRANGE, O(delta) — the whole
+//     point of resumable streams over a full re-sync), or
+//   - if lastID predates what the stream currently retains (MaxLen/Approx
+//     eviction already trimmed past it -- ReplaySince cannot otherwise tell
+//     "caught up" apart from "gap already lost" from an empty XRANGE result
+//     alone), a single "snapshot" frame carrying the environment's
+//     last-known full state.
+//
+// Returns nil if this Hub has no Redis client set (SetRedis never called),
+// lastID is empty, or neither a replay nor a snapshot is available.
+func (h *Hub) ReplayOrSnapshot(ctx context.Context, environment, lastID string) [][]byte {
+	if h.rdb == nil || lastID == "" {
+		return nil
+	}
+	streamKey := StreamKey(environment)
+
+	msgs, ok, err := ReplaySince(ctx, h.rdb, streamKey, lastID)
+	if err != nil {
+		h.logger.Warn("replay: XRANGE failed, skipping catch-up",
+			zap.String("env", environment), zap.Error(err))
+		return nil
+	}
+	if ok {
+		return BuildReplayFrames(msgs)
+	}
+
+	snapshot, hasSnapshot := h.LastSnapshot(environment)
+	if !hasSnapshot {
+		return nil
+	}
+	newestID := ""
+	if newest, err := h.rdb.XRevRangeN(ctx, streamKey, "+", "-", 1).Result(); err == nil && len(newest) > 0 {
+		newestID = newest[0].ID
+	}
+	return [][]byte{snapshotFrame(snapshot, newestID)}
 }
