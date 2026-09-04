@@ -20,11 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.55.0"]
-snowflake = ["snowflake-connector-python>=3.0"]
+snowflake = ["snowflake-connector-python>=4.7.1"]
 bigquery = ["google-cloud-bigquery[pandas]>=3.0"]
 databricks = ["databricks-sql-connector>=3.0"]
 all-warehouses = [
-    "snowflake-connector-python>=3.0",
+    "snowflake-connector-python>=4.7.1",
     "google-cloud-bigquery[pandas]>=3.0",
     "databricks-sql-connector>=3.0",
 ]
