@@ -44,7 +44,7 @@ func NewCalculator(db *sql.DB, flagAPIURL string) *Calculator {
 }
 
 // Compute calculates the blast radius for enabling/changing a flag.
-func (c *Calculator) Compute(ctx context.Context, flagKey, environment string, newRolloutPct int) (*BlastRadiusResult, error) {
+func (c *Calculator) Compute(ctx context.Context, flagKey, environment, projectID string, newRolloutPct int) (*BlastRadiusResult, error) {
 	result := &BlastRadiusResult{
 		DependentFlagKeys: []string{},
 		AffectedServices:  []string{},
@@ -61,8 +61,9 @@ func (c *Calculator) Compute(ctx context.Context, flagKey, environment string, n
 		  AND created_at > now() - INTERVAL '30 days'
 		  AND flag_key != $1
 		  AND environment = $2
+		  AND project_id = $3
 		LIMIT 10
-	`, flagKey, environment)
+	`, flagKey, environment, projectID)
 	if err == nil {
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
@@ -82,8 +83,9 @@ func (c *Calculator) Compute(ctx context.Context, flagKey, environment string, n
 		)
 		FROM audit_log
 		WHERE flag_key = $1 AND event_type = 'flag_environment_updated'
+		  AND project_id = $2
 		  AND created_at > now() - INTERVAL '90 days'
-	`, flagKey).Scan(&avgDelta)
+	`, flagKey, projectID).Scan(&avgDelta)
 	if avgDelta.Valid {
 		result.HistoricalErrorDelta = avgDelta.Float64
 	}
@@ -120,7 +122,14 @@ type BlastRadiusResponse struct {
 	Result        *BlastRadiusResult `json:"result"`
 }
 
-// HandleBlastRadius handles GET /api/v1/blast-radius?flag_key=...&environment=...&rollout_pct=...
+// defaultProjectID matches services/intelligence's own DEFAULT_PROJECT_ID
+// (app/graph/builder.py) — the seed "Default" project's real UUID. Exists
+// only so a single-project deployment (the only kind that exists today)
+// keeps working with no caller changes; real multi-project deployments
+// must pass an explicit project_id.
+const defaultProjectID = "00000000-0000-0000-0000-000000000001"
+
+// HandleBlastRadius handles GET /api/v1/blast-radius?flag_key=...&environment=...&rollout_pct=...&project_id=...
 func HandleBlastRadius(calc *Calculator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -129,12 +138,16 @@ func HandleBlastRadius(calc *Calculator) http.HandlerFunc {
 		if env == "" {
 			env = "production"
 		}
+		projectID := q.Get("project_id")
+		if projectID == "" {
+			projectID = defaultProjectID
+		}
 		pct := 100
 		if p := q.Get("rollout_pct"); p != "" {
 			_, _ = fmt.Sscanf(p, "%d", &pct)
 		}
 
-		result, err := calc.Compute(r.Context(), flagKey, env, pct)
+		result, err := calc.Compute(r.Context(), flagKey, env, projectID, pct)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return

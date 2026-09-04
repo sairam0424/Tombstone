@@ -16,7 +16,7 @@ from app.anomaly.rule_generator import generate_rule
 from app.cleanup.routes import router as cleanup_router
 from app.correlation.correlator import IncidentCorrelator
 from app.experiments.routes import router as experiments_router
-from app.graph.builder import DependencyGraphBuilder
+from app.graph.builder import DEFAULT_PROJECT_ID, DependencyGraphBuilder
 from app.integrations.webhook_receiver import router as webhooks_router
 from app.kafka.consumer import create_consumer
 from app.observability.metrics import RedMetricsMiddleware, metrics_response
@@ -334,7 +334,7 @@ async def get_flag_anomaly_ensemble(flag_key: str):
 
 
 @app.get("/api/v1/stale")
-async def get_stale_flags(project_id: str = "00000000-0000-0000-0000-000000000001"):
+async def get_stale_flags(project_id: str = DEFAULT_PROJECT_ID):
     """Get flags that are candidates for cleanup."""
     stale = await app.state.stale.detect(project_id)
     return {"stale_flags": stale, "count": len(stale)}
@@ -343,6 +343,7 @@ async def get_stale_flags(project_id: str = "00000000-0000-0000-0000-00000000000
 @app.post("/api/v1/dependency-graph")
 async def build_dependency_graph(
     request: Request,
+    project_id: str = DEFAULT_PROJECT_ID,
     environment: str = "production",
     from_unix: int = 0,
     to_unix: int = 0,
@@ -367,7 +368,7 @@ async def build_dependency_graph(
 
     async with request.app.state.background_job_lock:
         graph = await request.app.state.graph_builder.build(
-            environment, from_unix, to_unix
+            project_id, environment, from_unix, to_unix
         )
     return {
         "nodes": [
@@ -396,7 +397,11 @@ async def build_dependency_graph(
 
 @app.get("/api/v1/dependency-graph/impact/{flag_key}")
 async def get_flag_impact(
-    flag_key: str, request: Request, environment: str = "production", days: int = 30
+    flag_key: str,
+    request: Request,
+    project_id: str = DEFAULT_PROJECT_ID,
+    environment: str = "production",
+    days: int = 30,
 ):
     """Return co-changed flags for flag_key.
 
@@ -407,7 +412,7 @@ async def get_flag_impact(
     builder: DependencyGraphBuilder = request.app.state.graph_builder
 
     if redis_client is not None:
-        fast_result = await builder.get_impact_fast(flag_key, redis_client)
+        fast_result = await builder.get_impact_fast(flag_key, redis_client, project_id)
         if fast_result is not None:
             return {
                 "flag_key": flag_key,
@@ -418,13 +423,14 @@ async def get_flag_impact(
         # Redis key absent (cold start) — fall through to DB
         logger.info("dep graph Redis miss for %s — falling back to DB", flag_key)
 
-    return await builder.get_impact(flag_key, environment, days)
+    return await builder.get_impact(flag_key, environment, project_id, days)
 
 
 @app.get("/api/v1/graph/dependencies")
 async def get_dependency_subgraph(
     flag_key: str,
     depth: int = 1,
+    project_id: str = DEFAULT_PROJECT_ID,
     environment: str = "production",
     request: Request = None,
 ):
@@ -456,13 +462,17 @@ async def get_dependency_subgraph(
         # Fetch neighbors
         neighbors = None
         if redis_client is not None:
-            neighbors = await builder.get_impact_fast(current_key, redis_client)
+            neighbors = await builder.get_impact_fast(
+                current_key, redis_client, project_id
+            )
             if neighbors is None:
                 # Redis miss — fall back to DB
                 logger.info(
                     "dep graph Redis miss for %s — falling back to DB", current_key
                 )
-                db_result = await builder.get_impact(current_key, environment, days=30)
+                db_result = await builder.get_impact(
+                    current_key, environment, project_id, days=30
+                )
                 co_changed = db_result.get("co_changed_with", [])
                 # DB fallback returns {"flag_key": str, "co_change_count": int, "avg_seconds_apart": float}
                 # Infer weight from co_change_count: higher count → higher coupling
@@ -496,9 +506,10 @@ async def get_dependency_subgraph(
             SELECT f.key, fe.enabled, fe.rollout_pct
             FROM flags f
             LEFT JOIN flag_environments fe ON fe.flag_id = f.id AND fe.environment = $1
-            WHERE f.key = ANY($2::text[])
+            WHERE f.project_id = $2 AND f.key = ANY($3::text[])
             """,
             environment,
+            project_id,
             list(visited),
         )
         nodes = [
@@ -525,6 +536,7 @@ BLAST_RADIUS_MULTIPLIER = {"BLOCKED": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 @app.get("/api/v1/graph/critical-flags")
 async def get_critical_flags(
     limit: int = 20,
+    project_id: str = DEFAULT_PROJECT_ID,
     environment: str = "production",
     request: Request = None,
 ):
@@ -559,12 +571,14 @@ async def get_critical_flags(
         FROM audit_log
         WHERE created_at >= to_timestamp($1)
           AND created_at <= to_timestamp($2)
+          AND project_id = $3
           AND flag_key IS NOT NULL
           AND event_type IN ('flag_environment_updated','kill_switch_activated','flag_created')
         ORDER BY created_at ASC
         """,
         float(from_unix),
         float(to_unix),
+        project_id,
     )
 
     if not rows:
@@ -633,6 +647,7 @@ async def get_critical_flags(
                         "flag_key": flag["key"],
                         "environment": environment,
                         "rollout_pct": 100,
+                        "project_id": project_id,
                     },
                 )
                 if resp.status_code == 200:

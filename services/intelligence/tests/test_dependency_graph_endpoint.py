@@ -5,6 +5,7 @@ Requires a test fixture for `app` (FastAPI instance) with mocked
 `app.state.redis` and `app.state.graph_builder`. Uses the same async test
 harness pattern as `test_background_job_lock.py` (pytest-asyncio).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -32,15 +33,22 @@ class MockGraphBuilder:
         """Mock pool for the endpoint's flags table query."""
         return MockPool()
 
-    async def get_impact_fast(self, flag_key: str, redis_client) -> list[dict] | None:
+    async def get_impact_fast(
+        self, flag_key: str, redis_client, project_id: str
+    ) -> list[dict] | None:
         return self.redis_data.get(flag_key)
 
-    async def get_impact(self, flag_key: str, environment: str, days: int) -> dict:
-        return self.db_fallback_data.get(flag_key, {
-            "flag_key": flag_key,
-            "environment": environment,
-            "co_changed_with": [],
-        })
+    async def get_impact(
+        self, flag_key: str, environment: str, project_id: str, days: int
+    ) -> dict:
+        return self.db_fallback_data.get(
+            flag_key,
+            {
+                "flag_key": flag_key,
+                "environment": environment,
+                "co_changed_with": [],
+            },
+        )
 
 
 @pytest.fixture
@@ -55,6 +63,7 @@ def app_with_mocked_builder():
 def test_dependencies_endpoint_redis_hit_depth_1(app_with_mocked_builder):
     """Redis hit with depth=1 returns direct neighbors only."""
     from app import main  # imports the route we're testing
+
     # Inject the mocked app state into main's global app instance
     # (alternatively, refactor main.py to accept app as param — deferred to follow-up)
     main.app.state.graph_builder = app_with_mocked_builder.state.graph_builder
@@ -68,7 +77,9 @@ def test_dependencies_endpoint_redis_hit_depth_1(app_with_mocked_builder):
     ]
 
     client = TestClient(main.app)
-    response = client.get("/api/v1/graph/dependencies?flag_key=payments.checkout&depth=1")
+    response = client.get(
+        "/api/v1/graph/dependencies?flag_key=payments.checkout&depth=1"
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -83,6 +94,7 @@ def test_dependencies_endpoint_redis_hit_depth_1(app_with_mocked_builder):
 def test_dependencies_endpoint_redis_miss_db_fallback(app_with_mocked_builder):
     """Redis miss triggers DB fallback via get_impact()."""
     from app import main
+
     main.app.state.graph_builder = app_with_mocked_builder.state.graph_builder
     main.app.state.redis = app_with_mocked_builder.state.redis
 
@@ -92,7 +104,9 @@ def test_dependencies_endpoint_redis_miss_db_fallback(app_with_mocked_builder):
     mock_builder.db_fallback_data["new.flag"] = {
         "flag_key": "new.flag",
         "environment": "production",
-        "co_changed_with": [{"flag_key": "old.flag", "co_change_count": 3, "avg_seconds_apart": 120.0}],
+        "co_changed_with": [
+            {"flag_key": "old.flag", "co_change_count": 3, "avg_seconds_apart": 120.0}
+        ],
     }
 
     client = TestClient(main.app)
@@ -109,6 +123,7 @@ def test_dependencies_endpoint_redis_miss_db_fallback(app_with_mocked_builder):
 def test_dependencies_endpoint_depth_2_traversal(app_with_mocked_builder):
     """depth=2 traverses to 2nd-degree neighbors."""
     from app import main
+
     main.app.state.graph_builder = app_with_mocked_builder.state.graph_builder
     main.app.state.redis = app_with_mocked_builder.state.redis
 
