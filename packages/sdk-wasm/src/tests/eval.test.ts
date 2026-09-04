@@ -70,6 +70,37 @@ describe("@tombstone/eval — isInRollout (real cross-SDK contract vectors)", ()
 });
 
 // ---------------------------------------------------------------------------
+// isInRollout (v1) — supplementary-plane (emoji) inputs
+//
+// test-contract/vectors.json has zero vectors with characters outside the
+// Basic Multilingual Plane, so the surrogate-pair bug this regression test
+// guards against (found by adversarial review of PR #207 -- murmur32's
+// hand-rolled UTF-8 encoder treated each half of a surrogate pair as its
+// own 3-byte code point instead of combining them into one 4-byte one)
+// was undetected by the contract-vector suite above. Expected buckets
+// independently computed via the real `murmurhash` npm package
+// (@tombstone/core's own dependency) -- not hand-calculated.
+// ---------------------------------------------------------------------------
+
+describe("@tombstone/eval — isInRollout (v1, supplementary-plane characters)", () => {
+  it("emoji flagKey — bucket matches the real murmurhash npm package (85)", () => {
+    // murmurhash.v3('flag-😀' + 'user-123') % 100 === 85
+    const result = isInRollout("flag-😀", "user-123", 86, 1);
+    assert.strictEqual(result, true, "bucket 85 < 86 must be in cohort");
+    const excluded = isInRollout("flag-😀", "user-123", 85, 1);
+    assert.strictEqual(excluded, false, "bucket 85 >= 85 must be excluded");
+  });
+
+  it("emoji userId — bucket matches the real murmurhash npm package (21)", () => {
+    // murmurhash.v3('celebration-flag' + 'user-🎉-42') % 100 === 21
+    const result = isInRollout("celebration-flag", "user-🎉-42", 22, 1);
+    assert.strictEqual(result, true, "bucket 21 < 22 must be in cohort");
+    const excluded = isInRollout("celebration-flag", "user-🎉-42", 21, 1);
+    assert.strictEqual(excluded, false, "bucket 21 >= 21 must be excluded");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // evaluate()
 // ---------------------------------------------------------------------------
 
@@ -122,7 +153,16 @@ describe("@tombstone/eval — evaluate()", () => {
     assert.strictEqual(result.reason, "OFF");
   });
 
-  it("OFF falls back to defaultValue when safeDefault fails to parse for a numeric default", () => {
+  it("OFF: an unparseable numeric safeDefault falls back to defaultValue rather than NaN", () => {
+    // NOTE: this scenario is definitionally identical between the fixed
+    // and pre-fix `evaluate()` -- parseSafeDefault's own NaN-fallback
+    // path returns the caller's defaultValue verbatim, same as the old
+    // code's "ignore safeDefault entirely" behavior. This test verifies
+    // the fallback path itself is correct (doesn't return NaN/throw), not
+    // regression coverage for the OFF-ignores-safeDefault bug -- the
+    // preceding test ("safeDefault is parsed as a number") is the one
+    // that actually distinguishes fixed from unfixed behavior for numeric
+    // defaults (found by adversarial review of PR #207).
     const flag: FlagState = {
       ...baseFlag,
       enabled: false,
@@ -383,6 +423,79 @@ describe("@tombstone/eval — evaluate()", () => {
     };
     const result = evaluate(flag, { userId: "u", width: "5px" }, false);
     // No match -> falls through to the 100% rollout, not RULE_MATCH.
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("GT operator matches a RAW boolean attribute via Number(true)=1, matching @tombstone/core", () => {
+    // Regression test: this engine used to pre-stringify the context
+    // attribute via String(rawValue) before dispatch, so Number(value)
+    // for LT/LTE/GT/GTE ran on the STRING "true"/"false" (NaN, never
+    // matches) instead of the raw boolean (Number(true)=1, Number(false)=0,
+    // both finite) that @tombstone/core's applyOperator receives directly.
+    const flag: FlagState = {
+      ...baseFlag,
+      rolloutPct: 0,
+      targetingRules: [
+        {
+          attribute: "isPremium",
+          operator: "GT",
+          values: [0],
+          variation: "premium",
+          priority: 0,
+        },
+      ],
+    };
+    const result = evaluate(flag, { userId: "u", isPremium: true }, false);
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "premium");
+  });
+
+  it("CONTAINS operator never matches a RAW number/boolean attribute, matching @tombstone/core's typeof guard", () => {
+    // Regression test: pre-stringifying the attribute meant a number like
+    // 25 became the string "25", which CONTAINS/PREFIX/SUFFIX could then
+    // substring-match against -- @tombstone/core's applyOperator requires
+    // `typeof value === 'string'` for these operators and rejects a raw
+    // number/boolean outright, regardless of what its stringified form
+    // would look like.
+    const flag: FlagState = {
+      ...baseFlag,
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          attribute: "age",
+          operator: "CONTAINS",
+          values: ["2"],
+          variation: "should-never-match",
+          priority: 0,
+        },
+      ],
+    };
+    const result = evaluate(flag, { userId: "u", age: 25 }, false);
+    // No match (age is a number, not a string) -> falls through to rollout.
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("RULE_MATCH skips rule when context attribute is explicitly null", () => {
+    // Distinct from the "missing" case below (key absent entirely) --
+    // evaluateRule's guard is `rawValue === undefined || rawValue ===
+    // null`; this exercises the null half specifically.
+    const flag: FlagState = {
+      ...baseFlag,
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "enabled",
+          priority: 10,
+        },
+      ],
+    };
+    const ctx: EvalContext = { userId: "user-abc-123", plan: null };
+    const result = evaluate(flag, ctx, false);
     assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
   });

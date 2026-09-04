@@ -112,7 +112,9 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          # No cache-dependency-path — package-lock.json generated on first npm install
+          # No cache-dependency-path — npm's built-in cache isn't configured
+          # for this job (package-lock.json IS committed; verified via
+          # `git ls-files` — a prior comment here claimed otherwise)
 
       - name: npm install
         run: npm install
@@ -161,7 +163,9 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          # No cache-dependency-path — package-lock.json generated on first npm install
+          # No cache-dependency-path — npm's built-in cache isn't configured
+          # for this job (package-lock.json IS committed; verified via
+          # `git ls-files` — a prior comment here claimed otherwise)
 
       - name: npm install
         run: npm install

@@ -4,7 +4,7 @@ Zero-dependency evaluation engine for Tombstone.
 
 Runs in: **Node.js**, **browser**, **Deno**, **Bun**, **Cloudflare Workers**, and any WASM-capable JS runtime.
 
-**Version:** 0.1.0 | **Tests:** 46/46 passing | **Dependencies:** none
+**Version:** 0.1.0 | **Tests:** 51/51 passing | **Dependencies:** none
 
 ## Why @tombstone/eval?
 
@@ -35,7 +35,7 @@ import type { FlagState, EvalContext, EvalResult } from '@tombstone/eval';
 const inCohort = isInRollout('my_flag', 'user_abc123', 50);
 // true if the user falls within the 50% rollout for this flag
 
-// evaluate — full 5-step pipeline
+// evaluate — 3 of Core's 5 pipeline steps (see "Evaluation Pipeline" below)
 const flag: FlagState = {
   flagKey: 'checkout_v2',
   enabled: true,
@@ -67,7 +67,9 @@ const result: EvalResult = evaluate(flag, context, false);
 
 ### `evaluate(flag, context, defaultValue)`
 
-Runs the full 5-step evaluation pipeline on a single `FlagState`.
+Runs 3 of `@tombstone/core`'s 5 evaluation-pipeline steps on a single
+`FlagState` (see "Evaluation Pipeline" below for which 3, and what's not
+yet implemented).
 
 ```typescript
 function evaluate(
@@ -236,7 +238,7 @@ full 5-step pipeline.
 
 ```bash
 npm test
-# 46 passing
+# 51 passing
 ```
 
 Tests run against the real cross-SDK contract vectors in

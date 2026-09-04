@@ -73,6 +73,66 @@ describe("@tomb-stone/edge — evaluate() hash parity (real cross-SDK v1 contrac
   }
 });
 
+// test-contract/vectors.json has zero vectors with characters outside the
+// Basic Multilingual Plane, so the surrogate-pair bug this regression test
+// guards against (found by adversarial review of PR #207 -- the vendored
+// murmur32's hand-rolled UTF-8 encoder treated each half of a surrogate
+// pair as its own 3-byte code point instead of combining them into one
+// 4-byte one) was undetected by the contract-vector suite above. Expected
+// buckets independently computed via the real `murmurhash` npm package
+// (@tombstone/core's own dependency) -- not hand-calculated.
+describe("@tomb-stone/edge — evaluate() hash parity (supplementary-plane characters)", () => {
+  it("emoji flagKey — bucket matches the real murmurhash npm package (85)", () => {
+    // murmurhash.v3('flag-😀' + 'user-123') % 100 === 85
+    const inCohort = makeFlag("flag-😀", 86);
+    const result = evaluate<boolean>(
+      inCohort,
+      { userId: "user-123" },
+      false,
+      "flag-😀",
+    );
+    assert.strictEqual(result.value, true, "bucket 85 < 86 must be in cohort");
+
+    const excludedFlag = makeFlag("flag-😀", 85);
+    const excluded = evaluate<boolean>(
+      excludedFlag,
+      { userId: "user-123" },
+      false,
+      "flag-😀",
+    );
+    assert.strictEqual(
+      excluded.value,
+      false,
+      "bucket 85 >= 85 must be excluded",
+    );
+  });
+
+  it("emoji userId — bucket matches the real murmurhash npm package (21)", () => {
+    // murmurhash.v3('celebration-flag' + 'user-🎉-42') % 100 === 21
+    const inCohort = makeFlag("celebration-flag", 22);
+    const result = evaluate<boolean>(
+      inCohort,
+      { userId: "user-🎉-42" },
+      false,
+      "celebration-flag",
+    );
+    assert.strictEqual(result.value, true, "bucket 21 < 22 must be in cohort");
+
+    const excludedFlag = makeFlag("celebration-flag", 21);
+    const excluded = evaluate<boolean>(
+      excludedFlag,
+      { userId: "user-🎉-42" },
+      false,
+      "celebration-flag",
+    );
+    assert.strictEqual(
+      excluded.value,
+      false,
+      "bucket 21 >= 21 must be excluded",
+    );
+  });
+});
+
 describe("@tomb-stone/edge — evaluate()", () => {
   it("returns ERROR + defaultValue when flag is not found", () => {
     const result = evaluate(

@@ -16,17 +16,38 @@
  * Produces identical bucket assignments to @tombstone/core.
  */
 function murmur32(str: string): number {
-  // Encode to UTF-8 bytes (same as TextEncoder in the npm package)
+  // Encode to UTF-8 bytes (same as TextEncoder in the npm package). Must
+  // combine UTF-16 surrogate pairs into a single >= U+10000 code point
+  // BEFORE branching on byte width -- without this, each half of a
+  // surrogate pair (0xD800-0xDFFF) falls into the 3-byte branch on its
+  // own, producing a completely different (wrong) byte sequence than the
+  // real UTF-8 encoding for any emoji or other supplementary-plane
+  // character, silently breaking cross-SDK parity for exactly those
+  // inputs (found by adversarial review of PR #207).
   const bytes: number[] = [];
   for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
+    let code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = (code - 0xd800) * 0x400 + (next - 0xdc00) + 0x10000;
+        i++;
+      }
+    }
     if (code < 0x80) {
       bytes.push(code);
     } else if (code < 0x800) {
       bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else {
+    } else if (code < 0x10000) {
       bytes.push(
         0xe0 | (code >> 12),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
         0x80 | ((code >> 6) & 0x3f),
         0x80 | (code & 0x3f),
       );
@@ -203,27 +224,49 @@ export function isInRollout(
 // Targeting rule evaluation
 // ---------------------------------------------------------------------------
 
+/**
+ * Takes the RAW (not pre-stringified) attribute value, exactly matching
+ * @tombstone/core's applyOperator: string ops stringify internally, but
+ * LT/LTE/GT/GTE call Number() on the raw value directly (not its string
+ * form -- Number(true)=1, but Number(String(true))=Number('true')=NaN),
+ * and CONTAINS/PREFIX/SUFFIX require the raw value to already be a
+ * string (a number or boolean can never match, matching Core's explicit
+ * `typeof value === 'string'` guard) rather than matching against its
+ * stringified form. Pre-stringifying here (a prior version of this file
+ * did) silently changed rule-match results whenever a context attribute
+ * was a boolean or number, not a string -- found by adversarial review
+ * of PR #207.
+ */
 function evaluateOperator(
   operator: RuleOperator,
-  value: string,
+  value: unknown,
   ruleValues: unknown[],
 ): boolean {
-  const strValues = ruleValues.map((v) => String(v));
+  const strValue = String(value);
   switch (operator) {
     case "IN":
-      return strValues.includes(value);
+      return ruleValues.some((v) => String(v) === strValue);
     case "NOT_IN":
-      return !strValues.includes(value);
+      return ruleValues.every((v) => String(v) !== strValue);
     case "EQ":
-      return value === String(ruleValues[0] ?? "");
+      return strValue === String(ruleValues[0] ?? "");
     case "NEQ":
-      return value !== String(ruleValues[0] ?? "");
+      return strValue !== String(ruleValues[0] ?? "");
     case "CONTAINS":
-      return strValues.some((v) => value.includes(v));
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.includes(String(v)))
+      );
     case "PREFIX":
-      return strValues.some((v) => value.startsWith(v));
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.startsWith(String(v)))
+      );
     case "SUFFIX":
-      return strValues.some((v) => value.endsWith(v));
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.endsWith(String(v)))
+      );
     case "LT": {
       const n = Number(value);
       return Number.isFinite(n) && n < Number(ruleValues[0] ?? 0);
@@ -248,11 +291,7 @@ function evaluateOperator(
 function evaluateRule(rule: TargetingRule, context: EvalContext): boolean {
   const rawValue = context[rule.attribute];
   if (rawValue === undefined || rawValue === null) return false;
-  return evaluateOperator(
-    rule.operator as RuleOperator,
-    String(rawValue),
-    rule.values,
-  );
+  return evaluateOperator(rule.operator as RuleOperator, rawValue, rule.values);
 }
 
 /**

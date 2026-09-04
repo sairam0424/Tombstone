@@ -17,16 +17,35 @@ import type {
 // comment disclosed but never fixed. Keep this in sync with
 // packages/sdk-wasm/src/index.ts's murmur32 if either ever changes.
 function murmur32(str: string): number {
+  // Must combine UTF-16 surrogate pairs into a single >= U+10000 code
+  // point BEFORE branching on byte width -- without this, each half of a
+  // surrogate pair (0xD800-0xDFFF) falls into the 3-byte branch on its
+  // own, producing a wrong byte sequence for any emoji/supplementary-
+  // plane character (found by adversarial review of PR #207).
   const bytes: number[] = [];
   for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
+    let code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = (code - 0xd800) * 0x400 + (next - 0xdc00) + 0x10000;
+        i++;
+      }
+    }
     if (code < 0x80) {
       bytes.push(code);
     } else if (code < 0x800) {
       bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else {
+    } else if (code < 0x10000) {
       bytes.push(
         0xe0 | (code >> 12),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
         0x80 | ((code >> 6) & 0x3f),
         0x80 | (code & 0x3f),
       );
