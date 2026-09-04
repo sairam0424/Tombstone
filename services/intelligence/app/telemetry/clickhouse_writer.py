@@ -306,8 +306,24 @@ class ClickHouseWriter:
     # SDK callers report (OFF/FALLTHROUGH/RULE_MATCH/ERROR), but it means
     # "this evaluation itself failed" (e.g. flag not found/config error),
     # NOT "the flag's returned value caused a downstream failure" -- the
-    # write path has no signal for the latter at all. Disclosed, not a
-    # blocking ambiguity: it's the only interpretation the data supports.
+    # write path has no signal for the latter at all.
+    #
+    # This is a CONVENTION, not an enforced guarantee (found by
+    # adversarial review of PR #210): POST /api/v1/telemetry/ingest (the
+    # only real write path today) accepts `events: list[dict[str, Any]]`
+    # with zero Pydantic/schema validation, and _insert()/
+    # _insert_via_driver() read `reason` via `e.get("reason", "")` --  a
+    # caller that omits the field, or uses a different casing/vocabulary
+    # ("error"/"Error"/"FAILED"), lands rows with reason values that never
+    # match the exact literal 'ERROR' (ClickHouse string comparison is
+    # case-sensitive), silently under-reporting or zero-reporting the
+    # error rate with no exception or warning distinguishing that from
+    # "genuinely zero errors". No SDK or service in this repo actually
+    # calls this endpoint today (ClickHouseWriter.record(), which takes a
+    # typed reason argument, has zero callers repo-wide), so this gap is
+    # real but currently unreachable in practice -- flagged for whoever
+    # builds a real caller, not fixed here (would need a genuine schema/
+    # validation decision on the ingest endpoint, out of INT-4's scope).
     # ------------------------------------------------------------------
 
     @property

@@ -148,11 +148,33 @@ class TestArchivedEventEvictsAnomalyState:
         assert "never-seen-flag" not in detector._metrics
 
     @pytest.mark.asyncio
-    async def test_archived_event_with_no_flag_key_does_not_call_evict(self):
+    async def test_archived_event_with_empty_string_flag_key_does_not_call_evict(self):
         detector = MagicMock()
         consumer = _make_consumer(anomaly_detector=detector)
 
         ok = await consumer._dispatch({"event": "archived", "flag_key": ""}, {})
+
+        assert ok is True
+        detector.evict.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_archived_event_with_flag_key_absent_from_the_payload_does_not_call_evict(
+        self,
+    ):
+        """
+        Distinct from the empty-string case above: this payload never sets
+        "flag_key" at all. The real dispatch code (`data.get("flag_key",
+        "")`) treats both identically today, but a prior version of this
+        test suite only ever exercised the empty-string case despite its
+        name implying the key was missing -- found by adversarial review of
+        PR #210. Covering both explicitly means a future refactor that
+        distinguishes "present but empty" from "absent" (e.g. switching to
+        `if "flag_key" in data`) gets caught by whichever half it breaks.
+        """
+        detector = MagicMock()
+        consumer = _make_consumer(anomaly_detector=detector)
+
+        ok = await consumer._dispatch({"event": "archived"}, {})
 
         assert ok is True
         detector.evict.assert_not_called()

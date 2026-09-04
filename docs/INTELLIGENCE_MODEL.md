@@ -35,7 +35,10 @@ The `AnomalyEnsemble` class (`app/anomaly/ensemble.py`) runs three independent m
 
 **Model 2 — Isolation Forest (batch)**
 - scikit-learn `IsolationForest(n_estimators=100, contamination=0.05)`
-- Trained on 7-day historical data. Retrained daily at 02:00 UTC.
+- Trained on window_10s's rolling history (672 samples x 10s ≈ 1.87h, NOT
+  7 days -- corrected by INT-4 after adversarial review found this doc
+  contradicted the code's own, similarly-corrected comments). Retrained
+  daily at 02:00 UTC.
 - Requires minimum 50 observations before training. Until then, votes "normal".
 - Good at: detecting structurally unusual patterns (not just spikes)
 

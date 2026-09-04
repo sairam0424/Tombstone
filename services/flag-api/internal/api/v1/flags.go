@@ -495,6 +495,25 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// INT-4: resolve the flag's REAL environments before commit, while the
+	// row set is still guaranteed consistent within this transaction --
+	// archiving doesn't touch flag_environments (no CASCADE fires; only
+	// the flags row's state changes), so this is safe to read here.
+	// Publishing to a single hardcoded "production" instead (an earlier
+	// version of this fix did exactly that) only worked by coincidence of
+	// every current deployment's TOMBSTONE_ENVIRONMENTS happening to be
+	// "production" -- found by adversarial review of PR #210.
+	envs, err := sqlcgen.New(tx).ListFlagEnvironmentsForKey(r.Context(), sqlcgen.ListFlagEnvironmentsForKeyParams{Key: key, ProjectID: projectID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(envs) == 0 {
+		// Defensive fallback only -- CreateFlag always seeds a default
+		// flag_environments row (CreateDefaultFlagEnvironment), so this
+		// should be unreachable in practice.
+		envs = []string{"production"}
+	}
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -504,22 +523,22 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 
 	// INT-4: notify intelligence's anomaly detector to evict this flag's
 	// state (otherwise it leaks in-process forever, with no persistence or
-	// TTL). ArchiveFlag has no single environment of its own -- it archives
-	// the flag across every environment at once -- so this deliberately
-	// publishes to "production" only, matching this repo's established
-	// single-default-environment convention elsewhere (DEFAULT_PROJECT_ID,
-	// TOMBSTONE_ENVIRONMENTS' own default). AnomalyDetector's state is
-	// keyed by flag_key alone with no per-environment split, so reaching
-	// ANY one stream intelligence is actually subscribed to is sufficient
-	// to evict all of it; Enabled/RolloutPct carry no meaning for this
-	// event and are zero-valued, matching KillSwitch's convention for
-	// fields the receiving side ignores.
-	archiveEvent := FlagEvent{
-		FlagKey: key, Enabled: false, RolloutPct: 0,
-		Reason: "archived", Ts: time.Now().Unix(), Environment: "production",
+	// TTL). Published once per environment the flag actually had state in
+	// -- AnomalyDetector's state is keyed by flag_key alone with no per-
+	// environment split, so this is redundant-but-harmless eviction calls
+	// for a multi-environment flag, not a correctness issue; the goal is
+	// reaching every stream ANY intelligence deployment might be
+	// subscribed to, not just "production". Enabled/RolloutPct carry no
+	// meaning for this event and are zero-valued, matching KillSwitch's
+	// convention for fields the receiving side ignores.
+	for _, env := range envs {
+		archiveEvent := FlagEvent{
+			FlagKey: key, Enabled: false, RolloutPct: 0,
+			Reason: "archived", Ts: time.Now().Unix(), Environment: env,
+		}
+		h.publishEvent(r.Context(), env, archiveEvent)
+		h.publishToStream(r.Context(), env, archiveEvent)
 	}
-	h.publishEvent(r.Context(), "production", archiveEvent)
-	h.publishToStream(r.Context(), "production", archiveEvent)
 
 	writeJSON(w, http.StatusOK, map[string]any{"archived": true, "tombstoned": true, "key": key})
 }

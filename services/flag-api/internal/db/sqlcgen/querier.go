@@ -112,6 +112,13 @@ type Querier interface {
 	ListAuditRetentionCheckpoints(ctx context.Context, projectID sql.NullString) ([]ListAuditRetentionCheckpointsRow, error)
 	ListBreakGlassTokens(ctx context.Context, projectID sql.NullString) ([]ListBreakGlassTokensRow, error)
 	ListChangeRequests(ctx context.Context, arg ListChangeRequestsParams) ([]ListChangeRequestsRow, error)
+	// INT-4: ArchiveFlag has no single environment of its own -- it archives
+	// a flag across every environment it has state in at once. Used to
+	// resolve exactly which environments to publish the eviction event to,
+	// instead of hardcoding "production" (found by adversarial review of
+	// PR #210 -- the hardcoded value only worked by coincidence of every
+	// current deployment config happening to use "production").
+	ListFlagEnvironmentsForKey(ctx context.Context, arg ListFlagEnvironmentsForKeyParams) ([]string, error)
 	ListFlags(ctx context.Context, projectID string) ([]ListFlagsRow, error)
 	ListOrphanedFlags(ctx context.Context) ([]ListOrphanedFlagsRow, error)
 	ListPrereqFlagKeysForFlag(ctx context.Context, arg ListPrereqFlagKeysForFlagParams) ([]string, error)

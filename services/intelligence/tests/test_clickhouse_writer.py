@@ -7,9 +7,18 @@ writes to (the real write path, _insert()/_insert_via_driver(), has always
 targeted `tombstone_evaluations` only) -- so these two endpoints always
 returned zero/empty for any real deployment. clickhouse_driver is an
 optional dependency (`clickhouse` extra) not installed in this environment,
-so `_available`/`_get_client` are mocked directly rather than exercising a
-real driver -- this repo has zero prior test coverage of any kind for this
-module.
+so most tests here mock `_available`/`_get_client` directly rather than
+exercising a real driver -- this repo has zero prior test coverage of any
+kind for this module.
+
+TestAvailablePropertyUnmocked (added after adversarial review of PR #210
+found every other test fully bypasses `_available`'s real import-gating
+logic, even the ones that force it to True) exercises the REAL property
+unmocked -- clickhouse_driver's absence in this environment is exactly the
+condition CI runs under too (confirmed: `.github/workflows/ci.yml`'s
+python-intelligence job installs via `uv pip install --system -e .` with
+no `[clickhouse]` extra), so this is genuinely testable without the
+optional dependency, not merely theoretical.
 """
 
 from __future__ import annotations
@@ -30,6 +39,45 @@ def _mock_client(execute_return):
     client = MagicMock()
     client.execute.return_value = execute_return
     return client
+
+
+class TestAvailablePropertyUnmocked:
+    """
+    Exercises `_available`'s real body -- importlib.import_module wrapped
+    in try/except ImportError -- with NO mocking at all, unlike every other
+    test in this file. clickhouse_driver is genuinely not importable here
+    (confirmed: `ModuleNotFoundError`), which is also CI's real state, so
+    this proves the actual, reproducible fallback behavior end-to-end
+    rather than an assumption about what the property would do.
+    """
+
+    def test_available_is_false_without_the_optional_driver_installed(self, writer):
+        with pytest.raises(ModuleNotFoundError):
+            import clickhouse_driver  # noqa: F401
+
+        assert writer._available is False
+
+    @pytest.mark.asyncio
+    async def test_get_error_rate_gracefully_returns_zero_via_the_real_gate(
+        self, writer
+    ):
+        # No mocking of _available/_get_client at all -- this is the real
+        # code path every deployment without the `clickhouse` extra hits.
+        assert await writer.get_error_rate("checkout-v2", "production") == 0.0
+
+    @pytest.mark.asyncio
+    async def test_get_flag_stats_gracefully_returns_zeroes_via_the_real_gate(
+        self, writer
+    ):
+        result = await writer.get_flag_stats("checkout-v2", "production")
+        assert result == {"total_evaluations": 0, "error_rate": 0.0, "unique_users": 0}
+
+    @pytest.mark.asyncio
+    async def test_create_tables_logs_a_warning_and_returns_via_the_real_gate(
+        self, writer
+    ):
+        # Must not raise even though clickhouse_driver is absent.
+        await writer.create_tables()
 
 
 class TestGetErrorRate:
