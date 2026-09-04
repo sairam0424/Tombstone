@@ -33,8 +33,14 @@ def depgraph_key(project_id: str, flag_key: str) -> str:
     Neither field is validated to exclude colons at the HTTP layer, and
     flag_key is a customer-chosen string, so this can't be ruled out by
     convention alone.
+
+    Both args are coerced to str before quoting: rebuild_all() passes
+    project_id straight from an audit_log row, where asyncpg decodes the
+    UUID column into a UUID object, not a str -- quote() raises TypeError
+    on anything that isn't str/bytes, unlike the old str.format()-based key
+    builder this replaced, which stringified implicitly.
     """
-    return f"tombstone:depgraph:{quote(project_id, safe='')}:{quote(flag_key, safe='')}"
+    return f"tombstone:depgraph:{quote(str(project_id), safe='')}:{quote(str(flag_key), safe='')}"
 
 
 @dataclass

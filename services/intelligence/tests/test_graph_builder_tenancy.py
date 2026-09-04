@@ -17,6 +17,8 @@ test_dependency_graph_endpoint.py and test_critical_flags_endpoint.py.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.graph.builder import DependencyGraphBuilder, depgraph_key
@@ -191,6 +193,44 @@ class TestRebuildAllCrossTenantIsolation:
 
         query, _args = pool.fetch_calls[0]
         assert "project_id IS NOT NULL" in query
+
+    @pytest.mark.asyncio
+    async def test_rebuild_all_handles_non_str_project_id_from_a_real_db_driver(
+        self, builder
+    ):
+        """
+        Regression test: asyncpg decodes a Postgres UUID column into a
+        uuid.UUID object, not a str. audit_log.project_id is a UUID column
+        (migration 017), so rebuild_all's row-derived project_id is a
+        uuid.UUID in production -- MockDBPool's other tests all pass plain
+        str project_id values and would never catch depgraph_key() calling
+        urllib.parse.quote() directly on a non-str value (raises TypeError,
+        silently swallowed by main.py's surrounding try/except, permanently
+        no-op'ing every scheduled rebuild for any project with real UUIDs).
+        """
+        project_uuid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        rows = [
+            {
+                "flag_key": "checkout-v2",
+                "project_id": project_uuid,
+                "ts": 1000,
+                "event_type": "flag_environment_updated",
+            },
+            {
+                "flag_key": "fraud-check",
+                "project_id": project_uuid,
+                "ts": 1010,
+                "event_type": "flag_environment_updated",
+            },
+        ]
+        pool = MockDBPool(rows)
+        redis_client = MockRedisClient()
+
+        await builder.rebuild_all(pool, redis_client)
+
+        written_keys = {call[0] for call in redis_client.pipe.zadd_calls}
+        assert depgraph_key(project_uuid, "checkout-v2") in written_keys
+        assert depgraph_key(project_uuid, "fraud-check") in written_keys
 
 
 class TestQueryScoping:
