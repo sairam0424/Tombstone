@@ -3,6 +3,7 @@ Zero-copy warehouse connector for experiment analysis.
 Raw user event data NEVER leaves the customer's warehouse.
 Tombstone only receives aggregated statistics (mean, std, sample size).
 """
+
 from __future__ import annotations
 
 import abc
@@ -15,11 +16,14 @@ from app.warehouse.executor import run_warehouse_query
 @dataclass
 class AggregatedMetric:
     """Aggregated statistics returned from the warehouse — no raw PII."""
+
     variant: str
     sample_size: int
     mean: float
     std: float
     sum: float
+    variance: float = 0.0
+    conversion_count: int = 0
 
 
 class WarehouseConnector(abc.ABC):
@@ -42,7 +46,9 @@ class WarehouseConnector(abc.ABC):
 
     async def test_connection(self) -> bool:
         try:
-            await self.query_experiment_metrics("_test", "false", "true", "1", "dual", "dual")
+            await self.query_experiment_metrics(
+                "_test", "false", "true", "1", "dual", "dual"
+            )
             return True
         except Exception:
             return False
@@ -61,7 +67,10 @@ class PostgresConnector(WarehouseConnector):
     async def _get_pool(self) -> Any:
         if self._pool is None:
             import asyncpg  # type: ignore[import]
-            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=2, max_inactive_connection_lifetime=30.0)
+
+            self._pool = await asyncpg.create_pool(
+                self._dsn, min_size=1, max_size=2, max_inactive_connection_lifetime=30.0
+            )
         return self._pool
 
     async def query_experiment_metrics(
@@ -96,7 +105,9 @@ class PostgresConnector(WarehouseConnector):
                 COUNT(*) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
-                SUM(metric_value) AS sum
+                VARIANCE(metric_value) AS variance,
+                SUM(metric_value) AS sum,
+                SUM(CASE WHEN metric_value > 0 THEN 1 ELSE 0 END) AS conversion_count
             FROM user_metrics
             GROUP BY variant
         """
@@ -109,7 +120,9 @@ class PostgresConnector(WarehouseConnector):
                 sample_size=int(row["sample_size"]),
                 mean=float(row["mean"] or 0),
                 std=float(row["std"] or 0),
+                variance=float(row["variance"] or 0),
                 sum=float(row["sum"] or 0),
+                conversion_count=int(row["conversion_count"] or 0),
             )
         return result
 
@@ -205,7 +218,9 @@ class SnowflakeConnector(WarehouseConnector):
                 COUNT(*) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
-                SUM(metric_value) AS sum
+                VARIANCE(metric_value) AS variance,
+                SUM(metric_value) AS sum,
+                SUM(CASE WHEN metric_value > 0 THEN 1 ELSE 0 END) AS conversion_count
             FROM user_metrics
             GROUP BY variant
         """
@@ -228,7 +243,9 @@ class SnowflakeConnector(WarehouseConnector):
                 sample_size=int(row_dict["sample_size"]),
                 mean=float(row_dict["mean"] or 0),
                 std=float(row_dict["std"] or 0),
+                variance=float(row_dict["variance"] or 0),
                 sum=float(row_dict["sum"] or 0),
+                conversion_count=int(row_dict["conversion_count"] or 0),
             )
         return result
 
@@ -300,7 +317,11 @@ class BigQueryConnector(WarehouseConnector):
 
         # Qualify table references with dataset when not already qualified
         def _qualify(table: str) -> str:
-            return table if "." in table else f"{self._project_id}.{self._dataset_id}.{table}"
+            return (
+                table
+                if "." in table
+                else f"{self._project_id}.{self._dataset_id}.{table}"
+            )
 
         qualified_event = _qualify(event_table)
         qualified_flag = _qualify(flag_event_table)
@@ -327,7 +348,9 @@ class BigQueryConnector(WarehouseConnector):
                 COUNT(*) AS sample_size,
                 AVG(metric_value) AS mean,
                 STDDEV(metric_value) AS std,
-                SUM(metric_value) AS sum
+                VARIANCE(metric_value) AS variance,
+                SUM(metric_value) AS sum,
+                SUM(CASE WHEN metric_value > 0 THEN 1 ELSE 0 END) AS conversion_count
             FROM user_metrics
             GROUP BY variant
         """
@@ -335,7 +358,9 @@ class BigQueryConnector(WarehouseConnector):
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("control_value", "STRING", control_value),
-                bigquery.ScalarQueryParameter("treatment_value", "STRING", treatment_value),
+                bigquery.ScalarQueryParameter(
+                    "treatment_value", "STRING", treatment_value
+                ),
                 bigquery.ScalarQueryParameter("flag_key", "STRING", flag_key),
             ]
         )
@@ -352,7 +377,9 @@ class BigQueryConnector(WarehouseConnector):
                 sample_size=int(row["sample_size"]),
                 mean=float(row["mean"] or 0),
                 std=float(row["std"] or 0),
+                variance=float(row["variance"] or 0),
                 sum=float(row["sum"] or 0),
+                conversion_count=int(row["conversion_count"] or 0),
             )
         return result
 
@@ -397,7 +424,9 @@ class RedshiftConnector(PostgresConnector):
         super().__init__(dsn=dsn)
 
 
-def get_connector(warehouse_type: str, connection_string: str, **kwargs: Any) -> WarehouseConnector:
+def get_connector(
+    warehouse_type: str, connection_string: str, **kwargs: Any
+) -> WarehouseConnector:
     """
     Factory: returns the right connector for the warehouse type.
 

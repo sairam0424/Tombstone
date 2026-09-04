@@ -24,12 +24,12 @@ class RunExperimentRequest(BaseModel):
     control_variant: str = "false"
     treatment_variant: str = "true"
     metric_name: str
-    metric_sql: str           # e.g. "CASE WHEN converted THEN 1 ELSE 0 END"
-    event_table: str          # warehouse table with user events
-    flag_event_table: str     # warehouse table recording flag evaluations
+    metric_sql: str  # e.g. "CASE WHEN converted THEN 1 ELSE 0 END"
+    event_table: str  # warehouse table with user events
+    flag_event_table: str  # warehouse table recording flag evaluations
     # Valid values: postgresql, postgres, redshift, snowflake, bigquery
     warehouse_type: str = "postgresql"
-    warehouse_dsn: str        # connection string for customer's warehouse
+    warehouse_dsn: str  # connection string for customer's warehouse
     stat_method: str = "bayesian"
     min_sample_size: int = 100
     control_covariate: list[float] = []
@@ -78,7 +78,11 @@ async def generate_ship_explanation(
         return ""
 
     lift_pct = relative_lift * 100
-    sig_label = "statistically significant" if is_significant else "not statistically significant"
+    sig_label = (
+        "statistically significant"
+        if is_significant
+        else "not statistically significant"
+    )
     prob_line = (
         f"The probability that treatment beats control is {probability_beats_control:.1%}."
         if probability_beats_control is not None
@@ -141,12 +145,17 @@ async def analyze_experiment(req: RunExperimentRequest):
         # WAREHOUSE_QUERY_TIMEOUT_S) is a subclass of Exception, so it's
         # already covered here — a 502 can now also mean "warehouse query
         # exceeded 30s" rather than a driver-level failure.
-        raise HTTPException(status_code=502, detail=f"Warehouse query failed: {e}") from e
+        raise HTTPException(
+            status_code=502, detail=f"Warehouse query failed: {e}"
+        ) from e
 
     control = metrics.get("control")
     treatment = metrics.get("treatment")
     if not control or not treatment:
-        raise HTTPException(status_code=422, detail="Insufficient data: one or both variants returned no rows")
+        raise HTTPException(
+            status_code=422,
+            detail="Insufficient data: one or both variants returned no rows",
+        )
 
     experiment = ExperimentDefinition(
         id=req.experiment_id,
@@ -157,10 +166,12 @@ async def analyze_experiment(req: RunExperimentRequest):
         min_sample_size=req.min_sample_size,
     )
 
-    control_data = [control.mean] * control.sample_size
-    treatment_data = [treatment.mean] * treatment.sample_size
-
     if req.stat_method == "cuped" and req.control_covariate and req.treatment_covariate:
+        # CUPED needs per-user outcome/covariate pairs to compute a
+        # covariance — not recoverable from warehouse aggregates alone, so
+        # this path still reconstructs a constant-value array per variant.
+        control_data = [control.mean] * control.sample_size
+        treatment_data = [treatment.mean] * treatment.sample_size
         result = analyzer.analyze_cuped(
             experiment=experiment,
             control_data=control_data,
@@ -170,16 +181,18 @@ async def analyze_experiment(req: RunExperimentRequest):
             metric_name=req.metric_name,
         )
     elif req.stat_method == "sequential":
+        control_data = [control.mean] * control.sample_size
+        treatment_data = [treatment.mean] * treatment.sample_size
         result = analyzer.analyze_sequential(
             control_data=control_data,
             treatment_data=treatment_data,
             metric_name=req.metric_name,
         )
     else:
-        result = analyzer.analyze(
+        result = analyzer.analyze_from_stats(
             experiment=experiment,
-            control_data=control_data,
-            treatment_data=treatment_data,
+            control=control,
+            treatment=treatment,
             metric_name=req.metric_name,
         )
 
@@ -191,7 +204,10 @@ async def analyze_experiment(req: RunExperimentRequest):
         recommendation=recommendation,
         relative_lift=result.relative_lift,
         is_significant=result.is_significant,
-        sample_sizes={"control": control.sample_size, "treatment": treatment.sample_size},
+        sample_sizes={
+            "control": control.sample_size,
+            "treatment": treatment.sample_size,
+        },
         metric_name=req.metric_name,
         probability_beats_control=result.probability_beats_control,
         anthropic_api_key=ai_key,
@@ -346,7 +362,9 @@ async def cuped_adjust(req: CupedAdjustRequest):
     with fewer observations.
     """
     if len(req.treatment) < 2 or len(req.control) < 2:
-        raise HTTPException(status_code=422, detail="Each variant requires at least 2 observations.")
+        raise HTTPException(
+            status_code=422, detail="Each variant requires at least 2 observations."
+        )
 
     if len(req.treatment) != len(req.pre_treatment):
         raise HTTPException(
