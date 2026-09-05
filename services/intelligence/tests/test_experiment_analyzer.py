@@ -7,6 +7,8 @@ that fabricated statistical significance (EXP-1).
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 from scipy import stats  # type: ignore[import]
@@ -14,6 +16,15 @@ from scipy import stats  # type: ignore[import]
 from app.experiments.analyzer import ExperimentAnalyzer
 from app.experiments.models import ExperimentDefinition
 from app.warehouse.connector import AggregatedMetric
+
+
+def _extract_e_value(metric_name: str) -> float:
+    """Pulls the numeric e-value out of the `_msprt|e=X.XXXX|...` suffix
+    analyze_sequential/analyze_sequential_from_stats encode into metric_name
+    (MetricResult has no dedicated field for it — see analyzer.py)."""
+    match = re.search(r"\|e=([0-9.eE+-]+)\|", metric_name)
+    assert match, f"no e= suffix found in metric_name: {metric_name}"
+    return float(match.group(1))
 
 
 def _make_experiment(
@@ -597,3 +608,126 @@ class TestSequentialFromStats:
 
         assert 0.0 <= result.control.conversion_rate <= 1.0
         assert 0.0 <= result.treatment.conversion_rate <= 1.0
+
+
+class TestMSPRTEValueGroundTruth:
+    """
+    EXP-2: the mSPRT e-value formula in both analyze_sequential and
+    analyze_sequential_from_stats used to subtract a spurious extra term,
+    `- delta**2 / (2 * se**2)`, that has no basis in the normal-normal
+    conjugate mixture-likelihood-ratio derivation. Every prior fidelity
+    test in TestSequentialFromStats only asserted the two methods agree
+    with EACH OTHER — both shared the identical bug, so neither test could
+    ever catch it. These tests assert against the independently-derived
+    closed-form ground truth instead:
+
+        e = sqrt(se^2 / (se^2+tau^2)) * exp(delta^2*tau^2 / (2*se^2*(se^2+tau^2)))
+
+    Because se shrinks as sample size grows, the old spurious term made
+    the e-value collapse toward non-significance with MORE data instead
+    of confirming a real effect — the opposite of mSPRT's intended
+    always-valid power. These fixed-point-mass fixtures give exact,
+    hand-computable delta/se/tau values (see the class body's own
+    arithmetic in the fix's commit message), rather than relying on
+    approximate real-world sampling.
+    """
+
+    @staticmethod
+    def _ground_truth_e_value(delta: float, se: float, tau: float) -> float:
+        return float(
+            np.sqrt(se**2 / (se**2 + tau**2))
+            * np.exp(delta**2 * tau**2 / (2 * se**2 * (se**2 + tau**2)))
+        )
+
+    def test_e_value_matches_closed_form_for_a_clear_true_effect(self):
+        # Two-point-mass fixtures give an EXACT population variance (ddof=0,
+        # matching np.var()'s default, which var_pooled uses): each group is
+        # a 50/50 split at +-10 around its own mean, so var = 10**2 = 100 for
+        # both, and n_c=n_t=800 makes se = sqrt(100*(1/800+1/800)) = 0.5
+        # exactly, with delta = 2.0 - 0.0 = 2.0 and tau at its default 1.0.
+        control_arr = [-10.0] * 400 + [10.0] * 400  # mean=0.0
+        treatment_arr = [-8.0] * 400 + [12.0] * 400  # mean=2.0
+
+        result = ExperimentAnalyzer().analyze_sequential(
+            control_arr, treatment_arr, "metric"
+        )
+
+        actual_e = _extract_e_value(result.metric_name)
+        expected_e = self._ground_truth_e_value(delta=2.0, se=0.5, tau=1.0)
+
+        assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
+        # A real, clear effect must actually be reported significant --
+        # the old bug's spurious term made this exact case e=0.090 (never
+        # significant) instead of the true ~269.15 (comfortably >= 1/0.05).
+        assert result.is_significant is True
+
+    def test_e_value_matches_closed_form_for_a_smaller_effect(self):
+        # Same two-point-mass construction, smaller delta: n_c=n_t=500,
+        # split at +-6 (var=6**2=36), se = sqrt(36*(1/500+1/500)) ~ 0.3795,
+        # delta=0.5.
+        control_arr = [-6.0] * 250 + [6.0] * 250  # mean=0.0
+        treatment_arr = [-5.5] * 250 + [6.5] * 250  # mean=0.5
+
+        result = ExperimentAnalyzer().analyze_sequential(
+            control_arr, treatment_arr, "metric"
+        )
+
+        se = np.sqrt(36 * (1 / 500 + 1 / 500))
+        actual_e = _extract_e_value(result.metric_name)
+        expected_e = self._ground_truth_e_value(delta=0.5, se=float(se), tau=1.0)
+
+        assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
+
+    def test_e_value_matches_closed_form_with_a_non_default_tau(self):
+        control_arr = [-10.0] * 400 + [10.0] * 400  # mean=0.0
+        treatment_arr = [-8.0] * 400 + [12.0] * 400  # mean=2.0, delta=2.0, se=0.5
+
+        result = ExperimentAnalyzer().analyze_sequential(
+            control_arr, treatment_arr, "metric", tau=2.0
+        )
+
+        actual_e = _extract_e_value(result.metric_name)
+        expected_e = self._ground_truth_e_value(delta=2.0, se=0.5, tau=2.0)
+
+        assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
+
+    def test_from_stats_variant_also_matches_closed_form(self):
+        """analyze_sequential_from_stats shares the identical formula and
+        the identical bug — proves the fix landed in both call sites, not
+        just the per-user-array method."""
+        n = 800
+        pop_variance = 100.0
+        # analyze_sequential_from_stats converts the warehouse's sample
+        # (ddof=1) variance back to population (ddof=0) via
+        # `variance * (n-1)/n` -- so to land on an exact pop_variance=100
+        # (matching the other tests' hand-computed delta=2.0/se=0.5
+        # fixture), the INPUT sample variance must be the inverse of that.
+        sample_variance = pop_variance * n / (n - 1)
+
+        control = AggregatedMetric(
+            variant="control",
+            sample_size=n,
+            mean=0.0,
+            std=10.0,
+            variance=sample_variance,
+            sum=0.0,
+            conversion_count=0,
+        )
+        treatment = AggregatedMetric(
+            variant="treatment",
+            sample_size=n,
+            mean=2.0,
+            std=10.0,
+            variance=sample_variance,
+            sum=1600.0,
+            conversion_count=0,
+        )
+
+        result = ExperimentAnalyzer().analyze_sequential_from_stats(
+            control, treatment, "metric"
+        )
+
+        actual_e = _extract_e_value(result.metric_name)
+        expected_e = self._ground_truth_e_value(delta=2.0, se=0.5, tau=1.0)
+
+        assert actual_e == pytest.approx(expected_e, rel=1e-3)
