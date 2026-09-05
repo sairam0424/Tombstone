@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -104,44 +105,66 @@ func main() {
 	dashboardURL := os.Getenv("DASHBOARD_URL")
 	slackNotifier := notify.NewSlackNotifier(os.Getenv("SLACK_WEBHOOK_URL"), logger)
 	agg := telemetry.NewAggregator(breaker, rdb, logger)
-	agg.OnTrip = func(flagKey, env string, errorRate float64) {
+	// EVAL-4: OnTrip's binary "trip -> immediately call the full kill
+	// switch" became a stepped ladder -- targetPct==0 still calls the SAME
+	// exec.Execute kill switch as before (identical audit/event semantics
+	// at the ladder's terminal step); every intermediate, non-zero step
+	// calls exec.SetRolloutPct against flag-api's new graduated
+	// rollback-step endpoint instead. Only on a SUCCESSFUL API call does
+	// Aggregator commit the new step/state to Redis (see Flush's own
+	// handlers) -- this callback's bool return is exactly that signal.
+	agg.OnRolloutChange = func(flagKey, env string, targetPct int, errorRate float64, phase circuit.RolloutPhase) bool {
 		ctx := context.Background()
-		execErr := exec.Execute(ctx, rollback.RollbackRequest{
-			FlagKey:     flagKey,
-			Environment: env,
-			Reason:      "circuit_breaker",
-			ErrorRate:   errorRate,
-			TriggeredBy: "circuit_breaker",
-		})
-		if execErr != nil {
-			logger.Error("auto-rollback execution failed", zap.Error(execErr),
-				zap.String("flag", flagKey), zap.String("env", env))
+		var err error
+		switch rolloutActionFor(targetPct, phase) {
+		case rolloutActionKill:
+			err = exec.Execute(ctx, rollback.RollbackRequest{
+				FlagKey:     flagKey,
+				Environment: env,
+				Reason:      "circuit_breaker",
+				ErrorRate:   errorRate,
+				TriggeredBy: "circuit_breaker",
+			})
+		case rolloutActionIncrease:
+			err = exec.IncreaseRolloutPct(ctx, flagKey, env, targetPct, "circuit_breaker")
+		case rolloutActionDecrease:
+			err = exec.SetRolloutPct(ctx, flagKey, env, targetPct, "circuit_breaker")
 		}
-		// Deliberately NOT notifying Slack when Execute failed: NotifyRollback's
-		// message says the flag "has been automatically disabled" -- sending
-		// that on failure would tell an on-call engineer the exact opposite of
-		// what happened. A rollback-FAILURE alert is a real, valuable, but
-		// SEPARATE notification (different message, arguably higher urgency)
-		// needing its own scope decision, not silently folded into this slice.
-		shouldNotify, rollbackURL := shouldNotifySlack(execErr, dashboardURL, flagKey)
-		if !shouldNotify {
-			return
+		if err != nil {
+			logger.Error("rollout change failed", zap.Error(err),
+				zap.String("flag", flagKey), zap.String("env", env),
+				zap.Int("target_pct", targetPct), zap.String("phase", string(phase)))
+			return false
 		}
-		// Dispatched off the hot rollback path, on its own bounded context:
-		// Aggregator.Flush processes every flag that tripped in the current
-		// window sequentially on one goroutine, so a blocking inline call
-		// here would stack up to NotifyRollback's own 10s http.Client timeout
-		// PER flag before Flush can even reach the next flag's real
-		// kill-switch call -- exactly the scenario auto-rollback exists to
-		// react to quickly. Matches internal/transparency/rekor.go's own
-		// async dispatch for the same class of best-effort, non-critical
-		// third-party call: an independent context that outlives this
-		// closure, not a deadline inherited from anything upstream.
-		go func() {
-			notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			slackNotifier.NotifyRollback(notifyCtx, flagKey, env, errorRate, "circuit_breaker", rollbackURL)
-		}()
+
+		// Only the ladder's terminal 0% step -- a genuine "flag now fully
+		// disabled" event, matching NotifyRollback's own message text --
+		// triggers a Slack alert. Richer per-phase alerting (trip-started,
+		// recovery-succeeded, recovery-reverted) is a real, valuable, but
+		// SEPARATE notification need (each its own message shape) that
+		// this slice deliberately leaves for a follow-up rather than
+		// expanding notify.go's surface here.
+		if phase == circuit.PhaseKilled {
+			shouldNotify, rollbackURL := shouldNotifySlack(nil, dashboardURL, flagKey)
+			if shouldNotify {
+				// Dispatched off the hot rollback path, on its own bounded
+				// context: Aggregator.Flush processes every flag that
+				// tripped in the current window sequentially on one
+				// goroutine, so a blocking inline call here would stack up
+				// to NotifyRollback's own 10s http.Client timeout PER flag
+				// before Flush can even reach the next flag's real
+				// kill-switch call -- exactly the scenario auto-rollback
+				// exists to react to quickly. Matches internal/
+				// transparency/rekor.go's own async dispatch for the same
+				// class of best-effort, non-critical third-party call.
+				go func() {
+					notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					slackNotifier.NotifyRollback(notifyCtx, flagKey, env, errorRate, "circuit_breaker", rollbackURL)
+				}()
+			}
+		}
+		return true
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -203,8 +226,19 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Manual rollback endpoint
+	// Manual rollback endpoint. EVAL-4: this was previously reachable by
+	// anyone who could reach the evaluator's port at all -- no auth
+	// whatsoever, unlike every mutating flag-api endpoint it ends up
+	// calling into. Guarded with the SAME shared secret (FLAG_API_TOKEN)
+	// evaluator already holds for its own outbound calls, reused here as
+	// the credential for triggering a rollback INBOUND -- not a general
+	// RBAC system, but a meaningful improvement over completely open for
+	// what this doc comment's own title calls a safety net of last resort.
 	r.Post("/api/v1/rollback", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthorizedManualRollback(r, flagAPIToken) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		var req rollback.RollbackRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -264,7 +298,69 @@ func main() {
 	_ = srv.Shutdown(shutCtx)
 }
 
-// shouldNotifySlack decides whether agg.OnTrip's auto-rollback should
+// rolloutAction identifies which flag-api endpoint (and direction
+// semantics) an OnRolloutChange call should use.
+type rolloutAction int
+
+const (
+	// rolloutActionKill calls the binary kill switch (Executor.Execute) --
+	// used for the ladder's terminal 0% step in EITHER direction (a full
+	// descent, or a HALF_OPEN probe reverting).
+	rolloutActionKill rolloutAction = iota
+	// rolloutActionIncrease calls the recovery-step endpoint
+	// (Executor.IncreaseRolloutPct) -- flag-api's rollback-step endpoint
+	// can never increase exposure by design, so every HALF_OPEN recovery
+	// step (which is by definition an increase) MUST go through this
+	// separate, mirror-image endpoint instead (fix for a HIGH finding from
+	// adversarial review of PR #221: routing every non-zero step through
+	// rollback-step meant the recovery ladder could never actually climb --
+	// every probe was unconditionally rejected).
+	rolloutActionIncrease
+	// rolloutActionDecrease calls the rollback-step endpoint
+	// (Executor.SetRolloutPct) -- every other non-zero step, i.e. the
+	// descent ladder's intermediate rungs.
+	rolloutActionDecrease
+)
+
+// rolloutActionFor decides the action for a given OnRolloutChange call.
+// Extracted as a pure function specifically so this dispatch -- the exact
+// logic that was wrong before the PR #221 fix above -- has direct unit
+// test coverage without needing a live flag-api server, matching this
+// file's own shouldNotifySlack/isAuthorizedManualRollback convention.
+func rolloutActionFor(targetPct int, phase circuit.RolloutPhase) rolloutAction {
+	switch {
+	case targetPct == 0:
+		return rolloutActionKill
+	case phase == circuit.PhaseRecovering || phase == circuit.PhaseRecovered:
+		return rolloutActionIncrease
+	default:
+		return rolloutActionDecrease
+	}
+}
+
+// isAuthorizedManualRollback requires a Bearer token matching expectedToken
+// (FLAG_API_TOKEN in production) -- see the route registration's own
+// comment for why this specific shared secret was reused rather than
+// building a dedicated credential. subtle.ConstantTimeCompare avoids a
+// timing side-channel a plain "==" comparison would have; ConstantTimeCompare
+// itself first checks length equality in non-constant time, which is fine
+// here since token length alone leaks nothing an attacker doesn't already
+// know (both this token and FLAG_API_TOKEN are operator-configured, not a
+// secret-length oracle over untrusted input).
+func isAuthorizedManualRollback(r *http.Request, expectedToken string) bool {
+	if expectedToken == "" {
+		return false
+	}
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+	token := strings.TrimPrefix(auth, prefix)
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1
+}
+
+// shouldNotifySlack decides whether agg.OnRolloutChange's auto-rollback should
 // trigger a Slack alert, and if so, builds the "View in Dashboard" URL.
 // Kept as a pure function, separate from OnTrip's actual IO
 // (exec.Execute/slackNotifier.NotifyRollback), specifically so this

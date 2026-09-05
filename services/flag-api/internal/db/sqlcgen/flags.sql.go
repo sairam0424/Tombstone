@@ -341,6 +341,45 @@ func (q *Queries) ListFlags(ctx context.Context, projectID string) ([]ListFlagsR
 	return items, nil
 }
 
+const recoveryFlagEnvironment = `-- name: RecoveryFlagEnvironment :execrows
+UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
+FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
+  AND (CASE WHEN fe.enabled THEN fe.rollout_pct ELSE 0 END) <= $7::integer
+`
+
+type RecoveryFlagEnvironmentParams struct {
+	Enabled            bool
+	RolloutPct         int32
+	UpdatedBy          string
+	Key                string
+	Environment        string
+	ProjectID          string
+	MaxCurrentExposure int32
+}
+
+// EVAL-4: RecoveryStep's atomic compare-and-swap write -- the mirror
+// image of RollbackFlagEnvironment above, for the HALF_OPEN recovery
+// ladder's ascent direction (10->25->50->100) instead of the rollback
+// ladder's descent. The guard is reversed (<=, not >=): only apply an
+// INCREASE if the live exposure hasn't already risen past this
+// request's own target (a more-aggressive concurrent recovery already
+// won), same TOCTOU-closing technique as the descent side.
+func (q *Queries) RecoveryFlagEnvironment(ctx context.Context, arg RecoveryFlagEnvironmentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recoveryFlagEnvironment,
+		arg.Enabled,
+		arg.RolloutPct,
+		arg.UpdatedBy,
+		arg.Key,
+		arg.Environment,
+		arg.ProjectID,
+		arg.MaxCurrentExposure,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const rollbackFlagEnvironment = `-- name: RollbackFlagEnvironment :execrows
 UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
 FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6

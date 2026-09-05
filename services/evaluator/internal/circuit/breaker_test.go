@@ -190,6 +190,200 @@ func TestTryTrip_FailsOpenOnRedisError(t *testing.T) {
 	}
 }
 
+// TestNextRollbackStep pins the EVAL-4 step-down ladder (100->50->25->0).
+func TestNextRollbackStep(t *testing.T) {
+	tests := []struct {
+		current  int
+		wantNext int
+		wantDone bool
+	}{
+		{100, 50, false},
+		{50, 25, false},
+		{25, 0, true},
+		{0, 0, true}, // already at the bottom -- stays done, doesn't go negative
+	}
+	for _, tc := range tests {
+		next, done := NextRollbackStep(tc.current)
+		if next != tc.wantNext || done != tc.wantDone {
+			t.Errorf("NextRollbackStep(%d) = (%d, %v), want (%d, %v)", tc.current, next, done, tc.wantNext, tc.wantDone)
+		}
+	}
+}
+
+// TestNextRecoveryStep pins the EVAL-4 step-up ladder (10->25->50->100).
+func TestNextRecoveryStep(t *testing.T) {
+	tests := []struct {
+		current       int
+		wantNext      int
+		wantRecovered bool
+	}{
+		{0, 10, false},
+		{10, 25, false},
+		{25, 50, false},
+		{50, 100, true},
+		{100, 100, true}, // already fully recovered -- stays recovered
+	}
+	for _, tc := range tests {
+		next, recovered := NextRecoveryStep(tc.current)
+		if next != tc.wantNext || recovered != tc.wantRecovered {
+			t.Errorf("NextRecoveryStep(%d) = (%d, %v), want (%d, %v)", tc.current, next, recovered, tc.wantNext, tc.wantRecovered)
+		}
+	}
+}
+
+// TestStepAndOpenedAtRoundTripThroughRedis verifies the two new Redis
+// accessor pairs behave correctly both when set and when absent -- GetStep's
+// found=false signals "unknown position" to its callers (aggregator.go's
+// handleOpen/handleHalfOpen), who each apply their own context-appropriate
+// safe default rather than GetStep baking one in (see GetStep's own doc
+// comment for why: a single baked-in default was wrong for one of the two
+// call sites, found by adversarial review of PR #221).
+func TestStepAndOpenedAtRoundTripThroughRedis(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if _, found := b.GetStep(ctx, "checkout", "production"); found {
+		t.Error("GetStep with nothing set: found = true, want false")
+	}
+	b.SetStep(ctx, "checkout", "production", 50)
+	if got, found := b.GetStep(ctx, "checkout", "production"); !found || got != 50 {
+		t.Errorf("GetStep after SetStep(50) = (%d, %v), want (50, true)", got, found)
+	}
+	// Environment-scoped, matching stateKey/tripLockKey's own convention.
+	if _, found := b.GetStep(ctx, "checkout", "staging"); found {
+		t.Error("GetStep for a different environment after production's SetStep: found = true, want false (unaffected)")
+	}
+
+	if _, ok := b.GetOpenedAt(ctx, "checkout", "production"); ok {
+		t.Error("GetOpenedAt with nothing set: ok = true, want false")
+	}
+	now := time.Unix(1_700_000_000, 0)
+	b.SetOpenedAt(ctx, "checkout", "production", now)
+	got, ok := b.GetOpenedAt(ctx, "checkout", "production")
+	if !ok || !got.Equal(now) {
+		t.Errorf("GetOpenedAt after SetOpenedAt = (%v, %v), want (%v, true)", got, ok, now)
+	}
+}
+
+// TestReleaseTrip verifies a released trip-lock lets an immediate
+// subsequent TryTrip win the claim again, rather than waiting out the full
+// tripLockTTL -- the fix for a real finding from adversarial review of
+// PR #219 (a failed SetState after a successful TryTrip previously stalled
+// every retry for up to 30s with no way to recover sooner).
+func TestReleaseTrip(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if !b.TryTrip(ctx, "checkout", "production") {
+		t.Fatal("first TryTrip should win the claim")
+	}
+	if b.TryTrip(ctx, "checkout", "production") {
+		t.Fatal("second TryTrip before release should be refused")
+	}
+	b.ReleaseTrip(ctx, "checkout", "production")
+	if !b.TryTrip(ctx, "checkout", "production") {
+		t.Error("TryTrip after ReleaseTrip should win the claim again immediately, not wait out tripLockTTL")
+	}
+}
+
+// TestTryStep_OnlyOneCallerWins mirrors TestTryTrip_OnlyOneCallerWins for
+// the LATER-transition dedup claim -- the regression test for a real
+// finding from adversarial review of PR #221: TryTrip only covers the
+// INITIAL trip, so two evaluator replicas racing the SAME step-down or
+// step-up transition had no equivalent claim before TryStep existed.
+func TestTryStep_OnlyOneCallerWins(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	const racers = 20
+	var wonCount atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			if b.TryStep(ctx, "checkout", "production", "down", 50) {
+				wonCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if wonCount.Load() != 1 {
+		t.Errorf("TryStep: %d of %d racing callers won the claim, want exactly 1", wonCount.Load(), racers)
+	}
+}
+
+// TestTryStep_IsScopedPerTargetStep verifies a claim for one target step
+// does not block a claim for a DIFFERENT target step on the same flag+env
+// -- e.g. a HALF_OPEN probe reverting to 0 must not be blocked by an
+// earlier, unrelated claim for a completely different rung.
+func TestTryStep_IsScopedPerTargetStep(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if !b.TryStep(ctx, "checkout", "production", "down", 50) {
+		t.Fatal("first TryStep(down, 50) should win the claim")
+	}
+	if !b.TryStep(ctx, "checkout", "production", "down", 25) {
+		t.Error("TryStep(down, 25) was blocked by the unrelated claim for target 50 -- claims must be scoped per target step")
+	}
+	if b.TryStep(ctx, "checkout", "production", "down", 50) {
+		t.Error("a second TryStep(down, 50) won the claim again -- SETNX should have refused it")
+	}
+}
+
+// TestTryStep_IsScopedPerDirection is the regression test for a real bug
+// caught empirically by cmd's TestEndToEndDescentThenRecoveryCycle:
+// rollbackSteps and recoverySteps overlap in value (25 and 50 each appear
+// in both ladders), so a claim keyed on the bare target step alone let the
+// descent's own claim for 25 spuriously block the recovery ladder's later,
+// entirely unrelated climb through the SAME number from the opposite
+// direction -- silently freezing the recovery ladder in place with no
+// error surfaced anywhere (TryStep simply returned false, and its callers
+// treat that as "some other replica already claimed this, nothing to do").
+func TestTryStep_IsScopedPerDirection(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if !b.TryStep(ctx, "checkout", "production", "down", 25) {
+		t.Fatal("first TryStep(down, 25) should win the claim")
+	}
+	if !b.TryStep(ctx, "checkout", "production", "up", 25) {
+		t.Error("TryStep(up, 25) was blocked by the unrelated claim for TryStep(down, 25) -- claims must be scoped per direction, not just target step")
+	}
+}
+
 // TestStateConstants verifies the state strings are exactly what the Redis keys expect.
 // If these change the gateway broadcaster will misparse channel names.
 func TestStateConstants(t *testing.T) {

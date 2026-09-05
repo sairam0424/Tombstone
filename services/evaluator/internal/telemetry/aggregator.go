@@ -24,14 +24,40 @@ type windowState struct {
 	total  int64
 }
 
-// Aggregator accumulates SDK telemetry and fires circuit breaker callbacks.
+// Aggregator accumulates SDK telemetry and drives the EVAL-4 circuit-breaker
+// state machine: CLOSED -> (trip) -> OPEN, stepping down 100->50->25->0 one
+// step per tick, then (after ObservationWindow's cooldown) -> HALF_OPEN,
+// stepping up 10->25->50->100 with per-step verification, reverting to
+// OPEN/0% immediately if a probe step's own error rate is still bad.
+//
+// The state-machine advancement above only runs for a flag+environment
+// that has fresh telemetry in the CURRENT tick's snapshot -- a flag+env
+// with zero events this tick is left exactly where it was. This is a
+// deliberate scope choice, not an oversight: Record() is called from every
+// real evaluate() call regardless of the flag's current enabled/rollout
+// state (see @tombstone/core's TombstoneClient), so as long as the
+// application keeps checking the flag on real traffic, telemetry keeps
+// flowing even while it's disabled -- exactly the traffic needed to
+// eventually verify a HALF_OPEN recovery probe. The only case this
+// doesn't cover is a flag+env whose check site stops receiving traffic
+// entirely while tripped, in which case never auto-advancing (staying at
+// whatever percentage was last set) is the safer default anyway -- no
+// signal to guess from.
 type Aggregator struct {
 	mu      sync.Mutex
 	windows map[string]*windowState // flag_key:environment -> counts
 	breaker *circuit.Breaker
 	rdb     *redis.Client
 	logger  *zap.Logger
-	OnTrip  func(flagKey, environment string, errorRate float64) // called when circuit trips
+	// OnRolloutChange fires whenever Flush decides to change a flag's
+	// rollout percentage. The callback is responsible for actually
+	// applying targetPct (e.g. via rollback.Executor.Execute for
+	// targetPct==0, SetRolloutPct otherwise) and returns whether it
+	// succeeded -- Flush only commits the new step/state to Redis on
+	// success, so a failed API call is retried next tick from the SAME
+	// position rather than silently advancing the ladder past a step that
+	// was never actually applied.
+	OnRolloutChange func(flagKey, environment string, targetPct int, errorRate float64, phase circuit.RolloutPhase) bool
 }
 
 func NewAggregator(breaker *circuit.Breaker, rdb *redis.Client, logger *zap.Logger) *Aggregator {
@@ -57,9 +83,16 @@ func (a *Aggregator) Record(event TelemetryEvent) {
 	a.mu.Unlock()
 }
 
-// Flush evaluates all current windows, checks circuit breaker thresholds,
-// fires OnTrip callbacks, then resets counters.
-// Should be called on a ticker (every 10 seconds).
+// stateTTL bounds circuit state (CLOSED/OPEN/HALF_OPEN) in Redis -- a
+// crashed evaluator that never resumes ticking self-heals to CLOSED after
+// this long rather than staying OPEN forever. It bounds only this
+// coordination layer's own bookkeeping, not the actual flag state
+// flag-api persists (which stays wherever it was last set regardless).
+const stateTTL = 10 * time.Minute
+
+// Flush evaluates all current windows and advances the EVAL-4 circuit-
+// breaker state machine for each, then resets counters. Should be called
+// on a ticker (every 10 seconds).
 func (a *Aggregator) Flush(ctx context.Context) {
 	a.mu.Lock()
 	snapshot := make(map[string]*windowState, len(a.windows))
@@ -79,29 +112,210 @@ func (a *Aggregator) Flush(ctx context.Context) {
 			TotalCount: w.total,
 		}
 
-		state := a.breaker.GetState(ctx, flagKey, env)
-		if state == circuit.StateClosed && a.breaker.ShouldTrip(win) {
-			// Multiple evaluator replicas share this Redis-backed breaker
-			// state and each run their own Flush loop, so GetState-then-
-			// ShouldTrip above is a check-then-act race: without this claim,
-			// two replicas racing the same window would both observe
-			// StateClosed, both decide to trip, and both fire OnTrip for
-			// what is actually one underlying trip event (duplicate
-			// rollback executions and, since EVAL-2, duplicate Slack
-			// alerts). TryTrip's SETNX makes only one of them proceed.
-			if !a.breaker.TryTrip(ctx, flagKey, env) {
-				continue
-			}
-			a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, 10*time.Minute)
-			if a.OnTrip != nil {
-				errorRate := a.breaker.ErrorRate(win)
-				a.logger.Warn("circuit breaker tripped",
-					zap.String("flag", flagKey),
-					zap.String("env", env),
-					zap.Float64("error_rate", errorRate))
-				a.OnTrip(flagKey, env, errorRate)
-			}
+		switch a.breaker.GetState(ctx, flagKey, env) {
+		case circuit.StateClosed:
+			a.handleClosed(ctx, flagKey, env, win)
+		case circuit.StateOpen:
+			a.handleOpen(ctx, flagKey, env, win)
+		case circuit.StateHalfOpen:
+			a.handleHalfOpen(ctx, flagKey, env, win)
 		}
+	}
+}
+
+// handleClosed decides whether to trip: ShouldTrip gates on this window's
+// own error rate/volume; TryTrip's SETNX then deduplicates the trip across
+// racing evaluator replicas that all observed the same StateClosed window
+// (multiple replicas share this Redis-backed state, so GetState-then-
+// ShouldTrip is a check-then-act race without it -- see TryTrip's own doc
+// comment). Only on a SUCCESSFUL first step-down does this commit
+// StateOpen -- a failed callback releases the trip claim so the next tick
+// retries promptly instead of waiting out the full trip-lock TTL blind
+// (found by adversarial review of PR #219).
+func (a *Aggregator) handleClosed(ctx context.Context, flagKey, env string, win circuit.Window) {
+	if !a.breaker.ShouldTrip(win) {
+		return
+	}
+	if !a.breaker.TryTrip(ctx, flagKey, env) {
+		return
+	}
+	errorRate := a.breaker.ErrorRate(win)
+	target, _ := circuit.NextRollbackStep(100)
+	a.logger.Warn("circuit breaker tripped",
+		zap.String("flag", flagKey), zap.String("env", env),
+		zap.Float64("error_rate", errorRate), zap.Int("target_pct", target))
+	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, circuit.PhaseTripped) {
+		a.breaker.ReleaseTrip(ctx, flagKey, env)
+		a.logger.Error("initial rollback step failed; trip claim released for a prompt retry",
+			zap.String("flag", flagKey), zap.String("env", env))
+		return
+	}
+	a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+	a.breaker.SetStep(ctx, flagKey, env, target)
+}
+
+// handleOpen drives BOTH halves of the OPEN state: while step>0, an
+// unconditional, deterministic descent (this is the safety-critical kill
+// path -- a single good-looking window mid-descent is not a reason to stop
+// cutting exposure); once step reaches 0, waiting out ObservationWindow's
+// cooldown before attempting a HALF_OPEN recovery probe.
+func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win circuit.Window) {
+	currentStep, found := a.breaker.GetStep(ctx, flagKey, env)
+	if !found {
+		// Lost track of ladder position while OPEN (transient Redis error,
+		// individual-key eviction, or an unusually long incident outliving
+		// stepTTL) -- assume the SAFEST case, already fully killed, never
+		// "nothing stepped down yet": the latter could re-request an
+		// INCREASE that flag-api's own CAS guard would reject, stalling
+		// the ladder here forever with no self-healing path (found by
+		// adversarial review of PR #221).
+		currentStep = 0
+	}
+	errorRate := a.breaker.ErrorRate(win)
+
+	if currentStep > 0 {
+		target, done := circuit.NextRollbackStep(currentStep)
+		// Dedup across racing evaluator replicas -- TryTrip above only
+		// covers the INITIAL trip; every later step needs its own claim
+		// (found by adversarial review of PR #221).
+		if !a.breaker.TryStep(ctx, flagKey, env, "down", target) {
+			return
+		}
+		phase := circuit.PhaseStepped
+		if done {
+			phase = circuit.PhaseKilled
+		}
+		if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, phase) {
+			// Refresh the state TTL even on failure -- a persistently
+			// unreachable flag-api (or any other repeated OnRolloutChange
+			// failure) must not let stateTTL expire out from under a
+			// still-active incident just because this tick's own attempt
+			// didn't advance anything (found by adversarial review of
+			// PR #221's own fix for a different finding: the TTL-refresh
+			// fix originally covered only the two documented hold
+			// branches, not this and the other three failure-retry paths).
+			a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+			a.logger.Error("rollback step failed; will retry next tick",
+				zap.String("flag", flagKey), zap.String("env", env), zap.Int("target_pct", target))
+			return
+		}
+		a.breaker.SetStep(ctx, flagKey, env, target)
+		if done {
+			a.breaker.SetOpenedAt(ctx, flagKey, env, time.Now())
+		}
+		return
+	}
+
+	openedAt, ok := a.breaker.GetOpenedAt(ctx, flagKey, env)
+	if !ok {
+		// Reached 0% before this bookkeeping key existed, or it expired --
+		// start the cooldown clock now rather than assuming it already
+		// elapsed (which would let a HALF_OPEN probe fire immediately).
+		a.breaker.SetOpenedAt(ctx, flagKey, env, time.Now())
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+		return
+	}
+	if time.Since(openedAt) < a.breaker.ObservationWindow {
+		// Still waiting out the cooldown -- refresh the state key's TTL on
+		// every tick that observes this flag+env, so a long ObservationWindow
+		// (an operator-configurable field) can never let stateTTL (fixed at
+		// 10 minutes, set once at the CLOSED->OPEN transition) expire out
+		// from under an incident that's still actively being held open,
+		// silently reverting GetState's own fail-safe default to CLOSED
+		// mid-cooldown (found by adversarial review of PR #221).
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+		return
+	}
+	target, _ := circuit.NextRecoveryStep(0)
+	if !a.breaker.TryStep(ctx, flagKey, env, "up", target) {
+		return
+	}
+	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, circuit.PhaseRecovering) {
+		// See the identical comment on the descent-continuation failure
+		// branch above -- still OPEN (the transition to HALF_OPEN never
+		// committed), so refresh THAT state.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+		a.logger.Error("HALF_OPEN recovery probe failed to start; will retry next tick",
+			zap.String("flag", flagKey), zap.String("env", env))
+		return
+	}
+	a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
+	a.breaker.SetStep(ctx, flagKey, env, target)
+}
+
+// handleHalfOpen is where "post-rollback error-rate verification" actually
+// happens: ShouldTrip on THIS probe step's own window decides whether to
+// keep climbing the recovery ladder, revert immediately, or -- when there
+// isn't yet enough traffic at this probe level to trust either way (below
+// Breaker.MinRequests) -- hold at the current step and wait for more data
+// rather than guessing.
+func (a *Aggregator) handleHalfOpen(ctx context.Context, flagKey, env string, win circuit.Window) {
+	currentStep, found := a.breaker.GetStep(ctx, flagKey, env)
+	if !found {
+		// Lost track of probe position while HALF_OPEN -- resume from the
+		// recovery ladder's FLOOR (NextRecoveryStep(0) == 10), never its
+		// ceiling: assuming more progress than may have actually happened
+		// could skip real verification rungs entirely (found by
+		// adversarial review of PR #221).
+		currentStep = 0
+	}
+	errorRate := a.breaker.ErrorRate(win)
+
+	if a.breaker.ShouldTrip(win) {
+		if !a.breaker.TryStep(ctx, flagKey, env, "down", 0) {
+			return
+		}
+		if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, 0, errorRate, circuit.PhaseRevertedDuringRecovery) {
+			// Still HALF_OPEN (the revert to OPEN never committed) --
+			// refresh THAT state's TTL. See handleOpen's identical
+			// comment on its own failure-retry branches.
+			a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
+			a.logger.Error("failed to revert a failed recovery probe; will retry next tick",
+				zap.String("flag", flagKey), zap.String("env", env))
+			return
+		}
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
+		a.breaker.SetStep(ctx, flagKey, env, 0)
+		a.breaker.SetOpenedAt(ctx, flagKey, env, time.Now())
+		return
+	}
+
+	if win.TotalCount < a.breaker.MinRequests {
+		// Not enough traffic at this probe level to trust it either way --
+		// refresh the state TTL (see handleOpen's identical comment on the
+		// cooldown-wait branch) so a low-traffic flag can hold HALF_OPEN
+		// indefinitely without stateTTL expiring out from under it.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
+		return
+	}
+
+	target, recovered := circuit.NextRecoveryStep(currentStep)
+	if !a.breaker.TryStep(ctx, flagKey, env, "up", target) {
+		return
+	}
+	phase := circuit.PhaseRecovering
+	if recovered {
+		phase = circuit.PhaseRecovered
+	}
+	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, phase) {
+		// Still HALF_OPEN (the climb never committed) -- refresh THAT
+		// state's TTL. See handleOpen's identical comment on its own
+		// failure-retry branches.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
+		a.logger.Error("recovery step failed; will retry next tick",
+			zap.String("flag", flagKey), zap.String("env", env), zap.Int("target_pct", target))
+		return
+	}
+	// Recorded even when recovered (about to transition to CLOSED, where
+	// the step ladder no longer applies): leaving GetStep at its
+	// second-to-last value instead of the actual final one applied is
+	// currently harmless (handleClosed's own next trip always starts a
+	// fresh NextRollbackStep(100), never reading GetStep), but it's stale,
+	// misleading bookkeeping a future consumer (observability, a refactor)
+	// could trip over (found by adversarial review of PR #221).
+	a.breaker.SetStep(ctx, flagKey, env, target)
+	if recovered {
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateClosed, stateTTL)
 	}
 }
 
