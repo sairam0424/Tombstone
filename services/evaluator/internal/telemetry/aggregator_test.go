@@ -115,53 +115,51 @@ func TestFlush_ResetsWindowAfterFlush(t *testing.T) {
 	}
 }
 
-// TestFlush_OnRolloutChangeFiresExactlyOnceAcrossRacingReplicas is the
-// regression test for a real finding from adversarial review of PR #219:
-// two Aggregator instances (simulating two evaluator replicas -- "State is
+// TestFlush_HandleClosedRespectsAnAlreadyClaimedTrip is the regression
+// test for a real finding from adversarial review of PR #219: two
+// Aggregator instances (simulating two evaluator replicas -- "State is
 // stored in Redis so multiple evaluator instances share it", per
 // circuit.Breaker's own doc comment) racing Flush() for the same
-// flag+environment both observe StateClosed and both decide ShouldTrip.
-// Without circuit.Breaker.TryTrip's atomic SETNX claim, both would fire
-// OnRolloutChange for what is actually one underlying trip event.
-func TestFlush_OnRolloutChangeFiresExactlyOnceAcrossRacingReplicas(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
-	}
-	defer mr.Close()
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	breaker := circuit.NewBreaker(rdb, zap.NewNop())
-
-	var mu sync.Mutex
-	tripCount := 0
-	onChange := func(flagKey, env string, targetPct int, errorRate float64, phase circuit.RolloutPhase) bool {
-		mu.Lock()
-		tripCount++
-		mu.Unlock()
-		return true
-	}
-
-	// Two independent Aggregators sharing one breaker/Redis, exactly as
-	// two evaluator replica processes would.
-	agg1 := NewAggregator(breaker, rdb, zap.NewNop())
-	agg1.OnRolloutChange = onChange
-	agg2 := NewAggregator(breaker, rdb, zap.NewNop())
-	agg2.OnRolloutChange = onChange
-
-	recordErrorBurst(agg1, "checkout", "production", 100, 10)
-	recordErrorBurst(agg2, "checkout", "production", 100, 10)
-
+// flag+environment could both observe StateClosed and both decide
+// ShouldTrip. Without circuit.Breaker.TryTrip's atomic SETNX claim, both
+// would fire OnRolloutChange for what is actually one underlying trip
+// event.
+//
+// This drives the scenario deterministically (pre-claiming via TryTrip
+// directly) rather than via two real goroutines, for the same reason
+// TestFlush_HandleOpenRespectsAnAlreadyClaimedStep does -- an earlier
+// version of this test launched agg1/agg2.Flush() concurrently and
+// asserted tripCount==1, which flakes under genuine (not forced)
+// goroutine scheduling: whichever replica's Flush completes first
+// (TryTrip, callback, SetState, SetStep -- all the way through) can finish
+// before the other even starts, so the "loser" reads POST-transition
+// state (StateOpen, step=50) and calls handleOpen instead of
+// handleClosed, legitimately advancing to a DIFFERENT, later step (25)
+// rather than colliding on the SAME initial trip -- observed for real in
+// CI on this exact test. TestTryTrip_OnlyOneCallerWins (circuit package)
+// separately proves TryTrip's own SETNX claim is atomic under a true
+// concurrent race with 20 racers.
+func TestFlush_HandleClosedRespectsAnAlreadyClaimedTrip(t *testing.T) {
+	agg, _, breaker := newTestAggregator(t)
 	ctx := context.Background()
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); agg1.Flush(ctx) }()
-	go func() { defer wg.Done(); agg2.Flush(ctx) }()
-	wg.Wait()
 
-	mu.Lock()
-	defer mu.Unlock()
-	if tripCount != 1 {
-		t.Errorf("OnRolloutChange fired %d times across 2 racing replicas for one trip event, want exactly 1", tripCount)
+	// Simulates another replica having already won the initial trip claim
+	// moments earlier.
+	if !breaker.TryTrip(ctx, "checkout", "production") {
+		t.Fatal("test setup: pre-claim should have succeeded on a fresh key")
+	}
+
+	fired := false
+	agg.OnRolloutChange = func(string, string, int, float64, circuit.RolloutPhase) bool { fired = true; return true }
+
+	recordErrorBurst(agg, "checkout", "production", 100, 10)
+	agg.Flush(ctx)
+
+	if fired {
+		t.Error("OnRolloutChange fired despite the initial trip already being claimed -- handleClosed must respect TryTrip's result")
+	}
+	if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateClosed {
+		t.Errorf("state = %q, want unchanged CLOSED -- a respected claim must not advance local state either", got)
 	}
 }
 
