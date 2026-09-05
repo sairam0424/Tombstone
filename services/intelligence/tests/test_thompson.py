@@ -103,6 +103,44 @@ class TestSeededDeterminism:
 
         assert rec.confidence == pytest.approx(expected_confidence)
         assert rec.sampled_success_rate == pytest.approx(expected_mean)
+        # Direct assertion on the posterior itself (found by adversarial
+        # review of PR #217): without this, a wrong default prior or a
+        # broken update() arithmetic would fail this test with a confusing
+        # numeric SAMPLE mismatch rather than a clear, directly-attributable
+        # posterior-value assertion.
+        posterior = engine.get_posterior("checkout-v2", "production")
+        assert posterior is not None
+        assert posterior.alpha == 190.0
+        assert posterior.beta == 2.0
+
+    @pytest.mark.asyncio
+    async def test_sequential_recommend_calls_advance_the_shared_rng_state(self):
+        """
+        The core EXP-2 claim this class exists to prove: self._rng is
+        created ONCE in __init__ and persists/advances across calls,
+        rather than recommend() reconstructing a fresh Generator (from a
+        stored seed or otherwise) every time it runs. Every other test in
+        this class calls recommend() at most once per engine instance, so
+        none of them actually exercise this -- found by adversarial review
+        of PR #217. Two successive calls on the SAME seeded engine (same
+        flag, so the posterior doesn't change between them either) must
+        draw DIFFERENT samples, proving the generator's internal state
+        genuinely advanced.
+        """
+        engine = ThompsonSamplingEngine(seed=42)
+        await _seed_posterior(
+            engine,
+            "checkout-v2",
+            "production",
+            successes=30,
+            failures=30,
+            current_rollout_pct=10,
+        )
+
+        first = engine.recommend("checkout-v2", "production")
+        second = engine.recommend("checkout-v2", "production")
+
+        assert first.sampled_success_rate != second.sampled_success_rate
 
     @pytest.mark.asyncio
     async def test_no_seed_still_produces_a_valid_recommendation(self):
@@ -145,6 +183,75 @@ class TestSeededDeterminism:
             )
 
         assert len(set(results)) > 1
+
+
+class TestUpdate:
+    """
+    update()'s conjugate accumulation (alpha += successes, beta +=
+    failures, total_observations += successes + failures) and its
+    ValueError guard had zero test coverage of any kind before this class
+    -- found by adversarial review of PR #217. The new _seed_posterior
+    helper (used by every test above) calls update() directly, so these
+    gaps were exercised implicitly but never actually verified.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_successive_updates_accumulate_not_overwrite(self):
+        engine = ThompsonSamplingEngine(seed=1)
+
+        await _seed_posterior(
+            engine,
+            "checkout-v2",
+            "production",
+            successes=20,
+            failures=5,
+            current_rollout_pct=10,
+        )
+        await _seed_posterior(
+            engine,
+            "checkout-v2",
+            "production",
+            successes=15,
+            failures=3,
+            current_rollout_pct=25,
+        )
+
+        posterior = engine.get_posterior("checkout-v2", "production")
+        assert posterior is not None
+        # Default prior alpha=beta=1.0, then two updates on top of it --
+        # a bug that overwrote rather than accumulated would land on
+        # alpha=16.0/beta=4.0 (only the second update) instead.
+        assert posterior.alpha == 1.0 + 20 + 15
+        assert posterior.beta == 1.0 + 5 + 3
+        assert posterior.total_observations == (20 + 5) + (15 + 3)
+        # current_rollout_pct reflects the MOST RECENT update, not the first.
+        assert posterior.current_rollout_pct == 25
+
+    @pytest.mark.asyncio
+    async def test_negative_successes_raises_value_error(self):
+        engine = ThompsonSamplingEngine(seed=1)
+
+        with pytest.raises(ValueError):
+            await engine.update(
+                flag_key="checkout-v2",
+                environment="production",
+                successes=-1,
+                failures=0,
+                current_rollout_pct=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_negative_failures_raises_value_error(self):
+        engine = ThompsonSamplingEngine(seed=1)
+
+        with pytest.raises(ValueError):
+            await engine.update(
+                flag_key="checkout-v2",
+                environment="production",
+                successes=0,
+                failures=-1,
+                current_rollout_pct=10,
+            )
 
 
 class TestRecommendGateLogic:
