@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
+	"github.com/tombstone/evaluator/internal/notify"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
 )
@@ -88,16 +90,41 @@ func main() {
 
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
+	// EVAL-2: rollback.Execute has always disabled the flag and published a
+	// Redis event on trip, but never notified anyone -- a human on-call
+	// previously learned about an auto-rollback only by noticing the
+	// dashboard or audit log, not proactively. dashboardURL/slackNotifier
+	// are both safe to construct even when unset/empty: an empty
+	// dashboardURL just produces a relative "/flags/{key}" link, and
+	// NotifyRollback itself no-ops (logged, not fatal) when
+	// SLACK_WEBHOOK_URL is unset -- matches this service's existing
+	// posture of treating third-party notification config as optional,
+	// unlike REDIS_URL/FLAG_API_URL/FLAG_API_TOKEN above.
+	dashboardURL := os.Getenv("DASHBOARD_URL")
+	slackNotifier := notify.NewSlackNotifier(os.Getenv("SLACK_WEBHOOK_URL"), logger)
 	agg := telemetry.NewAggregator(breaker, rdb, logger)
 	agg.OnTrip = func(flagKey, env string, errorRate float64) {
 		ctx := context.Background()
-		_ = exec.Execute(ctx, rollback.RollbackRequest{
+		if err := exec.Execute(ctx, rollback.RollbackRequest{
 			FlagKey:     flagKey,
 			Environment: env,
 			Reason:      "circuit_breaker",
 			ErrorRate:   errorRate,
 			TriggeredBy: "circuit_breaker",
-		})
+		}); err != nil {
+			logger.Error("auto-rollback execution failed", zap.Error(err),
+				zap.String("flag", flagKey), zap.String("env", env))
+			// Deliberately NOT notifying Slack here: NotifyRollback's message
+			// says the flag "has been automatically disabled" -- sending that
+			// when Execute just failed would tell an on-call engineer the
+			// exact opposite of what happened. A rollback-FAILURE alert is a
+			// real, valuable, but SEPARATE notification (different message,
+			// arguably higher urgency) needing its own scope decision, not
+			// silently folded into this slice.
+			return
+		}
+		rollbackURL := fmt.Sprintf("%s/flags/%s", dashboardURL, url.PathEscape(flagKey))
+		slackNotifier.NotifyRollback(ctx, flagKey, env, errorRate, "circuit_breaker", rollbackURL)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
