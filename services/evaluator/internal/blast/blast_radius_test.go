@@ -9,8 +9,8 @@ import (
 func classifyBlastRadius(trafficPct float64, depCount int, errorDelta float64) string {
 	c := &Calculator{}
 	r := &BlastRadiusResult{
-		TrafficPctAffected:   trafficPct,
-		DependentFlagsCount:  depCount,
+		TrafficPctAffected:  trafficPct,
+		DependentFlagsCount: depCount,
 		HistoricalErrorRate: errorDelta,
 	}
 	return string(c.scoreRisk(r))
@@ -84,8 +84,8 @@ func TestScoreRisk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &BlastRadiusResult{
-				TrafficPctAffected:   tc.trafficPct,
-				DependentFlagsCount:  tc.dependentFlags,
+				TrafficPctAffected:  tc.trafficPct,
+				DependentFlagsCount: tc.dependentFlags,
 				HistoricalErrorRate: tc.errorDelta,
 			}
 			got := c.scoreRisk(r)
@@ -94,6 +94,33 @@ func TestScoreRisk(t *testing.T) {
 					tc.trafficPct, tc.dependentFlags, tc.errorDelta, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestScoreRisk_ColdStartAtHighTrafficIsBlocked closes a gap found by
+// adversarial review: before this fix, scoreRisk's BLOCKED gate never
+// consulted Confidence, so a cold-start flag (zero real telemetry,
+// HistoricalErrorRate left at its zero value -- see Confidence's own doc
+// comment) pushed to >=50% traffic read as exactly as safe as a flag with a
+// real, VERIFIED low error rate, even though it has strictly less evidence
+// to trust. A cold-start flag at LOW traffic must NOT be blocked purely for
+// being untested -- there is no traffic-scale reason to gate a small canary.
+func TestScoreRisk_ColdStartAtHighTrafficIsBlocked(t *testing.T) {
+	c := &Calculator{}
+
+	blocked := c.scoreRisk(&BlastRadiusResult{TrafficPctAffected: 100, HistoricalErrorRate: 0, Confidence: "LOW"})
+	if blocked != RiskBlocked {
+		t.Errorf("cold-start flag at 100%% traffic: scoreRisk = %s, want BLOCKED", blocked)
+	}
+
+	notBlocked := c.scoreRisk(&BlastRadiusResult{TrafficPctAffected: 5, HistoricalErrorRate: 0, Confidence: "LOW"})
+	if notBlocked == RiskBlocked {
+		t.Error("cold-start flag at 5% traffic should not be BLOCKED purely for being untested at low exposure")
+	}
+
+	verifiedHealthy := c.scoreRisk(&BlastRadiusResult{TrafficPctAffected: 100, HistoricalErrorRate: 0, Confidence: "HIGH"})
+	if verifiedHealthy == RiskBlocked {
+		t.Error("a flag with a real, measured 0%% error rate (HIGH confidence) must not be BLOCKED")
 	}
 }
 
@@ -117,8 +144,8 @@ func TestRiskScoreConstants(t *testing.T) {
 func TestJustificationRequiredOnBlocked(t *testing.T) {
 	c := &Calculator{}
 	r := &BlastRadiusResult{
-		TrafficPctAffected:   60,
-		DependentFlagsCount:  0,
+		TrafficPctAffected:  60,
+		DependentFlagsCount: 0,
 		HistoricalErrorRate: 0.10,
 	}
 	r.RiskScore = c.scoreRisk(r)

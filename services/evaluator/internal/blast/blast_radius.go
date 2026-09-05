@@ -100,7 +100,27 @@ type Calculator struct {
 	httpClient *http.Client
 
 	cacheMu sync.Mutex
-	cache   map[string]cachedResult
+	cache   map[blastRadiusCacheKey]cachedResult
+}
+
+// blastRadiusCacheKey is a struct, not a delimiter-joined string, so that
+// no combination of flagKey/environment/projectID (all client-controlled
+// query params HandleBlastRadius passes through unvalidated) can ever
+// collide into the SAME cache key by embedding the delimiter itself --
+// e.g. flag_key=foo&environment=bar%00baz decoding to a NUL byte inside
+// environment. A joined-string key had exactly this bug (found by
+// adversarial review of this PR): "foo"+"\x00"+"bar\x00baz" and
+// "foo\x00bar"+"\x00"+"baz" produced the identical string, so two
+// unrelated flag+environment pairs could read back each other's cached
+// risk score. The same bug class was already found and fixed for Redis
+// keys via circuit.EscapeKeyComponent (see breaker.go's INT-2/EVAL-2
+// comments) -- a struct key sidesteps it entirely here instead of adding a
+// second escaping scheme.
+type blastRadiusCacheKey struct {
+	flagKey     string
+	environment string
+	projectID   string
+	rolloutPct  int
 }
 
 type cachedResult struct {
@@ -114,13 +134,13 @@ func NewCalculator(db *sql.DB, rdb *redis.Client, flagAPIURL string) *Calculator
 		rdb:        rdb,
 		flagAPIURL: flagAPIURL,
 		httpClient: &http.Client{},
-		cache:      make(map[string]cachedResult),
+		cache:      make(map[blastRadiusCacheKey]cachedResult),
 	}
 }
 
 // Compute calculates the blast radius for enabling/changing a flag.
 func (c *Calculator) Compute(ctx context.Context, flagKey, environment, projectID string, newRolloutPct int) (*BlastRadiusResult, error) {
-	cacheKey := flagKey + "\x00" + environment + "\x00" + projectID + "\x00" + fmt.Sprint(newRolloutPct)
+	cacheKey := blastRadiusCacheKey{flagKey: flagKey, environment: environment, projectID: projectID, rolloutPct: newRolloutPct}
 	if cached := c.cacheGet(cacheKey); cached != nil {
 		return cached, nil
 	}
@@ -246,7 +266,7 @@ func (c *Calculator) dependentFlags(ctx context.Context, flagKey, projectID stri
 // load-bearing eviction policy.
 const cacheSweepThreshold = 1000
 
-func (c *Calculator) cacheGet(key string) *BlastRadiusResult {
+func (c *Calculator) cacheGet(key blastRadiusCacheKey) *BlastRadiusResult {
 	c.cacheMu.Lock()
 	defer c.cacheMu.Unlock()
 	entry, ok := c.cache[key]
@@ -256,7 +276,7 @@ func (c *Calculator) cacheGet(key string) *BlastRadiusResult {
 	return entry.result
 }
 
-func (c *Calculator) cacheSet(key string, result *BlastRadiusResult) {
+func (c *Calculator) cacheSet(key blastRadiusCacheKey, result *BlastRadiusResult) {
 	c.cacheMu.Lock()
 	defer c.cacheMu.Unlock()
 	if len(c.cache) >= cacheSweepThreshold {
@@ -271,7 +291,16 @@ func (c *Calculator) cacheSet(key string, result *BlastRadiusResult) {
 }
 
 func (c *Calculator) scoreRisk(r *BlastRadiusResult) RiskScore {
-	if r.TrafficPctAffected >= 50 && r.HistoricalErrorRate > 0.05 {
+	// Confidence == "LOW" means HistoricalErrorRate is 0 because it was
+	// never measured, not because it was measured and found healthy (see
+	// Confidence's own doc comment). Without this OR, a brand-new,
+	// never-evaluated flag pushed straight to >=50% traffic reads as
+	// exactly as safe as a flag with a real, verified-low error rate --
+	// strictly LESS evidence of safety producing the SAME (non-BLOCKED)
+	// outcome as MORE evidence (found by adversarial review of this PR).
+	// Unknown risk at high exposure is treated as seriously as measured-bad
+	// risk: both require a human-typed justification before proceeding.
+	if r.TrafficPctAffected >= 50 && (r.HistoricalErrorRate > 0.05 || r.Confidence == "LOW") {
 		return RiskBlocked
 	}
 	if r.TrafficPctAffected >= 25 || r.DependentFlagsCount > 5 {

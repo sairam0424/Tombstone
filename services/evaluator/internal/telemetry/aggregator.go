@@ -185,10 +185,20 @@ func (a *Aggregator) persistTelemetryBucket(ctx context.Context, flagKey, env st
 // services/evaluator/internal/api/v1/slo.go's countCircuitTrips has always
 // read circuit:{flagKey}:{env}:trips:{unix_hour} but nothing ever wrote
 // it. Unlike persistTelemetryBucket, this IS a plain integer, so a real
-// atomic INCR is both possible and used -- multiple replicas each
-// tripping (deduplicated by TryTrip so only one actually should, but this
-// counter itself doesn't depend on that guarantee for correctness) still
-// count accurately under concurrency.
+// atomic INCR is both possible and used. This is only called after TryTrip's
+// SETNX claim succeeds, so it inherits TryTrip's own disclosed fail-open
+// behavior on a Redis error (see TryTrip's doc comment): under an actual
+// Redis outage, >=2 replicas can each win a claim for what is really one
+// trip, and this counter double-increments for it. Before this PR, that
+// same race only produced a duplicate rollback call and a duplicate Slack
+// alert -- both self-evidently duplicate to a human. This counter has no
+// such tell and no correction mechanism (slo.go's countCircuitTrips/
+// buildHistory expose it as the authoritative per-hour trip count), so an
+// inflated value here looks exactly like two real trips happened (found
+// by adversarial review of this PR). Not fixed here: doing so would mean
+// revisiting TryTrip's own fail-open posture, which PR #219 deliberately
+// chose because refusing to trip at all during a Redis outage is strictly
+// worse than an occasional overcounted metric.
 func (a *Aggregator) recordCircuitTrip(ctx context.Context, flagKey, env string) {
 	unixHour := time.Now().UTC().Truncate(time.Hour).Unix() / 3600
 	key := fmt.Sprintf("circuit:%s:%s:trips:%d",
