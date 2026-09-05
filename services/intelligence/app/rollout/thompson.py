@@ -77,8 +77,22 @@ class ThompsonSamplingEngine:
     design decision if ever pursued.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: int | None = None) -> None:
+        """
+        seed: EXP-2 -- forwarded to numpy's Generator so recommend()'s
+        Thompson Sample draws are reproducible. Production leaves this
+        None (the real, unseeded randomness the algorithm is supposed to
+        use); tests/debugging pass a fixed int to get a deterministic
+        confidence/sampled_success_rate for a given posterior instead of a
+        value that changes every run and can only be asserted with a
+        loose tolerance. Before this, recommend() constructed a brand-new
+        `np.random.default_rng()` on every single call, with no seed
+        parameter anywhere on this class -- confirmed via a repo-wide grep
+        this was the only unseeded RNG call site in app/ with no test file
+        of any kind exercising it.
+        """
         self._posteriors: dict[str, FlagPosterior] = {}
+        self._rng: np.random.Generator = np.random.default_rng(seed)
         self._redis: Any | None = (
             None  # set via set_redis_client or load_all_from_redis
         )
@@ -289,9 +303,9 @@ class ThompsonSamplingEngine:
 
         posterior = self._posteriors[key]
 
-        # Thompson Sample
-        rng = np.random.default_rng()
-        samples = rng.beta(posterior.alpha, posterior.beta, size=_SAMPLE_DRAWS)
+        # Thompson Sample -- self._rng (EXP-2), not a fresh default_rng()
+        # per call, so a seeded engine gives reproducible draws.
+        samples = self._rng.beta(posterior.alpha, posterior.beta, size=_SAMPLE_DRAWS)
         sampled_success_rate: float = float(np.mean(samples))
         confidence: float = float(np.mean(samples > (1.0 - _ERROR_THRESHOLD)))
 
