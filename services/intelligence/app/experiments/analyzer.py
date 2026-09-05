@@ -317,12 +317,24 @@ class ExperimentAnalyzer:
             delta = mean_t - mean_c
             se = np.sqrt(var_pooled * (1 / n_c + 1 / n_t))
 
-            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
+            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior.
+            # e = P(delta | H1 mixture) / P(delta | H0) where, under the normal-
+            # normal conjugate mixture, the marginal of delta under H1 is
+            # N(0, se^2+tau^2) and under H0 is N(0, se^2). Working through that
+            # ratio in closed form gives log(e) = 0.5*log(v/tau^2) + m^2/(2*v)
+            # exactly (verified independently by direct substitution of v/m
+            # below, and cross-checked against Monte Carlo integration) -- a
+            # third term, `- delta**2/(2*se**2)`, used to be subtracted here
+            # with no basis in that derivation. Since se shrinks as sample size
+            # grows, that erroneous factor (exp(-delta^2/(2*se^2))) got MORE
+            # punishing with more data, making true positives converge toward
+            # non-significance instead of confirming them -- the opposite of
+            # mSPRT's intended always-valid power (found by adversarial review
+            # of EXP-2; e.g. delta=2.0, se=0.5, tau=1.0 gave e=0.090, never
+            # significant, when the true e-value is 269.15).
             v = 1 / (1 / tau**2 + 1 / se**2)
             m = v * delta / se**2
-            log_ratio = (
-                0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
-            )
+            log_ratio = 0.5 * np.log(v / tau**2) + m**2 / (2 * v)
             e_value = float(np.exp(log_ratio))
 
             is_sig = e_value >= (1 / alpha)
@@ -438,12 +450,13 @@ class ExperimentAnalyzer:
             delta = mean_t - mean_c
             se = np.sqrt(var_pooled * (1 / n_c + 1 / n_t))
 
-            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
+            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior.
+            # See analyze_sequential's identical formula above for the full
+            # derivation note -- this method mirrors it exactly (same bug,
+            # same fix, per this method's own docstring below).
             v = 1 / (1 / tau**2 + 1 / se**2)
             m = v * delta / se**2
-            log_ratio = (
-                0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
-            )
+            log_ratio = 0.5 * np.log(v / tau**2) + m**2 / (2 * v)
             e_value = float(np.exp(log_ratio))
 
             is_sig = e_value >= (1 / alpha)
