@@ -68,6 +68,7 @@ func main() {
 	}
 
 	h := hub.NewHub(logger)
+	h.SetRedis(rdb) // GW-2: enables ReplayOrSnapshot's catch-up-on-reconnect
 	broadcaster := hub.NewBroadcaster(rdb, h, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())

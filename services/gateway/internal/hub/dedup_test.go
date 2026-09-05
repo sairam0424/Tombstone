@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -136,5 +137,27 @@ func TestEventDeduper_ConcurrentClaimsAreRaceSafe(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Errorf("expected exactly 1 of %d concurrent claims of the identical event to succeed, got %d", goroutines, wins)
+	}
+}
+
+// TestFlagEventFieldCountGuardsDedupKeySafety pins FlagEvent's field count.
+// eventDeduper.seen is a map[FlagEvent]time.Time -- claim() keys on the
+// FULL struct value, so any field added to FlagEvent becomes part of that
+// key automatically. Hub.Broadcast's doc comment (hub.go) explains why the
+// real Redis Stream message ID GW-2 introduced is threaded through as a
+// SEPARATE parameter rather than a FlagEvent field: the same logical event
+// arrives via both pub/sub (no ID) and streams (a real ID), and if the ID
+// lived on FlagEvent those two deliveries would hash as different map
+// keys, defeating dedup entirely and reintroducing GW-1's double-delivery
+// bug. Adversarial review of PR #211 found no test anywhere in this suite
+// would catch that regression. This one does: if it starts failing because
+// you added a field to FlagEvent, stop and confirm the new field has the
+// SAME value on every delivery path for the same logical event (pub/sub,
+// streams, DLQ reclaim) before bumping `want` -- don't bump it reflexively.
+func TestFlagEventFieldCountGuardsDedupKeySafety(t *testing.T) {
+	const want = 6
+	got := reflect.TypeOf(FlagEvent{}).NumField()
+	if got != want {
+		t.Fatalf("FlagEvent has %d fields, expected %d -- read this test's doc comment before adjusting `want`", got, want)
 	}
 }

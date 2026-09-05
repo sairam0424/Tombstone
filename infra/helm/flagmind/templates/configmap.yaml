@@ -10,3 +10,15 @@ data:
   POSTGRES_HOST: {{ .Values.postgresql.host | quote }}
   POSTGRES_PORT: {{ .Values.postgresql.port | quote }}
   POSTGRES_DB: {{ .Values.postgresql.database | quote }}
+  # INT-4: without these two, services/intelligence's main.py defaults
+  # CONSUMER_BACKEND to "kafka" -- a topic (tombstone.flag.changed) with
+  # zero producers anywhere in the Go services, silently no-op'ing every
+  # flag-change-driven intelligence feature (embedding sync, dep-graph
+  # updates, flag-archival anomaly-state eviction) on this Helm/OKE
+  # deployment path, found by adversarial review of PR #210. Only
+  # intelligence's own Python code reads either variable (confirmed via a
+  # repo-wide grep -- no Go service references CONSUMER_BACKEND at all),
+  # so adding them to this shared ConfigMap is safe for every other
+  # deployment that also mounts it.
+  CONSUMER_BACKEND: "redis"
+  TOMBSTONE_ENVIRONMENTS: "production"

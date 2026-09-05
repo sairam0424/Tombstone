@@ -51,6 +51,7 @@ class IncidentCorrelator:
         incident_id: str,
         affected_service: str,
         incident_start_unix: int,
+        project_id: str,
         window_minutes: int = WINDOW_MINUTES,
     ) -> list[dict]:
         pool = await self._get_pool()
@@ -64,11 +65,13 @@ class IncidentCorrelator:
             FROM audit_log
             WHERE event_type IN ('flag_environment_updated', 'kill_switch_activated',
                                   'flag_environment_updated')
-              AND EXTRACT(EPOCH FROM created_at) >= $1
-              AND EXTRACT(EPOCH FROM created_at) <= $2
+              AND project_id = $1
+              AND EXTRACT(EPOCH FROM created_at) >= $2
+              AND EXTRACT(EPOCH FROM created_at) <= $3
             ORDER BY created_at DESC
             LIMIT 20
             """,
+            project_id,
             float(window_start),
             float(incident_start_unix),
         )

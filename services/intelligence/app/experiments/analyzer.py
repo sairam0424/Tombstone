@@ -2,8 +2,11 @@ import numpy as np
 from scipy import stats  # type: ignore[import]
 
 from app.experiments.models import (
-    ExperimentDefinition, MetricResult, VariantStats,
+    ExperimentDefinition,
+    MetricResult,
+    VariantStats,
 )
+from app.warehouse.connector import AggregatedMetric
 
 
 class ExperimentAnalyzer:
@@ -29,19 +32,25 @@ class ExperimentAnalyzer:
             sample_size=len(control_arr),
             mean=float(np.mean(control_arr)) if len(control_arr) > 0 else 0.0,
             std=float(np.std(control_arr)) if len(control_arr) > 0 else 0.0,
-            conversion_rate=float(np.mean(control_arr > 0)) if len(control_arr) > 0 else 0.0,
+            conversion_rate=float(np.mean(control_arr > 0))
+            if len(control_arr) > 0
+            else 0.0,
         )
         treatment_stats = VariantStats(
             variant="treatment",
             sample_size=len(treatment_arr),
             mean=float(np.mean(treatment_arr)) if len(treatment_arr) > 0 else 0.0,
             std=float(np.std(treatment_arr)) if len(treatment_arr) > 0 else 0.0,
-            conversion_rate=float(np.mean(treatment_arr > 0)) if len(treatment_arr) > 0 else 0.0,
+            conversion_rate=float(np.mean(treatment_arr > 0))
+            if len(treatment_arr) > 0
+            else 0.0,
         )
 
         relative_lift = 0.0
         if control_stats.mean != 0:
-            relative_lift = (treatment_stats.mean - control_stats.mean) / abs(control_stats.mean)
+            relative_lift = (treatment_stats.mean - control_stats.mean) / abs(
+                control_stats.mean
+            )
 
         p_value: float | None = None
         prob_beats_control: float | None = None
@@ -77,7 +86,152 @@ class ExperimentAnalyzer:
             treatment=treatment_stats,
             relative_lift=round(relative_lift, 4),
             p_value=round(float(p_value), 4) if p_value is not None else None,
-            probability_beats_control=round(prob_beats_control, 4) if prob_beats_control is not None else None,
+            probability_beats_control=round(prob_beats_control, 4)
+            if prob_beats_control is not None
+            else None,
+            is_significant=is_significant,
+        )
+
+    def analyze_from_stats(
+        self,
+        experiment: ExperimentDefinition,
+        control: AggregatedMetric,
+        treatment: AggregatedMetric,
+        metric_name: str,
+    ) -> MetricResult:
+        """
+        Frequentist/Bayesian analysis directly from warehouse-computed
+        sufficient statistics (n, mean, variance, conversion_count) — no
+        per-user array reconstruction.
+
+        `analyze()`'s `[mean] * sample_size` reconstruction pattern collapses
+        every user in a variant to one identical value, which fabricates a
+        near-zero within-variant variance: a t-test on that reconstructed
+        array reports p ~ 0.0 for ANY nonzero mean difference, and the
+        Bayesian branch's `np.sum(arr > 0)` conversion count becomes
+        `sample_size` for any positive mean, corrupting the conversion rate
+        to 100%. This method uses the warehouse's own aggregates instead, so
+        both statistics are computed from the real per-variant spread.
+
+        CUPED is NOT covered here, and never will be through this
+        warehouse-aggregate path — it needs real per-user outcome/covariate
+        pairs to compute a covariance, which cannot be reconstructed from
+        marginal aggregates (EXP-1 PR 3/3 formally closed this: CUPED is
+        scoped exclusively to POST /api/v1/experiments/cuped-adjust, which
+        takes raw per-user arrays directly; `stat_method="cuped"` is
+        rejected by /analyze rather than silently computing a fabricated
+        result from a `[mean] * sample_size` reconstruction). mSPRT has its
+        own sufficient-stats method,
+        `analyze_sequential_from_stats()` — it no longer routes through
+        `analyze_sequential()`'s reconstruction either.
+        """
+        # conversion_count must satisfy 0 <= conversion_count <= sample_size to be a
+        # meaningful count of "successes" out of the same trials sample_size counts.
+        # The real warehouse connectors always uphold this (both are computed in the
+        # same GROUP BY over the same rows), but analyze_from_stats() also accepts a
+        # bare AggregatedMetric directly -- clamp defensively so a future/alternate
+        # connector or data anomaly can't feed a negative Beta shape parameter into
+        # np.random.beta() (an uncaught ValueError -> unhandled 500) or report a
+        # conversion_rate outside [0, 1].
+        control_conv = max(0, min(control.conversion_count, control.sample_size))
+        treat_conv = max(0, min(treatment.conversion_count, treatment.sample_size))
+
+        # Sample variance (ddof=1, matching the warehouse's VARIANCE() aggregate and
+        # what ttest_ind_from_stats expects for its own test statistic).
+        control_std = float(np.sqrt(control.variance)) if control.variance > 0 else 0.0
+        treatment_std = (
+            float(np.sqrt(treatment.variance)) if treatment.variance > 0 else 0.0
+        )
+        # VariantStats.std is reported in analyze()'s population (ddof=0) convention
+        # for consistency across stat_method branches -- converted from the sample
+        # value above, not recomputed, since the warehouse never returns raw rows.
+        control_std_reported = (
+            control_std * np.sqrt((control.sample_size - 1) / control.sample_size)
+            if control.sample_size > 1
+            else 0.0
+        )
+        treatment_std_reported = (
+            treatment_std * np.sqrt((treatment.sample_size - 1) / treatment.sample_size)
+            if treatment.sample_size > 1
+            else 0.0
+        )
+
+        control_stats = VariantStats(
+            variant="control",
+            sample_size=control.sample_size,
+            mean=control.mean,
+            std=float(control_std_reported),
+            conversion_rate=(control_conv / control.sample_size)
+            if control.sample_size > 0
+            else 0.0,
+        )
+        treatment_stats = VariantStats(
+            variant="treatment",
+            sample_size=treatment.sample_size,
+            mean=treatment.mean,
+            std=float(treatment_std_reported),
+            conversion_rate=(treat_conv / treatment.sample_size)
+            if treatment.sample_size > 0
+            else 0.0,
+        )
+
+        relative_lift = 0.0
+        if control_stats.mean != 0:
+            relative_lift = (treatment_stats.mean - control_stats.mean) / abs(
+                control_stats.mean
+            )
+
+        p_value: float | None = None
+        prob_beats_control: float | None = None
+        is_significant = False
+
+        if experiment.stat_method == "frequentist":
+            # Both variances collapsing to exactly zero (e.g. a fixed per-plan price,
+            # or a variant that's uniformly 100%/0% on a binary metric) makes the
+            # t-test's within-group-variance prerequisite genuinely unmet, not just
+            # "very significant" -- ttest_ind_from_stats would otherwise return
+            # t=inf/p=0.0 with no warning, overstating confidence in a deterministic
+            # (not statistically inferred) difference. Treat as non-computable,
+            # matching how insufficient sample size is already reported below.
+            has_variance = control_std > 0 or treatment_std > 0
+            if control.sample_size >= 2 and treatment.sample_size >= 2 and has_variance:
+                _, p_value = stats.ttest_ind_from_stats(
+                    mean1=treatment.mean,
+                    std1=treatment_std,
+                    nobs1=treatment.sample_size,
+                    mean2=control.mean,
+                    std2=control_std,
+                    nobs2=control.sample_size,
+                )
+                is_significant = float(p_value) < (1 - 0.95)
+
+        elif experiment.stat_method == "bayesian":
+            # Beta-Binomial conjugate for conversion metrics, using the warehouse's
+            # real (clamped) conversion_count — not a reconstructed array.
+            control_total = control.sample_size
+            treat_total = treatment.sample_size
+
+            # Monte Carlo sampling (10k samples)
+            alpha_c, beta_c = 1 + control_conv, 1 + (control_total - control_conv)
+            alpha_t, beta_t = 1 + treat_conv, 1 + (treat_total - treat_conv)
+            samples_c = np.random.beta(alpha_c, beta_c, 10_000)
+            samples_t = np.random.beta(alpha_t, beta_t, 10_000)
+            prob_beats_control = float(np.mean(samples_t > samples_c))
+            is_significant = prob_beats_control > 0.95
+
+        min_n = experiment.min_sample_size
+        if control_stats.sample_size < min_n or treatment_stats.sample_size < min_n:
+            is_significant = False  # insufficient data
+
+        return MetricResult(
+            metric_name=metric_name,
+            control=control_stats,
+            treatment=treatment_stats,
+            relative_lift=round(relative_lift, 4),
+            p_value=round(float(p_value), 4) if p_value is not None else None,
+            probability_beats_control=round(prob_beats_control, 4)
+            if prob_beats_control is not None
+            else None,
             is_significant=is_significant,
         )
 
@@ -104,52 +258,6 @@ class ExperimentAnalyzer:
 
         return "CONTINUE"
 
-    def analyze_cuped(
-        self,
-        experiment: ExperimentDefinition,
-        control_data: list[float],
-        treatment_data: list[float],
-        control_covariate: list[float],
-        treatment_covariate: list[float],
-        metric_name: str,
-    ) -> MetricResult:
-        """
-        CUPED: Controlled-experiment Using Pre-Experiment Data.
-        Regresses out pre-experiment covariate to reduce variance.
-        Typical variance reduction: 30-50% -> shorter experiment runtime needed.
-
-        Steps:
-        1. Compute theta = cov(outcome, covariate) / var(covariate) on pooled data
-        2. Adjust: outcome_adj = outcome - theta * (covariate - mean(covariate))
-        3. Run standard t-test on adjusted outcomes
-        """
-        control_arr = np.array(control_data)
-        treatment_arr = np.array(treatment_data)
-        cov_c = np.array(control_covariate)
-        cov_t = np.array(treatment_covariate)
-
-        all_outcomes = np.concatenate([control_arr, treatment_arr])
-        all_covariates = np.concatenate([cov_c, cov_t])
-
-        if np.var(all_covariates) == 0:
-            return self.analyze(experiment, control_data, treatment_data, metric_name)
-
-        theta = np.cov(all_outcomes, all_covariates)[0][1] / np.var(all_covariates)
-        global_cov_mean = np.mean(all_covariates)
-
-        adjusted_control = control_arr - theta * (cov_c - global_cov_mean)
-        adjusted_treatment = treatment_arr - theta * (cov_t - global_cov_mean)
-
-        variance_reduction = (
-            1 - (np.var(adjusted_control) / np.var(control_arr))
-            if np.var(control_arr) > 0
-            else 0
-        )
-
-        result = self.analyze(experiment, list(adjusted_control), list(adjusted_treatment), metric_name)
-        result.metric_name = f"{metric_name}_cuped (variance_reduction={variance_reduction:.1%})"
-        return result
-
     def analyze_sequential(
         self,
         control_data: list[float],
@@ -172,14 +280,26 @@ class ExperimentAnalyzer:
 
         Returns e_value and ci bounds as extra fields embedded in metric_name
         for downstream display.
+
+        No production callers as of EXP-1 PR2 — `/analyze`'s "sequential"
+        path now calls `analyze_sequential_from_stats()` instead. Retained
+        as the ground-truth reference implementation for that method's
+        fidelity tests (see TestSequentialFromStats in
+        test_experiment_analyzer.py) and to document, via its own output,
+        the exact reconstruction bug that method fixes.
         """
         c = np.array(control_data)
         t = np.array(treatment_data)
 
         if len(c) < 2 or len(t) < 2:
             from app.experiments.models import VariantStats, MetricResult
-            cs = VariantStats("control", len(c), float(np.mean(c)) if len(c) else 0, 0, None)
-            ts = VariantStats("treatment", len(t), float(np.mean(t)) if len(t) else 0, 0, None)
+
+            cs = VariantStats(
+                "control", len(c), float(np.mean(c)) if len(c) else 0, 0, None
+            )
+            ts = VariantStats(
+                "treatment", len(t), float(np.mean(t)) if len(t) else 0, 0, None
+            )
             return MetricResult(metric_name, cs, ts, 0.0, None, None, False)
 
         n_c, n_t = len(c), len(t)
@@ -200,7 +320,9 @@ class ExperimentAnalyzer:
             # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
             v = 1 / (1 / tau**2 + 1 / se**2)
             m = v * delta / se**2
-            log_ratio = 0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
+            log_ratio = (
+                0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
+            )
             e_value = float(np.exp(log_ratio))
 
             is_sig = e_value >= (1 / alpha)
@@ -211,13 +333,17 @@ class ExperimentAnalyzer:
             # rho is a tuning parameter for the boundary shape; rho=alpha gives tight bounds.
             rho = alpha
             log_term = np.log(2.0 / (alpha * rho)) if alpha * rho > 0 else 0.0
-            margin = np.sqrt(2.0 * var_pooled * (1.0 / n_c + 1.0 / n_t) * log_term) if log_term > 0 else se * 1.96
+            margin = (
+                np.sqrt(2.0 * var_pooled * (1.0 / n_c + 1.0 / n_t) * log_term)
+                if log_term > 0
+                else se * 1.96
+            )
             ci_lower = float(delta - margin)
             ci_upper = float(delta + margin)
 
             # Futility check: CI entirely within practical equivalence zone (+/-1% of control)
             equiv_zone = abs(mean_c) * 0.01 if mean_c != 0 else 0.001
-            futile = (abs(ci_upper) <= equiv_zone and abs(ci_lower) <= equiv_zone)
+            futile = abs(ci_upper) <= equiv_zone and abs(ci_lower) <= equiv_zone
 
             if is_sig:
                 recommendation = "stop_significant"
@@ -227,11 +353,137 @@ class ExperimentAnalyzer:
                 recommendation = "continue"
 
         from app.experiments.models import VariantStats, MetricResult
-        cs = VariantStats("control", n_c, float(mean_c), float(np.std(c)), float(np.mean(c > 0)))
-        ts = VariantStats("treatment", n_t, float(mean_t), float(np.std(t)), float(np.mean(t > 0)))
+
+        cs = VariantStats(
+            "control", n_c, float(mean_c), float(np.std(c)), float(np.mean(c > 0))
+        )
+        ts = VariantStats(
+            "treatment", n_t, float(mean_t), float(np.std(t)), float(np.mean(t > 0))
+        )
 
         # Encode e-value, CI, and recommendation into metric_name suffix for API consumers
         # (MetricResult dataclass has no dedicated fields for these; keep model stable)
+        suffix = (
+            f"_msprt|e={e_value:.4f}"
+            f"|ci=[{ci_lower:.4f},{ci_upper:.4f}]"
+            f"|{recommendation}"
+        )
+        return MetricResult(
+            metric_name=f"{metric_name}{suffix}",
+            control=cs,
+            treatment=ts,
+            relative_lift=round(relative_lift, 4),
+            p_value=None,
+            probability_beats_control=None,
+            is_significant=is_sig,
+        )
+
+    def analyze_sequential_from_stats(
+        self,
+        control: AggregatedMetric,
+        treatment: AggregatedMetric,
+        metric_name: str,
+        alpha: float = 0.05,
+        tau: float = 1.0,
+    ) -> MetricResult:
+        """
+        mSPRT sequential testing directly from warehouse-computed sufficient
+        statistics (n, mean, variance, conversion_count) — no per-user array
+        reconstruction. See `analyze_from_stats()` for the general bug this
+        fixes.
+
+        For mSPRT specifically, the reconstructed `[mean] * sample_size`
+        array makes `var_pooled` exactly 0.0 (every element identical), which
+        already forces this method's own pre-existing `var_pooled == 0`
+        guard to report `is_significant=False`/`recommendation="continue"`
+        unconditionally — so mSPRT via `/analyze`'s warehouse-aggregate path
+        has never been able to report anything OTHER than "continue",
+        regardless of the real e-value, for as long as it's existed. Feeding
+        the warehouse's real per-variant variance restores that guard to
+        only fire for genuinely zero-variance data (its actual intent).
+        """
+        n_c, n_t = control.sample_size, treatment.sample_size
+
+        if n_c < 2 or n_t < 2:
+            cs = VariantStats(
+                "control", n_c, float(control.mean) if n_c else 0.0, 0.0, None
+            )
+            ts = VariantStats(
+                "treatment", n_t, float(treatment.mean) if n_t else 0.0, 0.0, None
+            )
+            return MetricResult(metric_name, cs, ts, 0.0, None, None, False)
+
+        mean_c, mean_t = control.mean, treatment.mean
+        control_conv = max(0, min(control.conversion_count, n_c))
+        treat_conv = max(0, min(treatment.conversion_count, n_t))
+
+        # Convert the warehouse's sample variance (ddof=1, from SQL VARIANCE())
+        # to population variance (ddof=0), matching analyze_sequential()'s own
+        # bare np.var() convention exactly, so var_pooled means the same thing
+        # here as it always has for this method.
+        var_c_pop = control.variance * (n_c - 1) / n_c if control.variance > 0 else 0.0
+        var_t_pop = (
+            treatment.variance * (n_t - 1) / n_t if treatment.variance > 0 else 0.0
+        )
+        var_pooled = (var_c_pop * n_c + var_t_pop * n_t) / (n_c + n_t)
+
+        if var_pooled == 0:
+            relative_lift = 0.0
+            is_sig = False
+            e_value = 1.0
+            ci_lower = 0.0
+            ci_upper = 0.0
+            recommendation = "continue"
+        else:
+            delta = mean_t - mean_c
+            se = np.sqrt(var_pooled * (1 / n_c + 1 / n_t))
+
+            # mSPRT e-value: mixture likelihood ratio with normal(0, tau^2) prior
+            v = 1 / (1 / tau**2 + 1 / se**2)
+            m = v * delta / se**2
+            log_ratio = (
+                0.5 * np.log(v / tau**2) + m**2 / (2 * v) - delta**2 / (2 * se**2)
+            )
+            e_value = float(np.exp(log_ratio))
+
+            is_sig = e_value >= (1 / alpha)
+            relative_lift = float(delta / abs(mean_c)) if mean_c != 0 else 0.0
+
+            rho = alpha
+            log_term = np.log(2.0 / (alpha * rho)) if alpha * rho > 0 else 0.0
+            margin = (
+                np.sqrt(2.0 * var_pooled * (1.0 / n_c + 1.0 / n_t) * log_term)
+                if log_term > 0
+                else se * 1.96
+            )
+            ci_lower = float(delta - margin)
+            ci_upper = float(delta + margin)
+
+            equiv_zone = abs(mean_c) * 0.01 if mean_c != 0 else 0.001
+            futile = abs(ci_upper) <= equiv_zone and abs(ci_lower) <= equiv_zone
+
+            if is_sig:
+                recommendation = "stop_significant"
+            elif futile:
+                recommendation = "stop_futility"
+            else:
+                recommendation = "continue"
+
+        cs = VariantStats(
+            "control",
+            n_c,
+            float(mean_c),
+            float(np.sqrt(var_c_pop)),
+            control_conv / n_c,
+        )
+        ts = VariantStats(
+            "treatment",
+            n_t,
+            float(mean_t),
+            float(np.sqrt(var_t_pop)),
+            treat_conv / n_t,
+        )
+
         suffix = (
             f"_msprt|e={e_value:.4f}"
             f"|ci=[{ci_lower:.4f},{ci_upper:.4f}]"
@@ -267,6 +519,7 @@ class ExperimentAnalyzer:
             Minimum sample size per variant
         """
         from scipy import stats
+
         p1 = baseline_conversion
         p2 = p1 * (1 + minimum_detectable_effect)
         z_alpha = stats.norm.ppf(1 - alpha / 2)

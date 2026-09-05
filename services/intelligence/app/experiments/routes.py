@@ -24,16 +24,18 @@ class RunExperimentRequest(BaseModel):
     control_variant: str = "false"
     treatment_variant: str = "true"
     metric_name: str
-    metric_sql: str           # e.g. "CASE WHEN converted THEN 1 ELSE 0 END"
-    event_table: str          # warehouse table with user events
-    flag_event_table: str     # warehouse table recording flag evaluations
+    metric_sql: str  # e.g. "CASE WHEN converted THEN 1 ELSE 0 END"
+    event_table: str  # warehouse table with user events
+    flag_event_table: str  # warehouse table recording flag evaluations
     # Valid values: postgresql, postgres, redshift, snowflake, bigquery
     warehouse_type: str = "postgresql"
-    warehouse_dsn: str        # connection string for customer's warehouse
+    warehouse_dsn: str  # connection string for customer's warehouse
+    # Valid values: bayesian, frequentist, sequential -- NOT "cuped": CUPED
+    # needs real per-user outcome/covariate pairs, which this warehouse-
+    # aggregate endpoint cannot provide; see POST /cuped-adjust instead
+    # (EXP-1 PR 3/3).
     stat_method: str = "bayesian"
     min_sample_size: int = 100
-    control_covariate: list[float] = []
-    treatment_covariate: list[float] = []
     min_detectable_effect: float = 0.05
 
     @field_validator("warehouse_type")
@@ -78,7 +80,11 @@ async def generate_ship_explanation(
         return ""
 
     lift_pct = relative_lift * 100
-    sig_label = "statistically significant" if is_significant else "not statistically significant"
+    sig_label = (
+        "statistically significant"
+        if is_significant
+        else "not statistically significant"
+    )
     prob_line = (
         f"The probability that treatment beats control is {probability_beats_control:.1%}."
         if probability_beats_control is not None
@@ -126,6 +132,35 @@ async def analyze_experiment(req: RunExperimentRequest):
     Run warehouse-native experiment analysis.
     Aggregation happens in the customer's warehouse — no raw data sent to Tombstone.
     """
+    if req.stat_method == "cuped":
+        # EXP-1 PR 3/3 formally closed this: CUPED needs real per-user
+        # outcome/covariate pairs to compute a covariance, which cannot be
+        # reconstructed from warehouse aggregates. A prior version of this
+        # branch reconstructed a `[control.mean] * control.sample_size`
+        # constant-value array per variant and fed it into CUPED's
+        # covariance/adjustment math -- the exact same fabrication bug class
+        # EXP-1 PR1/PR2 fixed for the frequentist/Bayesian/mSPRT paths, just
+        # laundered through an extra transformation before reaching the
+        # t-test. Rather than silently computing a fabricated result,
+        # reject explicitly and point callers at the endpoint that actually
+        # works correctly with real data. Checked BEFORE the warehouse query
+        # below (not after) -- this is fully derivable from the request body
+        # alone, so there is no reason to spend a real round-trip against
+        # the customer's own warehouse_dsn (up to WAREHOUSE_QUERY_TIMEOUT_S)
+        # only to reject the request anyway (found by adversarial review).
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "stat_method='cuped' is not supported via /analyze: this "
+                "endpoint only resolves warehouse-aggregated statistics "
+                "(mean/variance per variant), not individual per-user "
+                "observations, which CUPED's covariance calculation "
+                "requires. Use POST /api/v1/experiments/cuped-adjust with "
+                "raw per-user treatment/control/pre_treatment/pre_control "
+                "arrays instead."
+            ),
+        )
+
     try:
         connector = get_connector(req.warehouse_type, req.warehouse_dsn)
         metrics = await connector.query_experiment_metrics(
@@ -141,12 +176,17 @@ async def analyze_experiment(req: RunExperimentRequest):
         # WAREHOUSE_QUERY_TIMEOUT_S) is a subclass of Exception, so it's
         # already covered here — a 502 can now also mean "warehouse query
         # exceeded 30s" rather than a driver-level failure.
-        raise HTTPException(status_code=502, detail=f"Warehouse query failed: {e}") from e
+        raise HTTPException(
+            status_code=502, detail=f"Warehouse query failed: {e}"
+        ) from e
 
     control = metrics.get("control")
     treatment = metrics.get("treatment")
     if not control or not treatment:
-        raise HTTPException(status_code=422, detail="Insufficient data: one or both variants returned no rows")
+        raise HTTPException(
+            status_code=422,
+            detail="Insufficient data: one or both variants returned no rows",
+        )
 
     experiment = ExperimentDefinition(
         id=req.experiment_id,
@@ -157,29 +197,17 @@ async def analyze_experiment(req: RunExperimentRequest):
         min_sample_size=req.min_sample_size,
     )
 
-    control_data = [control.mean] * control.sample_size
-    treatment_data = [treatment.mean] * treatment.sample_size
-
-    if req.stat_method == "cuped" and req.control_covariate and req.treatment_covariate:
-        result = analyzer.analyze_cuped(
-            experiment=experiment,
-            control_data=control_data,
-            treatment_data=treatment_data,
-            control_covariate=req.control_covariate,
-            treatment_covariate=req.treatment_covariate,
-            metric_name=req.metric_name,
-        )
-    elif req.stat_method == "sequential":
-        result = analyzer.analyze_sequential(
-            control_data=control_data,
-            treatment_data=treatment_data,
+    if req.stat_method == "sequential":
+        result = analyzer.analyze_sequential_from_stats(
+            control=control,
+            treatment=treatment,
             metric_name=req.metric_name,
         )
     else:
-        result = analyzer.analyze(
+        result = analyzer.analyze_from_stats(
             experiment=experiment,
-            control_data=control_data,
-            treatment_data=treatment_data,
+            control=control,
+            treatment=treatment,
             metric_name=req.metric_name,
         )
 
@@ -191,7 +219,10 @@ async def analyze_experiment(req: RunExperimentRequest):
         recommendation=recommendation,
         relative_lift=result.relative_lift,
         is_significant=result.is_significant,
-        sample_sizes={"control": control.sample_size, "treatment": treatment.sample_size},
+        sample_sizes={
+            "control": control.sample_size,
+            "treatment": treatment.sample_size,
+        },
         metric_name=req.metric_name,
         probability_beats_control=result.probability_beats_control,
         anthropic_api_key=ai_key,
@@ -309,7 +340,10 @@ async def check_collision(req: CheckCollisionRequest):
 
 
 # ---------------------------------------------------------------------------
-# CUPED variance reduction endpoint (warehouse data path)
+# CUPED variance reduction endpoint (raw per-user data path -- EXP-1 PR 3/3
+# formally scoped CUPED to ONLY this endpoint; /analyze's stat_method="cuped"
+# is rejected rather than attempting to reconstruct per-user data from
+# warehouse aggregates, which cannot be done correctly)
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +380,9 @@ async def cuped_adjust(req: CupedAdjustRequest):
     with fewer observations.
     """
     if len(req.treatment) < 2 or len(req.control) < 2:
-        raise HTTPException(status_code=422, detail="Each variant requires at least 2 observations.")
+        raise HTTPException(
+            status_code=422, detail="Each variant requires at least 2 observations."
+        )
 
     if len(req.treatment) != len(req.pre_treatment):
         raise HTTPException(

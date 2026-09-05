@@ -7,6 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from app.graph.builder import DEFAULT_PROJECT_ID
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
@@ -74,7 +76,9 @@ async def receive_pagerduty(request: Request) -> dict[str, Any]:
         created_at: str = incident.get("created_at", "")
 
         if not incident_id:
-            logger.warning("PagerDuty event %s missing incident.id; skipping", event_type)
+            logger.warning(
+                "PagerDuty event %s missing incident.id; skipping", event_type
+            )
             continue
 
         logger.info(
@@ -94,10 +98,15 @@ async def receive_pagerduty(request: Request) -> dict[str, Any]:
 
         try:
             service = incident.get("service", {}).get("name", "unknown")
+            # project_id: PagerDuty's webhook payload carries no Tombstone
+            # project concept -- same deferred-scoping limitation as
+            # kafka/consumer.py's update_on_flag_change (see that file's
+            # comment for the full explanation).
             await request.app.state.correlator.correlate(
                 incident_id=incident_id,
                 affected_service=service,
                 incident_start_unix=incident_start_unix,
+                project_id=DEFAULT_PROJECT_ID,
             )
             correlation_triggered = True
         except Exception as exc:  # noqa: BLE001
@@ -173,16 +182,17 @@ async def receive_opsgenie(request: Request) -> dict[str, Any]:
     incident_start_unix = int(time.time())
 
     try:
+        # project_id: OpsGenie's webhook payload carries no Tombstone project
+        # concept either -- same deferred-scoping limitation noted above.
         await request.app.state.correlator.correlate(
             incident_id=alert_id,
             affected_service=alert.get("message", "unknown"),
             incident_start_unix=incident_start_unix,
+            project_id=DEFAULT_PROJECT_ID,
         )
         correlation_triggered = True
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Correlation failed for OpsGenie alert %s: %s", alert_id, exc
-        )
+        logger.warning("Correlation failed for OpsGenie alert %s: %s", alert_id, exc)
         correlation_triggered = False
 
     return {

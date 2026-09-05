@@ -2,7 +2,10 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -98,4 +101,105 @@ func ReadStreamEvents(ctx context.Context, rdb *redis.Client, streamKey, group, 
 // AckStreamMessage acknowledges a stream message after successful delivery.
 func AckStreamMessage(ctx context.Context, rdb *redis.Client, streamKey, group, msgID string) {
 	rdb.XAck(ctx, streamKey, group, msgID) //nolint:errcheck // fire-and-forget ack
+}
+
+// compareStreamIDs orders two Redis Stream entry IDs ("<unix-ms>-<seq>")
+// numerically, not lexically. A plain string compare works today by
+// accident (millisecond timestamps share a stable digit width for the
+// practical future) but breaks the moment two IDs have different seq
+// digit-widths (e.g. "5-9" vs "5-10" -- lexically "5-10" < "5-9"), so
+// ReplaySince parses and compares both parts as integers instead of relying
+// on that coincidence. Returns -1, 0, or 1 like strings.Compare.
+func compareStreamIDs(a, b string) int {
+	aMs, aSeq := splitStreamID(a)
+	bMs, bSeq := splitStreamID(b)
+	if aMs != bMs {
+		if aMs < bMs {
+			return -1
+		}
+		return 1
+	}
+	if aSeq != bSeq {
+		if aSeq < bSeq {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+func splitStreamID(id string) (ms, seq uint64) {
+	parts := strings.SplitN(id, "-", 2)
+	ms, _ = strconv.ParseUint(parts[0], 10, 64)
+	if len(parts) > 1 {
+		seq, _ = strconv.ParseUint(parts[1], 10, 64)
+	}
+	return ms, seq
+}
+
+// ReplaySince returns the messages published to streamKey strictly after
+// lastID (GW-2's reconnect catch-up). ok=false means lastID predates the
+// oldest entry the stream currently retains, OR the stream currently has no
+// entries at all -- both cases mean entries between lastID and now may
+// already have been trimmed by the producer's MaxLen/Approx eviction (an
+// empty XRANGE result alone cannot distinguish "caught up, nothing missed"
+// from "the gap was already lost to trimming" -- treating "stream has zero
+// entries right now" as automatically "caught up" would reopen exactly that
+// ambiguity, found by adversarial review of PR #211), so the caller must
+// fall back to a full snapshot rather than a partial replay in either case.
+//
+// The oldest-entry check and the replay fetch are wrapped in one
+// TxPipelined (Redis MULTI/EXEC) call, not two independent round trips --
+// also found by adversarial review of PR #211: two separate round trips
+// leave a TOCTOU gap where the producer's continuous XAdd(MaxLen, Approx)
+// trimming can advance the stream's oldest entry past lastID in between
+// them, making the second call silently return an INCOMPLETE (not empty)
+// result while ok is still decided by the now-stale first check. Redis
+// guarantees no other client's command executes between commands queued in
+// one MULTI/EXEC, which closes that gap entirely rather than merely
+// narrowing it.
+func ReplaySince(ctx context.Context, rdb *redis.Client, streamKey, lastID string) (msgs []redis.XMessage, ok bool, err error) {
+	var oldestCmd, rangeCmd *redis.XMessageSliceCmd
+	if _, err = rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		oldestCmd = pipe.XRangeN(ctx, streamKey, "-", "+", 1)
+		rangeCmd = pipe.XRange(ctx, streamKey, "("+lastID, "+")
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+
+	oldest, err := oldestCmd.Result()
+	if err != nil {
+		return nil, false, err
+	}
+	if len(oldest) == 0 || compareStreamIDs(lastID, oldest[0].ID) < 0 {
+		return nil, false, nil
+	}
+
+	msgs, err = rangeCmd.Result()
+	if err != nil {
+		return nil, false, err
+	}
+	return msgs, true, nil
+}
+
+// BuildReplayFrames turns raw XRANGE results into ready-to-write SSE frames,
+// applying the same unmarshal-payload and event-type derivation Broadcast
+// uses for live delivery, so a replayed event is indistinguishable from one
+// the client would have received live -- except it now carries its real
+// stream ID as the id: line.
+func BuildReplayFrames(msgs []redis.XMessage) [][]byte {
+	frames := make([][]byte, 0, len(msgs))
+	for _, msg := range msgs {
+		payload, ok := msg.Values["payload"].(string)
+		if !ok {
+			continue
+		}
+		var event FlagEvent
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		frames = append(frames, sseFrame(eventTypeFor(event), event, msg.ID))
+	}
+	return frames
 }

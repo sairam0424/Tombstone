@@ -247,8 +247,10 @@ func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, gr
 		}
 		// GW-1 (dedup.go): a self-reclaimed message may still race a fresh
 		// delivery of the same logical event via pub/sub.
+		// GW-2: this is a genuine stream entry (reclaimed via XCLAIM), so
+		// msg.ID is a real, replayable position -- pass it through.
 		if b.deduper.claim(event) {
-			b.hub.Broadcast(environment, event)
+			b.hub.Broadcast(environment, event, msg.ID)
 		}
 	}
 	AckStreamMessage(ctx, b.rdb, streamKey, group, msg.ID)

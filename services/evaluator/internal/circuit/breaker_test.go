@@ -101,6 +101,23 @@ func TestGetSetStateIsEnvironmentScoped(t *testing.T) {
 	}
 }
 
+// TestStateKeyDoesNotCollideAcrossAColonInEitherComponent is the regression
+// test for a real vulnerability found by adversarial review of EVAL-2:
+// stateKey used to join flagKey and env with a bare ':', so
+// flagKey="checkout:v2", env="production" formatted to the IDENTICAL string
+// as flagKey="checkout", env="v2:production" -- letting a crafted flag
+// key/environment pair read or, worse, OVERWRITE another flag/environment
+// pair's live circuit state (the same bug class INT-2 fixed in
+// app/graph/builder.py's depgraph_key). Neither flagKey nor env is
+// validated to exclude colons anywhere in this codebase.
+func TestStateKeyDoesNotCollideAcrossAColonInEitherComponent(t *testing.T) {
+	a := stateKey("checkout:v2", "production")
+	b := stateKey("checkout", "v2:production")
+	if a == b {
+		t.Errorf("stateKey(%q, %q) == stateKey(%q, %q) == %q -- colon-split collision", "checkout:v2", "production", "checkout", "v2:production", a)
+	}
+}
+
 // TestStateConstants verifies the state strings are exactly what the Redis keys expect.
 // If these change the gateway broadcaster will misparse channel names.
 func TestStateConstants(t *testing.T) {

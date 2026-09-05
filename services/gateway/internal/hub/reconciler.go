@@ -155,6 +155,7 @@ func (r *Reconciler) broadcastDrift(environment string, f snapshotFlag) {
 		zap.Bool("enabled", f.Enabled),
 		zap.Int("rollout_pct", f.RolloutPct))
 
+	// GW-2: a synthetic drift correction, not a real stream entry -- no ID.
 	r.hub.Broadcast(environment, FlagEvent{
 		FlagKey:     f.FlagKey,
 		Enabled:     f.Enabled,
@@ -162,7 +163,7 @@ func (r *Reconciler) broadcastDrift(environment string, f snapshotFlag) {
 		Reason:      "reconciler_drift",
 		Ts:          time.Now().Unix(),
 		Environment: environment,
-	})
+	}, "")
 }
 
 // fetchSnapshot calls flag-api's snapshot endpoint via the resilient client
