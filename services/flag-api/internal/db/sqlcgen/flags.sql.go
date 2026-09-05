@@ -341,6 +341,49 @@ func (q *Queries) ListFlags(ctx context.Context, projectID string) ([]ListFlagsR
 	return items, nil
 }
 
+const rollbackFlagEnvironment = `-- name: RollbackFlagEnvironment :execrows
+UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
+FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
+  AND (CASE WHEN fe.enabled THEN fe.rollout_pct ELSE 0 END) >= $7::integer
+`
+
+type RollbackFlagEnvironmentParams struct {
+	Enabled            bool
+	RolloutPct         int32
+	UpdatedBy          string
+	Key                string
+	Environment        string
+	ProjectID          string
+	MinCurrentExposure int32
+}
+
+// EVAL-4: RollbackStep's atomic compare-and-swap write. The exposure guard
+// ($7, the caller's own requested target) is evaluated by Postgres as part
+// of the SAME statement that performs the write, closing a TOCTOU gap a
+// separate SELECT-then-UPDATE would have between reading "current" state
+// and committing the new one -- two concurrent rollback-step calls could
+// otherwise each pass their own read-time check and then last-write-wins,
+// letting a less-aggressive step silently overwrite a more-aggressive one
+// (found by adversarial review of PR #220). Rows affected = 0 means either
+// the flag/environment doesn't exist, or a concurrent write already
+// reduced exposure below this request's own target -- the caller
+// disambiguates via a follow-up read.
+func (q *Queries) RollbackFlagEnvironment(ctx context.Context, arg RollbackFlagEnvironmentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, rollbackFlagEnvironment,
+		arg.Enabled,
+		arg.RolloutPct,
+		arg.UpdatedBy,
+		arg.Key,
+		arg.Environment,
+		arg.ProjectID,
+		arg.MinCurrentExposure,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateFlagEnvironment = `-- name: UpdateFlagEnvironment :execrows
 UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
 FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6

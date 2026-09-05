@@ -502,7 +502,13 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 	type stepReq struct {
 		Environment string `json:"environment"`
 		Reason      string `json:"reason"`
-		RolloutPct  int    `json:"rollout_pct"`
+		// RolloutPct is a required pointer, not a plain int: this endpoint's
+		// entire purpose is setting a SPECIFIC percentage, so an omitted
+		// field must be a validation error, not silently indistinguishable
+		// from an explicit 0 (full kill) -- a caller bug that drops the
+		// field must not be misread as a deliberate full rollback (found
+		// by adversarial review of PR #220).
+		RolloutPct *int `json:"rollout_pct"`
 	}
 	var req stepReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -513,7 +519,11 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "environment is required")
 		return
 	}
-	if req.RolloutPct < 0 || req.RolloutPct > 100 {
+	if req.RolloutPct == nil {
+		writeError(w, http.StatusBadRequest, "rollout_pct is required")
+		return
+	}
+	if *req.RolloutPct < 0 || *req.RolloutPct > 100 {
 		writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
 		return
 	}
@@ -521,27 +531,39 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "circuit_breaker"
 	}
 
-	prev, err := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
-		Key: key, Environment: req.Environment, ProjectID: projectID,
-	})
-	if err != nil {
-		writeError(w, http.StatusNotFound, "flag or environment not found")
-		return
-	}
-
 	// currentExposure/targetExposure treat a disabled flag as 0% exposure
 	// regardless of its stored rollout_pct -- enabled=false already means
 	// no traffic sees it, so the comparison that matters is the EFFECTIVE
 	// exposure, not the raw column value.
+	targetEnabled := *req.RolloutPct > 0
+	targetExposure := 0
+	if targetEnabled {
+		targetExposure = *req.RolloutPct
+	}
+
+	prev, err := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "flag or environment not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	currentExposure := 0
 	if prev.Enabled {
 		currentExposure = int(prev.RolloutPct)
 	}
-	targetEnabled := req.RolloutPct > 0
-	targetExposure := 0
-	if targetEnabled {
-		targetExposure = req.RolloutPct
-	}
+	// This early check gives a fast, friendly error in the common
+	// (non-racing) case. It is NOT what actually enforces the invariant --
+	// RollbackFlagEnvironment's own WHERE clause below re-checks the SAME
+	// condition atomically as part of the write itself, closing the TOCTOU
+	// gap this read-then-decide sequence would otherwise have between two
+	// concurrent rollback-step calls (found by adversarial review of
+	// PR #220's first version, which used a separate, unconditional
+	// UpdateFlagEnvironment write here).
 	if targetExposure > currentExposure {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf(
 			"rollback-step cannot increase exposure: requested %d%%, current effective exposure is %d%%",
@@ -559,16 +581,38 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 	)
 
 	actor := actorFromContext(r.Context())
-	n, err := sqlcgen.New(h.db).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+	n, err := sqlcgen.New(h.db).RollbackFlagEnvironment(r.Context(), sqlcgen.RollbackFlagEnvironmentParams{
 		Enabled: targetEnabled, RolloutPct: int32(targetExposure), UpdatedBy: actor,
 		Key: key, Environment: req.Environment, ProjectID: projectID,
+		MinCurrentExposure: int32(targetExposure),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if n == 0 {
-		writeError(w, http.StatusNotFound, "flag or environment not found")
+		// Either the flag/environment doesn't exist, or a concurrent
+		// rollback-step call already reduced exposure below this
+		// request's own target between our read above and this write --
+		// re-read to tell the two apart rather than guessing.
+		latest, latestErr := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+			Key: key, Environment: req.Environment, ProjectID: projectID,
+		})
+		if errors.Is(latestErr, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "flag or environment not found")
+			return
+		}
+		if latestErr != nil {
+			writeError(w, http.StatusInternalServerError, latestErr.Error())
+			return
+		}
+		latestExposure := 0
+		if latest.Enabled {
+			latestExposure = int(latest.RolloutPct)
+		}
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"a concurrent rollback step already reduced exposure to %d%%, below this request's target of %d%%",
+			latestExposure, targetExposure))
 		return
 	}
 

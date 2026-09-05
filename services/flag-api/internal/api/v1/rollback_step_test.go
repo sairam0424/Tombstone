@@ -17,6 +17,7 @@ import (
 
 	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/db"
+	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -190,6 +191,62 @@ func TestRollbackStep(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("rollout_pct=%d: status = %d, want 400; body: %s", pct, rec.Code, rec.Body.String())
 			}
+		}
+	})
+
+	t.Run("omitted rollout_pct is rejected, not silently treated as a full kill", func(t *testing.T) {
+		flag := createTestFlag(t, flagH, projectID, "eval4-omitted-pct")
+		updateTestEnvironment(t, flagH, projectID, flag.Key, "production", true, 100)
+
+		rec := httptest.NewRecorder()
+		flagH.RollbackStep(rec, stepRequest(flag.Key, map[string]any{"environment": "production"}))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 — a caller that omits rollout_pct must get a validation error, not a silent full kill; body: %s", rec.Code, rec.Body.String())
+		}
+		enabled, rolloutPct := readFlagEnv(t, flag.Key)
+		if !enabled || rolloutPct != 100 {
+			t.Errorf("flag_environments changed despite the rejected request: (enabled=%v, rollout_pct=%d), want unchanged (true, 100)", enabled, rolloutPct)
+		}
+	})
+
+	// TestRollbackFlagEnvironmentIsAtomicCAS below proves the underlying
+	// query's own guarantee directly and deterministically -- reproducing
+	// this same scenario through two genuinely racing HTTP calls would be
+	// inherently nondeterministic (Go's connection pool doesn't guarantee
+	// which goroutine's SELECT lands before the other's UPDATE commits),
+	// so it would not reliably exercise the 409 branch on every run.
+	t.Run("a stale target that no longer reflects the live state returns 409 via the atomic write's own guard", func(t *testing.T) {
+		flag := createTestFlag(t, flagH, projectID, "eval4-stale-write")
+		updateTestEnvironment(t, flagH, projectID, flag.Key, "production", true, 100)
+
+		// Reduce to 10% first -- this is the "concurrent winner" from the
+		// adversarial review's scenario, already committed by the time our
+		// own request's atomic write runs.
+		rec1 := httptest.NewRecorder()
+		flagH.RollbackStep(rec1, stepRequest(flag.Key, map[string]any{"environment": "production", "rollout_pct": 10}))
+		if rec1.Code != http.StatusOK {
+			t.Fatalf("winner step status = %d, want 200; body: %s", rec1.Code, rec1.Body.String())
+		}
+
+		// Call the atomic write directly with a stale min-exposure guard
+		// (100, as if this caller's own read happened before the winner
+		// committed) -- this is exactly what RollbackStep's handler would
+		// have done had its own read raced the winner's write. The query
+		// itself, not the handler's early check, must refuse this.
+		n, err := sqlcgen.New(database).RollbackFlagEnvironment(ctx, sqlcgen.RollbackFlagEnvironmentParams{
+			Enabled: true, RolloutPct: 50, UpdatedBy: "stale-tester",
+			Key: flag.Key, Environment: "production", ProjectID: projectID,
+			MinCurrentExposure: 100,
+		})
+		if err != nil {
+			t.Fatalf("RollbackFlagEnvironment: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("rows affected = %d, want 0 — the atomic WHERE clause must refuse a write whose min_current_exposure guard (100) no longer matches the live state (10%%)", n)
+		}
+		enabled, rolloutPct := readFlagEnv(t, flag.Key)
+		if !enabled || rolloutPct != 10 {
+			t.Errorf("flag_environments changed despite the refused write: (enabled=%v, rollout_pct=%d), want unchanged (true, 10)", enabled, rolloutPct)
 		}
 	})
 
