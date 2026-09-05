@@ -103,6 +103,23 @@ export interface EvaluationResult<T = boolean> {
   variationIndex?: number;
 }
 
+/**
+ * EVAL-2: wire shape POSTed to {telemetryUrl}/api/v1/telemetry as a JSON
+ * array. Field names and casing MUST match
+ * services/evaluator/internal/telemetry/aggregator.go's TelemetryEvent
+ * struct's json tags exactly (flag_key/environment/is_error/ts) — this is
+ * a cross-language contract with no schema validation on either side
+ * beyond Go's own json.Decode.
+ */
+export interface TelemetryEvent {
+  flag_key: string;
+  environment: string;
+  is_error: boolean;
+  /** RFC3339 (e.g. new Date().toISOString()) — Go's time.Time unmarshals
+   * from this format; a raw epoch number would fail to decode server-side. */
+  ts: string;
+}
+
 export interface FlagSnapshot {
   environment: string;
   flags: FlagEnvironmentState[];
@@ -134,5 +151,27 @@ export interface TombstoneClientConfig {
    * last one. Default: 500.
    */
   lagRefetchDebounceMs?: number;
+  /**
+   * EVAL-2: fraction of evaluate() calls to record as telemetry, in [0,1].
+   * Only takes effect when telemetryUrl is also set (see below) — this
+   * field was declared long before any code read it; setting it alone
+   * changed nothing. Default: 1.0 (every call, once telemetry is enabled).
+   */
   telemetrySampleRate?: number;
+  /**
+   * EVAL-2: base URL of the evaluator service (POST {telemetryUrl}/api/v1/
+   * telemetry) that consumes this SDK's evaluate() outcomes to drive the
+   * circuit breaker + auto-rollback pillar. Deliberately opt-in, no
+   * default guess (unlike apiUrl's localhost:8081 default) — every
+   * existing caller that does not set this gets ZERO behavior change: no
+   * timer started, no network calls, no buffering overhead.
+   */
+  telemetryUrl?: string;
+  /**
+   * EVAL-2: how often (ms) to flush buffered telemetry to telemetryUrl.
+   * Default: 10000 (10s), matching the evaluator's own 10s aggregation
+   * window (services/evaluator/internal/telemetry/aggregator.go) — no
+   * value in flushing faster than the server aggregates.
+   */
+  telemetryFlushIntervalMs?: number;
 }
