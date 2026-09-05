@@ -21,10 +21,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// isAbsoluteURL reports whether s is a well-formed, scheme-and-host URL
+// (e.g. "https://dashboard.example.com/flags/x"), as opposed to a bare
+// relative path (e.g. "/flags/x") or an empty string. Only http/https are
+// treated as usable -- Slack renders a button URL as a plain hyperlink,
+// so any other scheme (or none) has no defined behavior in a Slack client.
+func isAbsoluteURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || !u.IsAbs() {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
 
 // SlackNotifier posts to a Slack Incoming Webhook. Best-effort only: a
 // failed or unconfigured webhook logs a warning and returns, it never
@@ -66,7 +80,7 @@ type slackAttachment struct {
 	Title    string        `json:"title"`
 	Text     string        `json:"text"`
 	MrkdwnIn []string      `json:"mrkdwn_in"`
-	Actions  []slackAction `json:"actions"`
+	Actions  []slackAction `json:"actions,omitempty"`
 }
 
 type slackPayload struct {
@@ -93,26 +107,35 @@ func (n *SlackNotifier) NotifyRollback(
 		return false
 	}
 
-	payload := slackPayload{
-		Attachments: []slackAttachment{
-			{
-				Color: "#CC0000",
-				Fallback: fmt.Sprintf(
-					"Tombstone Auto-Rollback: %s disabled in %s", flagKey, environment,
-				),
-				Title: "Tombstone Auto-Rollback",
-				Text: fmt.Sprintf(
-					"Flag *%s* has been automatically disabled in *%s*.\n"+
-						"Error rate: *%.1f%%*\nTriggered by: %s",
-					flagKey, environment, errorRate*100, triggeredBy,
-				),
-				MrkdwnIn: []string{"text"},
-				Actions: []slackAction{
-					{Type: "button", Text: "View in Dashboard", URL: rollbackURL, Style: "danger"},
-				},
-			},
-		},
+	attachment := slackAttachment{
+		Color: "#CC0000",
+		Fallback: fmt.Sprintf(
+			"Tombstone Auto-Rollback: %s disabled in %s", flagKey, environment,
+		),
+		Title: "Tombstone Auto-Rollback",
+		Text: fmt.Sprintf(
+			"Flag *%s* has been automatically disabled in *%s*.\n"+
+				"Error rate: *%.1f%%*\nTriggered by: %s",
+			flagKey, environment, errorRate*100, triggeredBy,
+		),
+		MrkdwnIn: []string{"text"},
 	}
+	// Slack's button "url" has no documented support for relative paths --
+	// a client has no base to resolve one against, so a non-absolute
+	// rollbackURL (e.g. DASHBOARD_URL unset upstream, producing a bare
+	// "/flags/{key}") would ship a non-functional "View in Dashboard"
+	// button while NotifyRollback still reports success (Slack's webhook
+	// endpoint accepts any string in "url", it doesn't validate it's a
+	// working link). Omitting the button entirely when there's no usable
+	// destination is honest; a broken CTA on the alert whose whole point
+	// is a one-click path to the incident is not.
+	if isAbsoluteURL(rollbackURL) {
+		attachment.Actions = []slackAction{
+			{Type: "button", Text: "View in Dashboard", URL: rollbackURL, Style: "danger"},
+		}
+	}
+
+	payload := slackPayload{Attachments: []slackAttachment{attachment}}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
