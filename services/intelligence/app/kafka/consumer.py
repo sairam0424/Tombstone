@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover — aiokafka not installed in test env
     AIOKafkaConsumer = None  # type: ignore[assignment,misc]
 
 from app.anomaly.detector import AnomalyDetector
+from app.graph.builder import DEFAULT_PROJECT_ID
 
 if TYPE_CHECKING:
     from app.search.embedding_sync import EmbeddingSyncService
@@ -79,16 +80,19 @@ class KafkaEventConsumer(EventConsumer):
         """Delegate to the existing TelemetryConsumer.run() loop."""
         await self._inner.run()
 
+
 TOPIC_FLAG_EVALUATED = "tombstone.flag.evaluated"
 TOPIC_FLAG_CHANGED = "tombstone.flag.changed"
 GROUP_ID = "intelligence-anomaly"
 
 # Event types that constitute a "flag change" for dep-graph purposes
-FLAG_CHANGE_EVENT_TYPES = frozenset({
-    "flag_environment_updated",
-    "kill_switch_activated",
-    "flag_created",
-})
+FLAG_CHANGE_EVENT_TYPES = frozenset(
+    {
+        "flag_environment_updated",
+        "kill_switch_activated",
+        "flag_created",
+    }
+)
 
 
 @dataclass
@@ -169,13 +173,27 @@ class TelemetryConsumer:
         Performs two independent operations:
         1. Sync pgvector embedding when a flag is created or updated.
         2. Update the Redis dep-graph sorted sets incrementally.
+
+        INT-4's flag-archival eviction (AnomalyDetector.evict()) is
+        deliberately NOT wired here: this method's own Kafka topic
+        (tombstone.flag.changed) has no publisher anywhere in the Go
+        services -- confirmed via a repo-wide search -- so this whole
+        consumer path is already dead in any real deployment (the live
+        path is RedisStreamsEventConsumer._dispatch below, where eviction
+        IS wired). Not fixing that pre-existing dead-Kafka-topic gap here;
+        flagging it rather than adding untested, unreachable-in-practice
+        code to a confirmed-dead path.
         """
         event_type: str = payload.get("event_type", "")
         flag_key: str = payload.get("flag_key") or payload.get("key", "")
         environment = payload.get("environment", "production")
 
         # --- Embedding sync (pgvector search) ---
-        if self._embedding_sync is not None and flag_key and event_type in {"flag.created", "flag.updated"}:
+        if (
+            self._embedding_sync is not None
+            and flag_key
+            and event_type in {"flag.created", "flag.updated"}
+        ):
             try:
                 await self._embedding_sync.on_flag_event(
                     event_type=event_type,
@@ -183,8 +201,13 @@ class TelemetryConsumer:
                     name=payload.get("name", ""),
                     description=payload.get("description", ""),
                     tags=payload.get("tags", []),
+                    # project_id: same FlagEvent-has-no-project_id limitation
+                    # as update_on_flag_change above.
+                    project_id=DEFAULT_PROJECT_ID,
                 )
-                logger.debug("Embedding sync triggered for %s (event=%s)", flag_key, event_type)
+                logger.debug(
+                    "Embedding sync triggered for %s (event=%s)", flag_key, event_type
+                )
             except Exception as exc:
                 logger.warning("Embedding sync failed for %s: %s", flag_key, exc)
 
@@ -197,18 +220,30 @@ class TelemetryConsumer:
             changed_at_raw = payload.get("changed_at") or payload.get("created_at")
             if changed_at_raw:
                 try:
-                    changed_at = datetime.fromisoformat(str(changed_at_raw).replace("Z", "+00:00"))
+                    changed_at = datetime.fromisoformat(
+                        str(changed_at_raw).replace("Z", "+00:00")
+                    )
                 except (ValueError, TypeError):
                     changed_at = datetime.now(tz=timezone.utc)
             else:
                 changed_at = datetime.now(tz=timezone.utc)
 
             try:
+                # project_id: FlagEvent (flag-api's Kafka/Streams publish
+                # payload) carries no project_id field today, and flags.key
+                # is only unique per (project_id, key) -- so this event alone
+                # can't reliably resolve which project it belongs to. Uses
+                # the same single-project default every other new project_id
+                # parameter in this change does; a real fix needs a
+                # ProjectID field added to FlagEvent and populated at every
+                # publish call site (flags.go/scheduler.go/change_requests.go)
+                # -- deferred as a separate, larger cross-service change.
                 await self._graph_builder.update_on_flag_change(
                     flag_key=flag_key,
                     environment=environment,
                     changed_at=changed_at,
                     redis_client=self._redis_client,
+                    project_id=DEFAULT_PROJECT_ID,
                 )
             except Exception as exc:
                 logger.warning(
@@ -244,8 +279,8 @@ class RedisStreamsEventConsumer(EventConsumer):
     """
 
     _GROUP = "intelligence-worker"
-    _BLOCK_MS = 1000   # 1s block timeout — yields control to event loop
-    _COUNT = 10        # messages per XREADGROUP call
+    _BLOCK_MS = 1000  # 1s block timeout — yields control to event loop
+    _COUNT = 10  # messages per XREADGROUP call
 
     # Kept numerically identical to the Go gateway's maxDeliveryAttempts /
     # reclaimIdleThreshold (services/gateway/internal/hub/dlq.go) — a message
@@ -253,7 +288,7 @@ class RedisStreamsEventConsumer(EventConsumer):
     # consumer group is processing it.
     _MAX_DELIVERY_ATTEMPTS = 3
     _RECLAIM_IDLE_THRESHOLD_MS = 30_000  # 30s
-    _RECLAIM_SWEEP_INTERVAL_S = 15.0     # matches the gateway's ticker cadence
+    _RECLAIM_SWEEP_INTERVAL_S = 15.0  # matches the gateway's ticker cadence
     _RECLAIM_SCAN_COUNT = 100
 
     def __init__(
@@ -276,6 +311,7 @@ class RedisStreamsEventConsumer(EventConsumer):
 
     async def start(self) -> None:
         import redis.asyncio as aioredis
+
         if self._redis is None:
             self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
         # Create consumer groups idempotently (BUSYGROUP = already exists = OK)
@@ -284,12 +320,24 @@ class RedisStreamsEventConsumer(EventConsumer):
                 await self._redis.xgroup_create(
                     stream, self._GROUP, id="$", mkstream=True
                 )
-                logger.info("RedisStreamsEventConsumer: created group %s on %s", self._GROUP, stream)
+                logger.info(
+                    "RedisStreamsEventConsumer: created group %s on %s",
+                    self._GROUP,
+                    stream,
+                )
             except Exception as exc:
                 if "BUSYGROUP" in str(exc):
-                    logger.debug("RedisStreamsEventConsumer: group %s already exists on %s", self._GROUP, stream)
+                    logger.debug(
+                        "RedisStreamsEventConsumer: group %s already exists on %s",
+                        self._GROUP,
+                        stream,
+                    )
                 else:
-                    logger.warning("RedisStreamsEventConsumer: xgroup_create error on %s: %s", stream, exc)
+                    logger.warning(
+                        "RedisStreamsEventConsumer: xgroup_create error on %s: %s",
+                        stream,
+                        exc,
+                    )
 
     async def stop(self) -> None:
         self._running = False
@@ -310,12 +358,17 @@ class RedisStreamsEventConsumer(EventConsumer):
         so main.py can treat both identically.
         """
         import os
+
         consumer_name = f"intelligence-{os.environ.get('FLY_MACHINE_ID', 'local')}"
         self._running = True
-        logger.info("RedisStreamsEventConsumer: starting on streams %s as %s", self._streams, consumer_name)
+        logger.info(
+            "RedisStreamsEventConsumer: starting on streams %s as %s",
+            self._streams,
+            consumer_name,
+        )
 
         # Window buffer: same pattern as TelemetryConsumer._window
-        window: dict[str, dict] = {}   # "flag_key:env" -> {"errors": int, "total": int}
+        window: dict[str, dict] = {}  # "flag_key:env" -> {"errors": int, "total": int}
         flush_interval = 10.0
         last_flush = asyncio.get_running_loop().time()
         last_reclaim = asyncio.get_running_loop().time()
@@ -332,7 +385,7 @@ class RedisStreamsEventConsumer(EventConsumer):
                     block=self._BLOCK_MS,
                 )
 
-                for stream_key, messages in (results or []):
+                for stream_key, messages in results or []:
                     for msg_id, data in messages:
                         ok = await self._dispatch(data, window)
                         if ok:
@@ -361,7 +414,9 @@ class RedisStreamsEventConsumer(EventConsumer):
                 # roughly the same frequency as the flush above.
                 if now - last_reclaim >= self._RECLAIM_SWEEP_INTERVAL_S:
                     for stream_key in self._streams:
-                        await self._reclaim_stale_pending(stream_key, consumer_name, window)
+                        await self._reclaim_stale_pending(
+                            stream_key, consumer_name, window
+                        )
                     last_reclaim = now
 
             except asyncio.CancelledError:
@@ -384,7 +439,13 @@ class RedisStreamsEventConsumer(EventConsumer):
         success = True
 
         # flag.evaluated -> accumulate in window for anomaly detection
-        if event_type in ("flag_evaluated", "FALLTHROUGH", "RULE_MATCH", "OFF", "TARGET_MATCH"):
+        if event_type in (
+            "flag_evaluated",
+            "FALLTHROUGH",
+            "RULE_MATCH",
+            "OFF",
+            "TARGET_MATCH",
+        ):
             flag_key = data.get("flag_key", "")
             environment = data.get("environment", "production")
             is_error = data.get("is_error") in ("true", "True", "1", True)
@@ -396,38 +457,75 @@ class RedisStreamsEventConsumer(EventConsumer):
                 if is_error:
                     window[wk]["errors"] += 1
 
+        # flag.archived -> evict anomaly-detector state entirely (INT-4).
+        # This is a NEW, dedicated event value (event.Reason="archived",
+        # set only by flag-api's ArchiveFlag) rather than being folded into
+        # the "flag_created"/"flag_environment_updated"/"kill_switch_activated"
+        # branch below -- those values are never actually produced by any
+        # real publisher (flag-api's Reason values are "manual" or an
+        # arbitrary kill reason string, never those audit_log-style event
+        # names), a pre-existing, separate bug this fix does not attempt to
+        # unwind. "archived" is deliberately a value this fix controls on
+        # both the publish and dispatch side, so it works regardless of
+        # that other mismatch.
+        elif event_type == "archived":
+            flag_key = data.get("flag_key", "")
+            if flag_key:
+                self._detector.evict(flag_key)
+
         # flag.created or flag.updated -> trigger embedding sync
-        elif event_type in ("flag_created", "flag_environment_updated", "kill_switch_activated"):
+        elif event_type in (
+            "flag_created",
+            "flag_environment_updated",
+            "kill_switch_activated",
+        ):
             flag_key = data.get("flag_key", "")
             if flag_key and self._embedding_sync is not None:
                 payload_str = data.get("payload", "{}")
                 try:
                     import json as _json
-                    payload = _json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+
+                    payload = (
+                        _json.loads(payload_str)
+                        if isinstance(payload_str, str)
+                        else payload_str
+                    )
                     await self._embedding_sync.on_flag_event(
                         event_type=event_type,
                         flag_key=flag_key,
                         name=payload.get("name", flag_key),
                         description=payload.get("description", ""),
                         tags=payload.get("tags", []),
+                        project_id=DEFAULT_PROJECT_ID,
                     )
                 except Exception as exc:
-                    logger.warning("RedisStreamsEventConsumer: embedding sync failed for %s: %s", flag_key, exc)
+                    logger.warning(
+                        "RedisStreamsEventConsumer: embedding sync failed for %s: %s",
+                        flag_key,
+                        exc,
+                    )
                     success = False
 
             # Also update dep graph
             if flag_key and self._graph_builder is not None and self._redis is not None:
                 try:
                     from datetime import datetime, timezone
+
                     environment = data.get("environment", "production")
+                    # project_id: see the matching comment in
+                    # KafkaEventConsumer's own update_on_flag_change call
+                    # above -- FlagEvent carries no project_id today.
                     await self._graph_builder.update_on_flag_change(
                         flag_key=flag_key,
                         environment=environment,
                         changed_at=datetime.now(timezone.utc),
                         redis_client=self._redis,
+                        project_id=DEFAULT_PROJECT_ID,
                     )
                 except Exception as exc:
-                    logger.warning("RedisStreamsEventConsumer: graph update failed: %s", exc)
+                    logger.warning(
+                        "RedisStreamsEventConsumer: graph update failed: %s", exc
+                    )
                     success = False
 
         return success
@@ -445,7 +543,9 @@ class RedisStreamsEventConsumer(EventConsumer):
         """
         return f"{stream_key}:dlq"
 
-    async def _reclaim_stale_pending(self, stream_key: str, consumer_name: str, window: dict) -> None:
+    async def _reclaim_stale_pending(
+        self, stream_key: str, consumer_name: str, window: dict
+    ) -> None:
         """
         Scan stream_key's consumer-group PEL via XPENDING (range form) for
         entries idle beyond _RECLAIM_IDLE_THRESHOLD_MS. For each:
@@ -470,7 +570,11 @@ class RedisStreamsEventConsumer(EventConsumer):
                 idle=self._RECLAIM_IDLE_THRESHOLD_MS,
             )
         except Exception as exc:
-            logger.warning("RedisStreamsEventConsumer: xpending_range failed for %s: %s", stream_key, exc)
+            logger.warning(
+                "RedisStreamsEventConsumer: xpending_range failed for %s: %s",
+                stream_key,
+                exc,
+            )
             return
 
         for entry in pending or []:
@@ -491,7 +595,10 @@ class RedisStreamsEventConsumer(EventConsumer):
                 )
             except Exception as exc:
                 logger.warning(
-                    "RedisStreamsEventConsumer: xclaim failed for %s (%s): %s", stream_key, msg_id, exc
+                    "RedisStreamsEventConsumer: xclaim failed for %s (%s): %s",
+                    stream_key,
+                    msg_id,
+                    exc,
                 )
                 continue
 
@@ -511,7 +618,12 @@ class RedisStreamsEventConsumer(EventConsumer):
         try:
             entries = await self._redis.xrange(stream_key, min=msg_id, max=msg_id)
         except Exception as exc:
-            logger.warning("RedisStreamsEventConsumer: xrange failed for %s (%s): %s", stream_key, msg_id, exc)
+            logger.warning(
+                "RedisStreamsEventConsumer: xrange failed for %s (%s): %s",
+                stream_key,
+                msg_id,
+                exc,
+            )
             return
 
         if not entries:
@@ -525,13 +637,17 @@ class RedisStreamsEventConsumer(EventConsumer):
         try:
             await self._redis.xadd(dlq_key, fields, maxlen=10_000, approximate=True)
         except Exception as exc:
-            logger.warning("RedisStreamsEventConsumer: xadd to dlq failed for %s: %s", dlq_key, exc)
+            logger.warning(
+                "RedisStreamsEventConsumer: xadd to dlq failed for %s: %s", dlq_key, exc
+            )
             return
 
         await self._redis.xack(stream_key, self._GROUP, msg_id)
         logger.warning(
             "RedisStreamsEventConsumer: message %s moved from %s to dead-letter stream %s",
-            msg_id, stream_key, dlq_key,
+            msg_id,
+            stream_key,
+            dlq_key,
         )
 
     async def _flush(self, window: dict) -> None:
@@ -565,4 +681,6 @@ def create_consumer(backend: str, **kwargs) -> "EventConsumer":
             embedding_sync=kwargs.get("embedding_sync"),
             graph_builder=kwargs.get("graph_builder"),
         )
-    raise ValueError(f"Unknown consumer backend: {backend!r}. Choose 'kafka' or 'redis'.")
+    raise ValueError(
+        f"Unknown consumer backend: {backend!r}. Choose 'kafka' or 'redis'."
+    )

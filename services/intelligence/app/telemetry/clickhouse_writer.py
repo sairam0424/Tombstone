@@ -188,7 +188,8 @@ class ClickHouseWriter:
                 await self._write_with_retry(batch, attempt + 1)
             else:
                 logger.error(
-                    "ClickHouse insert failed after 3 attempts — routing to DLQ: %s", exc
+                    "ClickHouse insert failed after 3 attempts — routing to DLQ: %s",
+                    exc,
                 )
                 await self._to_dlq(batch, str(exc))
 
@@ -295,6 +296,34 @@ class ClickHouseWriter:
 
     # ------------------------------------------------------------------
     # Legacy helpers (clickhouse_driver — kept for backward compatibility)
+    #
+    # INT-4: get_error_rate/get_flag_stats used to query evaluation_events
+    # (a table nothing ever wrote to -- see create_tables' comment) via its
+    # is_error/user_id_hash columns; fixed to query the table that's
+    # actually written, tombstone_evaluations, which has no boolean
+    # is_error column at all. `reason = 'ERROR'` is the only available
+    # error signal on that table -- it matches the EvaluationReason enum
+    # SDK callers report (OFF/FALLTHROUGH/RULE_MATCH/ERROR), but it means
+    # "this evaluation itself failed" (e.g. flag not found/config error),
+    # NOT "the flag's returned value caused a downstream failure" -- the
+    # write path has no signal for the latter at all.
+    #
+    # This is a CONVENTION, not an enforced guarantee (found by
+    # adversarial review of PR #210): POST /api/v1/telemetry/ingest (the
+    # only real write path today) accepts `events: list[dict[str, Any]]`
+    # with zero Pydantic/schema validation, and _insert()/
+    # _insert_via_driver() read `reason` via `e.get("reason", "")` --  a
+    # caller that omits the field, or uses a different casing/vocabulary
+    # ("error"/"Error"/"FAILED"), lands rows with reason values that never
+    # match the exact literal 'ERROR' (ClickHouse string comparison is
+    # case-sensitive), silently under-reporting or zero-reporting the
+    # error rate with no exception or warning distinguishing that from
+    # "genuinely zero errors". No SDK or service in this repo actually
+    # calls this endpoint today (ClickHouseWriter.record(), which takes a
+    # typed reason argument, has zero callers repo-wide), so this gap is
+    # real but currently unreachable in practice -- flagged for whoever
+    # builds a real caller, not fixed here (would need a genuine schema/
+    # validation decision on the ingest endpoint, out of INT-4's scope).
     # ------------------------------------------------------------------
 
     @property
@@ -329,23 +358,18 @@ class ClickHouseWriter:
         def _create() -> None:
             client = self._get_client()
             client.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
-            client.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.database}.evaluation_events (
-                    flag_key        String,
-                    environment     String,
-                    variation       String,
-                    reason          String,
-                    is_error        UInt8,
-                    user_id_hash    String,
-                    ts              DateTime
-                )
-                ENGINE = MergeTree()
-                ORDER BY (flag_key, environment, ts)
-                PARTITION BY toYYYYMM(ts)
-                """
-            )
-            # Also ensure the new tombstone_evaluations table exists
+            # INT-4: evaluation_events used to be created here too, but it is
+            # a phantom table -- nothing anywhere in this codebase has ever
+            # written to it (confirmed via a repo-wide grep for INSERT
+            # references). _insert()/_insert_via_driver() above have always
+            # written to tombstone_evaluations only. get_error_rate() and
+            # get_flag_stats() below used to read evaluation_events instead
+            # (a pre-existing bug, now fixed to read tombstone_evaluations,
+            # the table that's actually populated) -- so evaluation_events
+            # is now fully orphaned schema with no reader or writer.
+            # Deliberately not created anymore; a real deployment with a
+            # pre-existing evaluation_events table from before this fix is
+            # unaffected (this only stops ensuring it exists on fresh setups).
             client.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.database}.tombstone_evaluations (
@@ -361,9 +385,7 @@ class ClickHouseWriter:
                 ORDER BY (flag_key, ts)
                 """
             )
-            logger.info(
-                "ClickHouse tables evaluation_events + tombstone_evaluations ready"
-            )
+            logger.info("ClickHouse table tombstone_evaluations ready")
 
         await asyncio.to_thread(_create)
 
@@ -378,9 +400,9 @@ class ClickHouseWriter:
             result = client.execute(
                 f"""
                 SELECT
-                    countIf(is_error = 1) AS errors,
+                    countIf(reason = 'ERROR') AS errors,
                     count() AS total
-                FROM {self.database}.evaluation_events
+                FROM {self.database}.tombstone_evaluations
                 WHERE
                     flag_key = %(flag_key)s
                     AND environment = %(environment)s
@@ -411,9 +433,9 @@ class ClickHouseWriter:
                 f"""
                 SELECT
                     count()                         AS total_evaluations,
-                    countIf(is_error = 1)           AS error_count,
-                    uniqExact(user_id_hash)         AS unique_users
-                FROM {self.database}.evaluation_events
+                    countIf(reason = 'ERROR')       AS error_count,
+                    uniqExact(user_hash)             AS unique_users
+                FROM {self.database}.tombstone_evaluations
                 WHERE
                     flag_key = %(flag_key)s
                     AND environment = %(environment)s

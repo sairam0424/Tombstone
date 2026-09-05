@@ -302,7 +302,11 @@ func (rp *RelayProxy) handleUpstreamSSEEvent(env, eventType string, data []byte)
 		event.Environment = env
 	}
 
-	rp.localHub.Broadcast(broadcastEnv, event)
+	// GW-2: multi-region relay forwarding a real stream ID through to a
+	// downstream region's own hub is out of scope for this gateway-side-only
+	// slice (disclosed, not fixed) -- "" means the relayed frame gets no
+	// id: line, matching pub/sub's existing no-ID treatment above.
+	rp.localHub.Broadcast(broadcastEnv, event, "")
 }
 
 // ServeHealth handles GET /health.
@@ -320,9 +324,9 @@ func (rp *RelayProxy) ServeHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(map[string]any{
-		"status":            status,
+		"status":             status,
 		"upstream_connected": connected,
-		"connections":       counts,
+		"connections":        counts,
 	})
 }
 

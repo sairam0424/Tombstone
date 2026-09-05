@@ -51,6 +51,17 @@ FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.proj
 -- name: ArchiveFlag :execrows
 UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2;
 
+-- INT-4: ArchiveFlag has no single environment of its own -- it archives
+-- a flag across every environment it has state in at once. Used to
+-- resolve exactly which environments to publish the eviction event to,
+-- instead of hardcoding "production" (found by adversarial review of
+-- PR #210 -- the hardcoded value only worked by coincidence of every
+-- current deployment config happening to use "production").
+-- name: ListFlagEnvironmentsForKey :many
+SELECT fe.environment
+FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
+WHERE f.key=$1 AND f.project_id=$2;
+
 -- name: CreateFlagTombstone :exec
 INSERT INTO flag_tombstones (key, archived_by) VALUES ($1,$2) ON CONFLICT DO NOTHING;
 

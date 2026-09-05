@@ -156,14 +156,26 @@ services:
         condition: service_healthy
       pgbouncer:
         condition: service_healthy
-      kafka:
-        condition: service_started
+      redis:
+        condition: service_healthy
     env_file: .env
     environment:
       PORT: "8083"
       EMBEDDING_BACKEND: local
-      # Intelligence uses Kafka for telemetry events; gateway uses Redis Streams for flag delivery
-      CONSUMER_BACKEND: kafka
+      # INT-4: this used to say "Intelligence uses Kafka for telemetry
+      # events" and set CONSUMER_BACKEND=kafka -- that was never actually
+      # true. TelemetryConsumer reads Kafka topics tombstone.flag.evaluated
+      # / tombstone.flag.changed, but NOTHING in any Go service has ever
+      # published to either topic (confirmed via a repo-wide search for
+      # producer code) -- CONSUMER_BACKEND=kafka silently ran a consumer
+      # against two topics with zero producers, so flag-change-driven
+      # features (embedding sync, dep-graph updates, and now flag-archival
+      # anomaly-state eviction) were ALL dead in this compose file's
+      # config, found by adversarial review of PR #210. Redis Streams
+      # (tombstone:stream:{env}) IS the real, live transport -- the same
+      # one gateway/evaluator already consume from -- so this switches to
+      # it, matching what actually works.
+      CONSUMER_BACKEND: redis
       TOMBSTONE_ENVIRONMENTS: production
     ports:
       - "8083:8083"

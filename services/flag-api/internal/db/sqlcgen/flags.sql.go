@@ -267,6 +267,46 @@ func (q *Queries) KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchF
 	return result.RowsAffected()
 }
 
+const listFlagEnvironmentsForKey = `-- name: ListFlagEnvironmentsForKey :many
+SELECT fe.environment
+FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id
+WHERE f.key=$1 AND f.project_id=$2
+`
+
+type ListFlagEnvironmentsForKeyParams struct {
+	Key       string
+	ProjectID string
+}
+
+// INT-4: ArchiveFlag has no single environment of its own -- it archives
+// a flag across every environment it has state in at once. Used to
+// resolve exactly which environments to publish the eviction event to,
+// instead of hardcoding "production" (found by adversarial review of
+// PR #210 -- the hardcoded value only worked by coincidence of every
+// current deployment config happening to use "production").
+func (q *Queries) ListFlagEnvironmentsForKey(ctx context.Context, arg ListFlagEnvironmentsForKeyParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listFlagEnvironmentsForKey, arg.Key, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var environment string
+		if err := rows.Scan(&environment); err != nil {
+			return nil, err
+		}
+		items = append(items, environment)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFlags = `-- name: ListFlags :many
 SELECT f.id, f.key, f.project_id, f.name, f.description,
        f.flag_type, f.state, f.owner_id, f.safe_default,
