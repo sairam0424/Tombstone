@@ -203,7 +203,7 @@ func TestReplayOrSnapshot_FallsBackToSnapshotWhenTrimmedPastRetention(t *testing
 
 	const env = "production"
 	streamKey := StreamKey(env)
-	xaddEvent(t, rdb, streamKey, FlagEvent{FlagKey: "flag-1", Environment: env})
+	newestID := xaddEvent(t, rdb, streamKey, FlagEvent{FlagKey: "flag-1", Environment: env})
 	h.SetLastSnapshot(env, []byte(`{"flags":[{"flag_key":"flag-1"}]}`))
 
 	frames := h.ReplayOrSnapshot(context.Background(), env, "1-0") // predates the one real entry above
@@ -216,6 +216,15 @@ func TestReplayOrSnapshot_FallsBackToSnapshotWhenTrimmedPastRetention(t *testing
 	}
 	if !strings.Contains(frame, `"flag-1"`) {
 		t.Errorf("expected the snapshot payload in the frame, got: %s", frame)
+	}
+	// Adversarial review of PR #211 found this test never asserted on the
+	// id: line -- without it, a broken newestID computation (wrong
+	// XRevRangeN args/direction, or a silently-swallowed error) would still
+	// pass every assertion above while leaving the client's cursor stuck,
+	// re-triggering this same snapshot fallback on every future reconnect
+	// instead of resuming live XRANGE replay.
+	if !strings.Contains(frame, "id: "+newestID+"\n") {
+		t.Errorf("expected the snapshot frame to carry the stream's newest id (%s) so the client's cursor advances to now, got: %s", newestID, frame)
 	}
 }
 

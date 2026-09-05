@@ -95,8 +95,18 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	// what was missed (XRANGE, O(delta)) instead of forcing a full resync on
 	// every transient disconnect. A fresh (non-reconnecting) client sends no
 	// such header, so this is a pure addition for clients that opt in by
-	// tracking it — see GW-2's scope note: no SDK does yet, so this has no
-	// client-visible effect until one is updated to.
+	// tracking it.
+	//
+	// This is NOT purely inert until a future SDK update, despite GW-2's
+	// original scope note claiming so (corrected by adversarial review of
+	// PR #211): workspace-dashboard's useSSE.ts uses a raw browser
+	// EventSource whose native auto-reconnect was already active (its
+	// onerror never calls es.close()) — the moment this handler starts
+	// emitting id: lines, that dashboard tab's own browser-tracked
+	// lastEventId updates silently and its NEXT auto-reconnect sends it
+	// back here automatically, with no dashboard code change. First-party
+	// Tombstone SDKs still do not read Last-Event-ID at all, so THEY remain
+	// unaffected either way.
 	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
 		frames := h.hub.ReplayOrSnapshot(r.Context(), environment, lastEventID)
 		for _, frame := range frames {

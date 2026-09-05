@@ -139,20 +139,44 @@ func splitStreamID(id string) (ms, seq uint64) {
 
 // ReplaySince returns the messages published to streamKey strictly after
 // lastID (GW-2's reconnect catch-up). ok=false means lastID predates the
-// oldest entry the stream currently retains -- entries between lastID and
-// now were already trimmed by the producer's MaxLen/Approx eviction, so the
-// caller must fall back to a full snapshot rather than a partial replay: an
+// oldest entry the stream currently retains, OR the stream currently has no
+// entries at all -- both cases mean entries between lastID and now may
+// already have been trimmed by the producer's MaxLen/Approx eviction (an
 // empty XRANGE result alone cannot distinguish "caught up, nothing missed"
-// from "the gap was already lost to trimming".
+// from "the gap was already lost to trimming" -- treating "stream has zero
+// entries right now" as automatically "caught up" would reopen exactly that
+// ambiguity, found by adversarial review of PR #211), so the caller must
+// fall back to a full snapshot rather than a partial replay in either case.
+//
+// The oldest-entry check and the replay fetch are wrapped in one
+// TxPipelined (Redis MULTI/EXEC) call, not two independent round trips --
+// also found by adversarial review of PR #211: two separate round trips
+// leave a TOCTOU gap where the producer's continuous XAdd(MaxLen, Approx)
+// trimming can advance the stream's oldest entry past lastID in between
+// them, making the second call silently return an INCOMPLETE (not empty)
+// result while ok is still decided by the now-stale first check. Redis
+// guarantees no other client's command executes between commands queued in
+// one MULTI/EXEC, which closes that gap entirely rather than merely
+// narrowing it.
 func ReplaySince(ctx context.Context, rdb *redis.Client, streamKey, lastID string) (msgs []redis.XMessage, ok bool, err error) {
-	oldest, err := rdb.XRangeN(ctx, streamKey, "-", "+", 1).Result()
+	var oldestCmd, rangeCmd *redis.XMessageSliceCmd
+	if _, err = rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		oldestCmd = pipe.XRangeN(ctx, streamKey, "-", "+", 1)
+		rangeCmd = pipe.XRange(ctx, streamKey, "("+lastID, "+")
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+
+	oldest, err := oldestCmd.Result()
 	if err != nil {
 		return nil, false, err
 	}
-	if len(oldest) > 0 && compareStreamIDs(lastID, oldest[0].ID) < 0 {
+	if len(oldest) == 0 || compareStreamIDs(lastID, oldest[0].ID) < 0 {
 		return nil, false, nil
 	}
-	msgs, err = rdb.XRange(ctx, streamKey, "("+lastID, "+").Result()
+
+	msgs, err = rangeCmd.Result()
 	if err != nil {
 		return nil, false, err
 	}

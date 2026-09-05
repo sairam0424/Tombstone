@@ -117,6 +117,30 @@ func TestReplaySince_NoMessagesAfterLastIDReturnsEmptyOkTrue(t *testing.T) {
 	}
 }
 
+// TestReplaySince_EmptyStreamReturnsOkFalse is the direct regression proof
+// for a bug found by adversarial review of PR #211: a completely empty (or
+// nonexistent) stream key used to fall through the trimmed-past-retention
+// guard entirely (its "len(oldest) > 0 &&" condition was false, not true,
+// for zero entries) and return ok=true with zero messages -- indistinguishable
+// from "genuinely caught up" even though a Redis restart/flush/eviction
+// could just as easily mean every event since lastID was lost. An empty
+// stream must report ok=false, the same as any other retention-boundary
+// violation, so the caller falls back to a snapshot instead of silently
+// claiming nothing was missed.
+func TestReplaySince_EmptyStreamReturnsOkFalse(t *testing.T) {
+	rdb := newTestRedis(t)
+	streamKey := StreamKey("production") // never XADDed to -- genuinely empty/nonexistent
+	ctx := context.Background()
+
+	_, ok, err := ReplaySince(ctx, rdb, streamKey, "5-0")
+	if err != nil {
+		t.Fatalf("ReplaySince: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for a completely empty stream, got true")
+	}
+}
+
 // TestReplaySince_LastIDOlderThanRetentionReturnsOkFalse is the direct
 // regression proof for the trimmed-past-retention branch: a lastID from
 // before the stream's current oldest entry must report ok=false so the
