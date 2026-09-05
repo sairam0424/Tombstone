@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/tombstone/evaluator/internal/circuit"
 	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
+	"github.com/tombstone/evaluator/internal/notify"
 	"github.com/tombstone/evaluator/internal/rollback"
 	"github.com/tombstone/evaluator/internal/telemetry"
 )
@@ -88,16 +91,57 @@ func main() {
 
 	breaker := circuit.NewBreaker(rdb, logger)
 	exec := rollback.NewExecutor(flagAPIURL, flagAPIToken, rdb, logger)
+	// EVAL-2: rollback.Execute has always disabled the flag and published a
+	// Redis event on trip, but never notified anyone -- a human on-call
+	// previously learned about an auto-rollback only by noticing the
+	// dashboard or audit log, not proactively. dashboardURL/slackNotifier
+	// are both safe to construct even when unset/empty: an empty
+	// dashboardURL just produces a relative "/flags/{key}" link, and
+	// NotifyRollback itself no-ops (logged, not fatal) when
+	// SLACK_WEBHOOK_URL is unset -- matches this service's existing
+	// posture of treating third-party notification config as optional,
+	// unlike REDIS_URL/FLAG_API_URL/FLAG_API_TOKEN above.
+	dashboardURL := os.Getenv("DASHBOARD_URL")
+	slackNotifier := notify.NewSlackNotifier(os.Getenv("SLACK_WEBHOOK_URL"), logger)
 	agg := telemetry.NewAggregator(breaker, rdb, logger)
 	agg.OnTrip = func(flagKey, env string, errorRate float64) {
 		ctx := context.Background()
-		_ = exec.Execute(ctx, rollback.RollbackRequest{
+		execErr := exec.Execute(ctx, rollback.RollbackRequest{
 			FlagKey:     flagKey,
 			Environment: env,
 			Reason:      "circuit_breaker",
 			ErrorRate:   errorRate,
 			TriggeredBy: "circuit_breaker",
 		})
+		if execErr != nil {
+			logger.Error("auto-rollback execution failed", zap.Error(execErr),
+				zap.String("flag", flagKey), zap.String("env", env))
+		}
+		// Deliberately NOT notifying Slack when Execute failed: NotifyRollback's
+		// message says the flag "has been automatically disabled" -- sending
+		// that on failure would tell an on-call engineer the exact opposite of
+		// what happened. A rollback-FAILURE alert is a real, valuable, but
+		// SEPARATE notification (different message, arguably higher urgency)
+		// needing its own scope decision, not silently folded into this slice.
+		shouldNotify, rollbackURL := shouldNotifySlack(execErr, dashboardURL, flagKey)
+		if !shouldNotify {
+			return
+		}
+		// Dispatched off the hot rollback path, on its own bounded context:
+		// Aggregator.Flush processes every flag that tripped in the current
+		// window sequentially on one goroutine, so a blocking inline call
+		// here would stack up to NotifyRollback's own 10s http.Client timeout
+		// PER flag before Flush can even reach the next flag's real
+		// kill-switch call -- exactly the scenario auto-rollback exists to
+		// react to quickly. Matches internal/transparency/rekor.go's own
+		// async dispatch for the same class of best-effort, non-critical
+		// third-party call: an independent context that outlives this
+		// closure, not a deadline inherited from anything upstream.
+		go func() {
+			notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			slackNotifier.NotifyRollback(notifyCtx, flagKey, env, errorRate, "circuit_breaker", rollbackURL)
+		}()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -218,4 +262,28 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// shouldNotifySlack decides whether agg.OnTrip's auto-rollback should
+// trigger a Slack alert, and if so, builds the "View in Dashboard" URL.
+// Kept as a pure function, separate from OnTrip's actual IO
+// (exec.Execute/slackNotifier.NotifyRollback), specifically so this
+// success/failure branching has direct unit test coverage without a live
+// Redis/HTTP server -- unlike the OBS-1/tracer wiring in this same file,
+// which has no equivalent extraction and relies on source-parsing regex
+// guards (see main_test.go) instead.
+//
+// A non-nil execErr must produce shouldNotify=false: NotifyRollback's
+// message says the flag "has been automatically disabled", which is only
+// true when Execute actually succeeded.
+func shouldNotifySlack(execErr error, dashboardURL, flagKey string) (shouldNotify bool, rollbackURL string) {
+	if execErr != nil {
+		return false, ""
+	}
+	// Trim any trailing slash so a DASHBOARD_URL configured either way
+	// (with or without one) produces "https://host/flags/key", never
+	// "https://host//flags/key" -- the double slash workspace-dashboard's
+	// React Router "/flags/:key" route does not match, which would 404.
+	dashboardURL = strings.TrimSuffix(dashboardURL, "/")
+	return true, fmt.Sprintf("%s/flags/%s", dashboardURL, url.PathEscape(flagKey))
 }

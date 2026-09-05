@@ -64,6 +64,19 @@ func stateKey(flagKey, env string) string {
 	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":state"
 }
 
+// tripLockKey builds the Redis key for TryTrip's short-lived claim guard,
+// distinct from stateKey (which two racing callers would each read as
+// StateClosed before either has a chance to write StateOpen).
+func tripLockKey(flagKey, env string) string {
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":trip-lock"
+}
+
+// tripLockTTL only needs to outlast the brief window in which multiple
+// evaluator replicas can all observe StateClosed before any of them
+// commits StateOpen (stateKey's own TTL, set by SetState to 10 minutes,
+// is what actually prevents re-tripping after that point).
+const tripLockTTL = 30 * time.Second
+
 // GetState returns the current circuit state for a flag in an environment.
 func (b *Breaker) GetState(ctx context.Context, flagKey, env string) State {
 	val, err := b.rdb.Get(ctx, stateKey(flagKey, env)).Result()
@@ -71,6 +84,34 @@ func (b *Breaker) GetState(ctx context.Context, flagKey, env string) State {
 		return StateClosed
 	}
 	return State(val)
+}
+
+// TryTrip atomically claims the right to trip the circuit for flagKey in
+// env, returning true for exactly one caller among any that race it for
+// the same flag+environment. "State is stored in Redis so multiple
+// evaluator instances share it" (see the Breaker doc comment) means
+// Aggregator.Flush's own GetState-then-ShouldTrip-then-SetState sequence
+// is a check-then-act race across replicas: two replicas can each read
+// StateClosed via GetState, both decide to trip, and both fire OnTrip --
+// which, since EVAL-2, means both execute a real rollback AND both post a
+// Slack alert for what is actually one underlying trip event. SETNX makes
+// the claim itself atomic; the caller must still call SetState afterward
+// to make the OPEN state visible to GetState for the full 10-minute
+// cooldown.
+//
+// On a Redis error, this fails OPEN (returns true): TryTrip exists to
+// deduplicate a trip across replicas, not to gate whether tripping is
+// allowed at all -- refusing to trip because the coordination mechanism
+// itself is unavailable would silently disable the entire auto-rollback
+// safety net during a Redis outage, which is strictly worse than an
+// occasional duplicate (idempotent kill-switch call, duplicate but
+// harmless Slack alert).
+func (b *Breaker) TryTrip(ctx context.Context, flagKey, env string) bool {
+	ok, err := b.rdb.SetNX(ctx, tripLockKey(flagKey, env), "1", tripLockTTL).Result()
+	if err != nil {
+		return true
+	}
+	return ok
 }
 
 // SetState updates the circuit state for a flag in an environment in Redis.

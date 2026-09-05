@@ -81,6 +81,17 @@ func (a *Aggregator) Flush(ctx context.Context) {
 
 		state := a.breaker.GetState(ctx, flagKey, env)
 		if state == circuit.StateClosed && a.breaker.ShouldTrip(win) {
+			// Multiple evaluator replicas share this Redis-backed breaker
+			// state and each run their own Flush loop, so GetState-then-
+			// ShouldTrip above is a check-then-act race: without this claim,
+			// two replicas racing the same window would both observe
+			// StateClosed, both decide to trip, and both fire OnTrip for
+			// what is actually one underlying trip event (duplicate
+			// rollback executions and, since EVAL-2, duplicate Slack
+			// alerts). TryTrip's SETNX makes only one of them proceed.
+			if !a.breaker.TryTrip(ctx, flagKey, env) {
+				continue
+			}
 			a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, 10*time.Minute)
 			if a.OnTrip != nil {
 				errorRate := a.breaker.ErrorRate(win)
