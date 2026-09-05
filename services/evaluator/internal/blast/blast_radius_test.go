@@ -11,7 +11,7 @@ func classifyBlastRadius(trafficPct float64, depCount int, errorDelta float64) s
 	r := &BlastRadiusResult{
 		TrafficPctAffected:   trafficPct,
 		DependentFlagsCount:  depCount,
-		HistoricalErrorDelta: errorDelta,
+		HistoricalErrorRate: errorDelta,
 	}
 	return string(c.scoreRisk(r))
 }
@@ -86,7 +86,7 @@ func TestScoreRisk(t *testing.T) {
 			r := &BlastRadiusResult{
 				TrafficPctAffected:   tc.trafficPct,
 				DependentFlagsCount:  tc.dependentFlags,
-				HistoricalErrorDelta: tc.errorDelta,
+				HistoricalErrorRate: tc.errorDelta,
 			}
 			got := c.scoreRisk(r)
 			if got != tc.want {
@@ -119,7 +119,7 @@ func TestJustificationRequiredOnBlocked(t *testing.T) {
 	r := &BlastRadiusResult{
 		TrafficPctAffected:   60,
 		DependentFlagsCount:  0,
-		HistoricalErrorDelta: 0.10,
+		HistoricalErrorRate: 0.10,
 	}
 	r.RiskScore = c.scoreRisk(r)
 	if r.RiskScore != RiskBlocked {
