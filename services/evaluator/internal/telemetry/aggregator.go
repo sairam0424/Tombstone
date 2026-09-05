@@ -186,6 +186,15 @@ func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win ci
 			phase = circuit.PhaseKilled
 		}
 		if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, phase) {
+			// Refresh the state TTL even on failure -- a persistently
+			// unreachable flag-api (or any other repeated OnRolloutChange
+			// failure) must not let stateTTL expire out from under a
+			// still-active incident just because this tick's own attempt
+			// didn't advance anything (found by adversarial review of
+			// PR #221's own fix for a different finding: the TTL-refresh
+			// fix originally covered only the two documented hold
+			// branches, not this and the other three failure-retry paths).
+			a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
 			a.logger.Error("rollback step failed; will retry next tick",
 				zap.String("flag", flagKey), zap.String("env", env), zap.Int("target_pct", target))
 			return
@@ -222,6 +231,10 @@ func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win ci
 		return
 	}
 	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, circuit.PhaseRecovering) {
+		// See the identical comment on the descent-continuation failure
+		// branch above -- still OPEN (the transition to HALF_OPEN never
+		// committed), so refresh THAT state.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
 		a.logger.Error("HALF_OPEN recovery probe failed to start; will retry next tick",
 			zap.String("flag", flagKey), zap.String("env", env))
 		return
@@ -253,6 +266,10 @@ func (a *Aggregator) handleHalfOpen(ctx context.Context, flagKey, env string, wi
 			return
 		}
 		if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, 0, errorRate, circuit.PhaseRevertedDuringRecovery) {
+			// Still HALF_OPEN (the revert to OPEN never committed) --
+			// refresh THAT state's TTL. See handleOpen's identical
+			// comment on its own failure-retry branches.
+			a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
 			a.logger.Error("failed to revert a failed recovery probe; will retry next tick",
 				zap.String("flag", flagKey), zap.String("env", env))
 			return
@@ -281,15 +298,25 @@ func (a *Aggregator) handleHalfOpen(ctx context.Context, flagKey, env string, wi
 		phase = circuit.PhaseRecovered
 	}
 	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, phase) {
+		// Still HALF_OPEN (the climb never committed) -- refresh THAT
+		// state's TTL. See handleOpen's identical comment on its own
+		// failure-retry branches.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
 		a.logger.Error("recovery step failed; will retry next tick",
 			zap.String("flag", flagKey), zap.String("env", env), zap.Int("target_pct", target))
 		return
 	}
+	// Recorded even when recovered (about to transition to CLOSED, where
+	// the step ladder no longer applies): leaving GetStep at its
+	// second-to-last value instead of the actual final one applied is
+	// currently harmless (handleClosed's own next trip always starts a
+	// fresh NextRollbackStep(100), never reading GetStep), but it's stale,
+	// misleading bookkeeping a future consumer (observability, a refactor)
+	// could trip over (found by adversarial review of PR #221).
+	a.breaker.SetStep(ctx, flagKey, env, target)
 	if recovered {
 		a.breaker.SetState(ctx, flagKey, env, circuit.StateClosed, stateTTL)
-		return
 	}
-	a.breaker.SetStep(ctx, flagKey, env, target)
 }
 
 // Run starts the aggregator flush loop. Blocks until ctx is cancelled.

@@ -244,12 +244,24 @@ type fakeFlagAPIState struct {
 // newFakeFlagAPI starts an httptest.Server that faithfully reproduces
 // flag-api's real EVAL-4 endpoints' enforcement rules -- specifically,
 // that rollback-step can only ever DECREASE effective exposure and
-// recovery-step can only ever INCREASE it -- against the given shared
-// state. This is what closes the actual gap adversarial review of PR #221
-// found: every existing aggregator_test.go test stubs OnRolloutChange
-// directly, so none of them exercise whether the REAL rollback.Executor,
-// calling a server that enforces these real rules, can actually complete
-// a full trip/descent/recovery cycle end to end.
+// recovery-step can only ever INCREASE it, and the same 0-100 range
+// validation -- against the given shared state. This is what closes the
+// actual gap adversarial review of PR #221 found: every existing
+// aggregator_test.go test stubs OnRolloutChange directly, so none of them
+// exercise whether the REAL rollback.Executor, calling a server that
+// enforces these real rules, can actually complete a full trip/descent/
+// recovery cycle end to end.
+//
+// Deliberately NOT modeled here: the real handlers' 409 response (a
+// genuine TOCTOU race between two concurrent callers, per services/
+// flag-api/internal/api/v1/flags.go's RollbackStep/RecoveryStep). This
+// fake holds state.mu for its entire handler body, so within a single
+// process there is no window for that race to occur naturally -- forcing
+// one would mean simulating fake concurrency rather than testing real
+// integration. The 409-vs-200 client-side handling this drives
+// (rollback.Executor.SetRolloutPct/IncreaseRolloutPct) has its own direct
+// unit test coverage instead (rollback_test.go's
+// Test{SetRolloutPct,IncreaseRolloutPct}_409IsTreatedAsSuccess).
 func newFakeFlagAPI(t *testing.T, state *fakeFlagAPIState) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +288,15 @@ func newFakeFlagAPI(t *testing.T, state *fakeFlagAPIState) *httptest.Server {
 				return
 			}
 			target := *body.RolloutPct
+			// Matches the real handler's own validation (services/flag-api/
+			// internal/api/v1/flags.go RollbackStep) -- found missing here by
+			// adversarial review of PR #221's own fix for a different
+			// finding: an out-of-range value silently "succeeded" against
+			// this fake while real flag-api would 400 it.
+			if target < 0 || target > 100 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			if target > currentExposure {
 				w.WriteHeader(http.StatusBadRequest)
 				return
@@ -289,6 +310,10 @@ func newFakeFlagAPI(t *testing.T, state *fakeFlagAPIState) *httptest.Server {
 				return
 			}
 			target := *body.RolloutPct
+			if target < 0 || target > 100 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			if target < currentExposure {
 				w.WriteHeader(http.StatusBadRequest)
 				return
@@ -403,5 +428,15 @@ func TestEndToEndDescentThenRecoveryCycle(t *testing.T) {
 
 	if got := breaker.GetState(ctx, flagKey, env); got != circuit.StateClosed {
 		t.Fatalf("final state = %q, want CLOSED", got)
+	}
+	// Regression coverage for a real bug adversarial review of PR #221
+	// found in this exact scenario: handleHalfOpen's recovered branch used
+	// to transition to CLOSED without ever calling SetStep, leaving
+	// GetStep's bookkeeping stuck at the second-to-last value (50) instead
+	// of the actual final one applied (100) -- undetected because this
+	// test asserted only on fakeFlagAPIState and breaker.GetState, never
+	// breaker.GetStep.
+	if got, found := breaker.GetStep(ctx, flagKey, env); !found || got != 100 {
+		t.Errorf("final step = (%d, %v), want (100, true) -- must reflect the actual last value applied, not a stale earlier rung", got, found)
 	}
 }

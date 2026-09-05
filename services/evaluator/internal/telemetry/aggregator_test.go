@@ -370,6 +370,13 @@ func TestFlush_HalfOpenAdvancesOnAHealthyWindow(t *testing.T) {
 	if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateClosed {
 		t.Errorf("state = %q, want CLOSED", got)
 	}
+	// Regression coverage for a real bug found by adversarial review of
+	// PR #221: the recovered branch used to transition to CLOSED without
+	// ever calling SetStep, leaving GetStep stuck at the second-to-last
+	// value (50) instead of the actual final one applied (100).
+	if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 100 {
+		t.Errorf("step = (%d, %v), want (100, true)", got, found)
+	}
 }
 
 // TestFlush_HalfOpenRevertsOnABadWindow verifies a HALF_OPEN probe whose

@@ -204,17 +204,21 @@ func (e *Executor) SetRolloutPct(ctx context.Context, flagKey, environment strin
 // exposure (see that handler's own doc comment); recovery-step is its
 // mirror image, which can never decrease.
 //
-// Unlike SetRolloutPct, a 409 here is treated as an ERROR, not success:
-// on the descent side, a stale target superseded by a MORE aggressive
-// concurrent step down still satisfies the caller's own goal ("exposure is
-// now at most pct"). On the ascent side, a 409 is genuinely ambiguous --
-// it could mean a more-aggressive concurrent recovery already won (this
-// call's goal is still satisfied), OR it could mean a fresh incident
-// dropped exposure back down while this call was in flight (this call's
-// goal is NOT satisfied, and treating it as success would mask a real
-// revert). Retrying is the safe default for an ambiguous signal: Flush's
-// next tick re-reads Redis-tracked position and recomputes the correct
-// target from wherever the ladder actually is by then.
+// A 409 here is treated as success, exactly like SetRolloutPct's own 409
+// handling: RecoveryFlagEnvironment's CAS guard (services/flag-api/
+// internal/db/queries/flags.sql) only ever returns 409 when the live
+// effective exposure is ALREADY strictly greater than this call's own
+// target -- which means the goal this call exists to establish ("exposure
+// is now at least pct") already holds. An earlier version of this
+// function treated 409 as an error here, reasoning it could ambiguously
+// mean "a fresh incident dropped exposure back down mid-flight" -- but
+// that scenario would make the CAS's current<=target condition MORE
+// likely to hold (the write would SUCCEED, not 409), so it can never
+// actually produce this branch; treating 409 as an error only served to
+// retry the SAME, now-permanently-unreachable target forever whenever
+// something else (a concurrent, more-aggressive recovery step, or an
+// operator manually raising rollout_pct) pushed exposure above it (found
+// by adversarial review of PR #221's own fix for a different finding).
 func (e *Executor) IncreaseRolloutPct(ctx context.Context, flagKey, environment string, pct int, reason string) error {
 	if pct < 0 || pct > 100 {
 		return fmt.Errorf("rollout_pct must be between 0 and 100, got %d", pct)
@@ -244,6 +248,11 @@ func (e *Executor) IncreaseRolloutPct(ctx context.Context, flagKey, environment 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		e.logger.Info("recovery-step superseded by a concurrent, more-aggressive step (or a manual override)",
+			zap.String("flag", flagKey), zap.String("env", environment), zap.Int("requested_pct", pct))
+		return nil
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("recovery-step returned HTTP %d", resp.StatusCode)
 	}
