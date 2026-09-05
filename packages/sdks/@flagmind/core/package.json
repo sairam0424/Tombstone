@@ -54,6 +54,11 @@
     "mocha": "^10.0.0",
     "typescript": "~5.8.2"
   },
+  "overrides": {
+    "serialize-javascript": "^7.0.5",
+    "brace-expansion": "^2.1.4",
+    "js-yaml": "^4.3.2"
+  },
   "dependencies": {
     "eventsource": "^3.0.0",
     "murmurhash": "^2.0.1"
