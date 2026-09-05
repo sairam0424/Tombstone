@@ -618,10 +618,20 @@ class TestMSPRTEValueGroundTruth:
     conjugate mixture-likelihood-ratio derivation. Every prior fidelity
     test in TestSequentialFromStats only asserted the two methods agree
     with EACH OTHER — both shared the identical bug, so neither test could
-    ever catch it. These tests assert against the independently-derived
-    closed-form ground truth instead:
+    ever catch it. These tests assert against the closed-form formula
+    instead:
 
         e = sqrt(se^2 / (se^2+tau^2)) * exp(delta^2*tau^2 / (2*se^2*(se^2+tau^2)))
+
+    NOTE (found by adversarial review): this closed form is algebraically
+    IDENTICAL to the analyzer's own v/m-substituted expression -- v and m
+    are just intermediate variables that cancel out to the same formula,
+    not a derivation from a separate statistical methodology. So these
+    tests do catch a transcription/arithmetic bug in the analyzer's own
+    formula (confirmed: reverting the fix makes every test in this class
+    fail by 2-3 orders of magnitude), but they would NOT catch a mistake
+    in the underlying mixture-likelihood-ratio derivation itself, since
+    both sides of the assertion would move together in that case.
 
     Because se shrinks as sample size grows, the old spurious term made
     the e-value collapse toward non-significance with MORE data instead
@@ -730,4 +740,34 @@ class TestMSPRTEValueGroundTruth:
         actual_e = _extract_e_value(result.metric_name)
         expected_e = self._ground_truth_e_value(delta=2.0, se=0.5, tau=1.0)
 
-        assert actual_e == pytest.approx(expected_e, rel=1e-3)
+        # Same tolerance as the other three tests in this class -- the
+        # sample/population variance round-trip conversion above lands
+        # var_pooled and se back on the exact 100.0/0.5 fixture values (no
+        # accumulated floating-point error), so a looser bound here isn't
+        # numerically justified and would silently under-cover a smaller
+        # regression specific to analyze_sequential_from_stats (found by
+        # adversarial review).
+        assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
+
+    def test_e_value_matches_closed_form_for_a_negative_delta(self):
+        """
+        Every other fixture in this class has treatment > control. The
+        formula only depends on delta via delta**2, so a sign bug is
+        unlikely to hide specifically in the e-value math, but nothing
+        else in this class exercises a negative delta at all -- add one
+        so a future regression in the shared delta computation (e.g.
+        mean_c/mean_t swapped) has at least one ground-truth assertion
+        that would notice (found by adversarial review).
+        """
+        control_arr = [-8.0] * 400 + [12.0] * 400  # mean=2.0
+        treatment_arr = [-10.0] * 400 + [10.0] * 400  # mean=0.0, delta=-2.0
+
+        result = ExperimentAnalyzer().analyze_sequential(
+            control_arr, treatment_arr, "metric"
+        )
+
+        actual_e = _extract_e_value(result.metric_name)
+        expected_e = self._ground_truth_e_value(delta=-2.0, se=0.5, tau=1.0)
+
+        assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
+        assert result.is_significant is True
