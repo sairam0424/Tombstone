@@ -190,6 +190,111 @@ func TestTryTrip_FailsOpenOnRedisError(t *testing.T) {
 	}
 }
 
+// TestNextRollbackStep pins the EVAL-4 step-down ladder (100->50->25->0).
+func TestNextRollbackStep(t *testing.T) {
+	tests := []struct {
+		current  int
+		wantNext int
+		wantDone bool
+	}{
+		{100, 50, false},
+		{50, 25, false},
+		{25, 0, true},
+		{0, 0, true}, // already at the bottom -- stays done, doesn't go negative
+	}
+	for _, tc := range tests {
+		next, done := NextRollbackStep(tc.current)
+		if next != tc.wantNext || done != tc.wantDone {
+			t.Errorf("NextRollbackStep(%d) = (%d, %v), want (%d, %v)", tc.current, next, done, tc.wantNext, tc.wantDone)
+		}
+	}
+}
+
+// TestNextRecoveryStep pins the EVAL-4 step-up ladder (10->25->50->100).
+func TestNextRecoveryStep(t *testing.T) {
+	tests := []struct {
+		current       int
+		wantNext      int
+		wantRecovered bool
+	}{
+		{0, 10, false},
+		{10, 25, false},
+		{25, 50, false},
+		{50, 100, true},
+		{100, 100, true}, // already fully recovered -- stays recovered
+	}
+	for _, tc := range tests {
+		next, recovered := NextRecoveryStep(tc.current)
+		if next != tc.wantNext || recovered != tc.wantRecovered {
+			t.Errorf("NextRecoveryStep(%d) = (%d, %v), want (%d, %v)", tc.current, next, recovered, tc.wantNext, tc.wantRecovered)
+		}
+	}
+}
+
+// TestStepAndOpenedAtRoundTripThroughRedis verifies the two new Redis
+// accessor pairs behave correctly both when set and when absent (the
+// "never happened yet" defaults NextRollbackStep/the HALF_OPEN transition
+// logic in aggregator.go rely on).
+func TestStepAndOpenedAtRoundTripThroughRedis(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if got := b.GetStep(ctx, "checkout", "production"); got != 100 {
+		t.Errorf("GetStep with nothing set = %d, want 100 (nothing stepped down from yet)", got)
+	}
+	b.SetStep(ctx, "checkout", "production", 50)
+	if got := b.GetStep(ctx, "checkout", "production"); got != 50 {
+		t.Errorf("GetStep after SetStep(50) = %d, want 50", got)
+	}
+	// Environment-scoped, matching stateKey/tripLockKey's own convention.
+	if got := b.GetStep(ctx, "checkout", "staging"); got != 100 {
+		t.Errorf("GetStep for a different environment = %d after production's SetStep, want 100 (unaffected)", got)
+	}
+
+	if _, ok := b.GetOpenedAt(ctx, "checkout", "production"); ok {
+		t.Error("GetOpenedAt with nothing set: ok = true, want false")
+	}
+	now := time.Unix(1_700_000_000, 0)
+	b.SetOpenedAt(ctx, "checkout", "production", now)
+	got, ok := b.GetOpenedAt(ctx, "checkout", "production")
+	if !ok || !got.Equal(now) {
+		t.Errorf("GetOpenedAt after SetOpenedAt = (%v, %v), want (%v, true)", got, ok, now)
+	}
+}
+
+// TestReleaseTrip verifies a released trip-lock lets an immediate
+// subsequent TryTrip win the claim again, rather than waiting out the full
+// tripLockTTL -- the fix for a real finding from adversarial review of
+// PR #219 (a failed SetState after a successful TryTrip previously stalled
+// every retry for up to 30s with no way to recover sooner).
+func TestReleaseTrip(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if !b.TryTrip(ctx, "checkout", "production") {
+		t.Fatal("first TryTrip should win the claim")
+	}
+	if b.TryTrip(ctx, "checkout", "production") {
+		t.Fatal("second TryTrip before release should be refused")
+	}
+	b.ReleaseTrip(ctx, "checkout", "production")
+	if !b.TryTrip(ctx, "checkout", "production") {
+		t.Error("TryTrip after ReleaseTrip should win the claim again immediately, not wait out tripLockTTL")
+	}
+}
+
 // TestStateConstants verifies the state strings are exactly what the Redis keys expect.
 // If these change the gateway broadcaster will misparse channel names.
 func TestStateConstants(t *testing.T) {

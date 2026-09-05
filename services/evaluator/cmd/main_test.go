@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"testing"
@@ -53,7 +54,75 @@ func TestInitTracerIsWired(t *testing.T) {
 	}
 }
 
-// TestShouldNotifySlack directly unit-tests agg.OnTrip's success/failure
+// TestIsAuthorizedManualRollback directly unit-tests the EVAL-4 auth guard
+// on POST /api/v1/rollback -- previously this endpoint had NO authentication
+// at all, reachable by anyone who could reach the evaluator's port.
+func TestIsAuthorizedManualRollback(t *testing.T) {
+	t.Run("correct bearer token is authorized", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/rollback", nil)
+		req.Header.Set("Authorization", "Bearer my-secret-token")
+		if !isAuthorizedManualRollback(req, "my-secret-token") {
+			t.Error("isAuthorizedManualRollback = false with the correct token, want true")
+		}
+	})
+
+	t.Run("wrong bearer token is rejected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/rollback", nil)
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		if isAuthorizedManualRollback(req, "my-secret-token") {
+			t.Error("isAuthorizedManualRollback = true with the wrong token, want false")
+		}
+	})
+
+	t.Run("missing Authorization header is rejected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/rollback", nil)
+		if isAuthorizedManualRollback(req, "my-secret-token") {
+			t.Error("isAuthorizedManualRollback = true with no Authorization header, want false")
+		}
+	})
+
+	t.Run("non-Bearer scheme is rejected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/rollback", nil)
+		req.Header.Set("Authorization", "Basic my-secret-token")
+		if isAuthorizedManualRollback(req, "my-secret-token") {
+			t.Error("isAuthorizedManualRollback = true with a non-Bearer scheme, want false")
+		}
+	})
+
+	t.Run("empty expected token fails closed, never authorizes anything", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/rollback", nil)
+		req.Header.Set("Authorization", "Bearer ")
+		if isAuthorizedManualRollback(req, "") {
+			t.Error("isAuthorizedManualRollback = true with an empty expected token, want false -- an unconfigured FLAG_API_TOKEN must never mean \"anyone is authorized\"")
+		}
+	})
+}
+
+// TestManualRollbackEndpointIsGuarded is a structural regression guard,
+// mirroring TestOBS1MetricsAreWired's own technique: unit-testing whether
+// the /api/v1/rollback handler actually calls isAuthorizedManualRollback
+// isn't practical without a live server, so this parses main.go's source
+// instead. Without this guard, a future refactor of that handler could
+// silently drop the auth check -- isAuthorizedManualRollback's own tests
+// above would stay green regardless, since they test the function in
+// isolation, not whether the route still calls it.
+func TestManualRollbackEndpointIsGuarded(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	body := string(src)
+
+	rollbackRoute := regexp.MustCompile(`(?s)r\.Post\("/api/v1/rollback".*?\n\t\}\)`).FindString(body)
+	if rollbackRoute == "" {
+		t.Fatal("main.go no longer registers POST /api/v1/rollback")
+	}
+	if !regexp.MustCompile(`isAuthorizedManualRollback\(`).MatchString(rollbackRoute) {
+		t.Error("POST /api/v1/rollback no longer calls isAuthorizedManualRollback — this endpoint would become reachable by anyone who can reach the evaluator's port, with no authentication at all")
+	}
+}
+
+// TestShouldNotifySlack directly unit-tests agg.OnRolloutChange's success/failure
 // Slack-alert branching, extracted into shouldNotifySlack precisely so this
 // logic doesn't need a live Redis/HTTP server to exercise -- unlike the
 // OBS-1/tracer wiring above, which has no equivalent extraction. A future

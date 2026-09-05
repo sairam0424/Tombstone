@@ -125,3 +125,73 @@ func (e *Executor) Execute(ctx context.Context, req RollbackRequest) error {
 		zap.String("flag", req.FlagKey), zap.String("env", req.Environment))
 	return nil
 }
+
+// SetRolloutPct calls flag-api's EVAL-4 graduated rollback-step endpoint
+// (POST /flags/{key}/rollback-step) to reduce a flag's exposure to pct
+// WITHOUT fully disabling it (enabled stays true unless pct==0) -- the
+// stepped-ladder counterpart to Execute's binary kill switch above.
+//
+// Unlike Execute, a 409 response is treated as success, not an error:
+// flag-api's own atomic compare-and-swap write refuses a step whose target
+// no longer reflects the live state (a concurrent, more-aggressive step
+// already won), which means the safety property this call exists to
+// establish -- exposure is now at most pct -- already holds by the time
+// this call returns 409, just achieved by someone else.
+func (e *Executor) SetRolloutPct(ctx context.Context, flagKey, environment string, pct int, reason string) error {
+	if pct < 0 || pct > 100 {
+		return fmt.Errorf("rollout_pct must be between 0 and 100, got %d", pct)
+	}
+
+	e.logger.Warn("executing rollback step",
+		zap.String("flag", flagKey), zap.String("env", environment),
+		zap.Int("rollout_pct", pct), zap.String("reason", reason))
+
+	body, _ := json.Marshal(map[string]any{
+		"environment": environment,
+		"rollout_pct": pct,
+		"reason":      reason,
+	})
+	stepReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/flags/%s/rollback-step", e.flagAPIURL, flagKey),
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build rollback-step request: %w", err)
+	}
+	stepReq.Header.Set("Authorization", "Bearer "+e.flagAPIToken)
+	stepReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.resilientHTTP.Do(ctx, stepReq)
+	if err != nil {
+		return fmt.Errorf("rollback-step call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		e.logger.Info("rollback-step superseded by a concurrent, more-aggressive step",
+			zap.String("flag", flagKey), zap.String("env", environment), zap.Int("requested_pct", pct))
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("rollback-step returned HTTP %d", resp.StatusCode)
+	}
+
+	// Belt-and-suspenders alongside flag-api's own SSE broadcast, matching
+	// Execute's identical pattern above.
+	event := map[string]interface{}{
+		"flag_key":    flagKey,
+		"enabled":     pct > 0,
+		"rollout_pct": pct,
+		"reason":      reason,
+		"ts":          time.Now().Unix(),
+		"environment": environment,
+	}
+	payload, _ := json.Marshal(event)
+	channel := fmt.Sprintf("stream:%s:updates", environment)
+	if pubErr := e.rdb.Publish(ctx, channel, payload).Err(); pubErr != nil {
+		e.logger.Warn("redis publish on rollback-step failed", zap.Error(pubErr))
+	}
+
+	e.logger.Info("rollback-step executed successfully",
+		zap.String("flag", flagKey), zap.String("env", environment), zap.Int("rollout_pct", pct))
+	return nil
+}

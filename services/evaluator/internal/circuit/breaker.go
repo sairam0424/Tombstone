@@ -3,6 +3,7 @@ package circuit
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -15,6 +16,21 @@ const (
 	StateClosed   State = "CLOSED"
 	StateOpen     State = "OPEN"
 	StateHalfOpen State = "HALF_OPEN"
+)
+
+// RolloutPhase describes WHY Aggregator.Flush is asking a caller to change
+// a flag's rollout percentage -- lets a caller (e.g. main.go's Slack
+// alerting) react differently to "an incident just started" versus "still
+// walking the ladder down" without re-deriving that from targetPct alone.
+type RolloutPhase string
+
+const (
+	PhaseTripped                RolloutPhase = "TRIPPED"                  // first step down from CLOSED
+	PhaseStepped                RolloutPhase = "STEPPED"                  // further step down, not yet at 0%
+	PhaseKilled                 RolloutPhase = "KILLED"                   // reached the ladder's terminal 0%
+	PhaseRecovering             RolloutPhase = "RECOVERING"               // HALF_OPEN, stepping up
+	PhaseRecovered              RolloutPhase = "RECOVERED"                // HALF_OPEN reached 100%, back to CLOSED
+	PhaseRevertedDuringRecovery RolloutPhase = "REVERTED_DURING_RECOVERY" // HALF_OPEN probe failed, back to OPEN/0%
 )
 
 // Breaker is a per-flag circuit breaker.
@@ -114,11 +130,131 @@ func (b *Breaker) TryTrip(ctx context.Context, flagKey, env string) bool {
 	return ok
 }
 
+// ReleaseTrip deletes the trip-lock claim early, for use when the caller's
+// own follow-up action (e.g. SetState) fails after a successful TryTrip.
+// Without this, a failed follow-up leaves the lock held for the FULL
+// tripLockTTL even though the state it was meant to gate was never
+// actually written -- stalling every subsequent Flush tick's retry for up
+// to that long, worse than the occasional harmless duplicate TryTrip
+// exists to prevent (found by adversarial review of PR #219).
+func (b *Breaker) ReleaseTrip(ctx context.Context, flagKey, env string) {
+	_ = b.rdb.Del(ctx, tripLockKey(flagKey, env)).Err()
+}
+
 // SetState updates the circuit state for a flag in an environment in Redis.
 func (b *Breaker) SetState(ctx context.Context, flagKey, env string, state State, ttl time.Duration) {
 	_ = b.rdb.Set(ctx, stateKey(flagKey, env), string(state), ttl).Err()
 	b.logger.Info("circuit breaker state change",
 		zap.String("flag", flagKey), zap.String("env", env), zap.String("state", string(state)))
+}
+
+// rollbackSteps is the ladder Aggregator.Flush walks DOWN once tripped,
+// each step a lower rollout percentage than the last (100% is implicit --
+// nothing has been stepped down yet). Deterministic and unconditional:
+// once ShouldTrip has fired, every subsequent tick advances to the next
+// step regardless of that tick's own error rate, all the way to 0% --
+// this is a safety-critical kill path, not a place to second-guess a
+// single good-looking window mid-descent. recoverySteps is the mirror
+// ladder Flush walks UP during HALF_OPEN, WITH per-step verification
+// (see NextRecoveryStep's caller in aggregator.go) -- unlike the descent,
+// each step up is gated on that step's own error rate looking healthy.
+var rollbackSteps = []int{50, 25, 0}
+var recoverySteps = []int{10, 25, 50, 100}
+
+// NextRollbackStep returns the next lower percentage in rollbackSteps
+// given the current one (100 if nothing has been stepped down from yet).
+// done reports whether next is the ladder's terminal 0% step.
+func NextRollbackStep(current int) (next int, done bool) {
+	for _, s := range rollbackSteps {
+		if s < current {
+			return s, s == 0
+		}
+	}
+	return 0, true
+}
+
+// NextRecoveryStep returns the next higher percentage in recoverySteps
+// given the current probe percentage. recovered reports whether next is
+// the ladder's terminal 100% step (fully restored -- the caller should
+// transition back to CLOSED rather than staying HALF_OPEN at 100%).
+func NextRecoveryStep(current int) (next int, recovered bool) {
+	for _, s := range recoverySteps {
+		if s > current {
+			return s, s == 100
+		}
+	}
+	return 100, true
+}
+
+// stepKey builds the Redis key tracking the last rollout percentage this
+// breaker itself set via the stepped ladder (either direction) -- distinct
+// from stateKey's own CLOSED/OPEN/HALF_OPEN value, since a single state can
+// span several distinct percentages over its lifetime.
+func stepKey(flagKey, env string) string {
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":step"
+}
+
+// openedAtKey builds the Redis key recording when a flag last reached the
+// rollback ladder's terminal 0% step -- the moment ObservationWindow's
+// cooldown starts counting down before Flush attempts a HALF_OPEN recovery
+// probe. Reset (re-set to now) every time a HALF_OPEN probe reverts back to
+// OPEN, so a flag that keeps failing recovery never probes more often than
+// once per ObservationWindow.
+func openedAtKey(flagKey, env string) string {
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":opened-at"
+}
+
+// stepTTL bounds both stepKey and openedAtKey -- generously longer than any
+// plausible full descent-cooldown-recovery cycle, so a crashed evaluator
+// replica's abandoned mid-ladder state self-heals rather than persisting
+// forever. GetStep/GetOpenedAt's own "not found" defaults (100 and "not
+// set", respectively) are exactly the right values to resume a fresh
+// CLOSED-state assessment from, so an expired key is never a correctness
+// problem -- only ever a (harmless) loss of ladder-position memory.
+const stepTTL = 24 * time.Hour
+
+// GetStep returns the last rollout percentage this breaker itself set for
+// flagKey/env via the stepped ladder, or 100 if none is recorded (CLOSED,
+// or the key expired) -- 100 is the correct "nothing stepped down yet"
+// starting point for NextRollbackStep.
+func (b *Breaker) GetStep(ctx context.Context, flagKey, env string) int {
+	val, err := b.rdb.Get(ctx, stepKey(flagKey, env)).Result()
+	if err != nil {
+		return 100
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 100
+	}
+	return n
+}
+
+// SetStep records the rollout percentage this breaker just set.
+func (b *Breaker) SetStep(ctx context.Context, flagKey, env string, pct int) {
+	_ = b.rdb.Set(ctx, stepKey(flagKey, env), strconv.Itoa(pct), stepTTL).Err()
+}
+
+// GetOpenedAt returns when flagKey/env last reached the rollback ladder's
+// terminal 0% step, and whether that time is actually recorded (false
+// means "never reached 0%, or the record expired" -- the caller must not
+// attempt a HALF_OPEN transition without a real timestamp to measure
+// ObservationWindow against).
+func (b *Breaker) GetOpenedAt(ctx context.Context, flagKey, env string) (time.Time, bool) {
+	val, err := b.rdb.Get(ctx, openedAtKey(flagKey, env)).Result()
+	if err != nil {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
+}
+
+// SetOpenedAt records t as the moment flagKey/env reached (or re-reached,
+// after a failed recovery probe) the rollback ladder's terminal 0% step.
+func (b *Breaker) SetOpenedAt(ctx context.Context, flagKey, env string, t time.Time) {
+	_ = b.rdb.Set(ctx, openedAtKey(flagKey, env), strconv.FormatInt(t.Unix(), 10), stepTTL).Err()
 }
 
 // Window holds an aggregated error rate window for a flag.

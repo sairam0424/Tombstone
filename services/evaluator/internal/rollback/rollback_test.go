@@ -115,3 +115,122 @@ func TestRollbackExecute_AuthHeaderForwarded(t *testing.T) {
 		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
 	}
 }
+
+// TestSetRolloutPct_CallsRollbackStepEndpoint verifies SetRolloutPct calls
+// EVAL-4's graduated rollback-step endpoint (not the binary kill switch)
+// with the correct flag key, environment, rollout_pct, and reason.
+func TestSetRolloutPct_CallsRollbackStepEndpoint(t *testing.T) {
+	var called atomic.Int32
+	var capturedBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/flags/my-flag/rollback-step" {
+			called.Add(1)
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor(srv.URL, "test-token", newNoopRedis(), zap.NewNop())
+
+	err := exec.SetRolloutPct(context.Background(), "my-flag", "production", 50, "circuit_breaker")
+	if err != nil {
+		t.Fatalf("SetRolloutPct() returned unexpected error: %v", err)
+	}
+	if called.Load() != 1 {
+		t.Errorf("rollback-step endpoint called %d times, want 1", called.Load())
+	}
+
+	var body map[string]any
+	if jsonErr := json.Unmarshal(capturedBody, &body); jsonErr != nil {
+		t.Fatalf("rollback-step body is not valid JSON: %v", jsonErr)
+	}
+	if body["environment"] != "production" {
+		t.Errorf("body environment = %v, want production", body["environment"])
+	}
+	if body["rollout_pct"] != float64(50) {
+		t.Errorf("body rollout_pct = %v, want 50", body["rollout_pct"])
+	}
+	if body["reason"] != "circuit_breaker" {
+		t.Errorf("body reason = %v, want circuit_breaker", body["reason"])
+	}
+}
+
+// TestSetRolloutPct_409IsTreatedAsSuccess verifies a 409 (flag-api's atomic
+// write refused a stale target because a concurrent, more-aggressive step
+// already won) returns nil, not an error -- the safety property this call
+// exists to establish already holds by the time it returns.
+func TestSetRolloutPct_409IsTreatedAsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor(srv.URL, "test-token", newNoopRedis(), zap.NewNop())
+
+	err := exec.SetRolloutPct(context.Background(), "my-flag", "production", 50, "circuit_breaker")
+	if err != nil {
+		t.Errorf("SetRolloutPct() with a 409 response returned an error: %v, want nil", err)
+	}
+}
+
+// TestSetRolloutPct_ReturnsErrorOnOtherHTTP4xx verifies a non-409 4xx (e.g.
+// 403 permission denied, 400 validation) still returns an error, unlike 409.
+func TestSetRolloutPct_ReturnsErrorOnOtherHTTP4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor(srv.URL, "test-token", newNoopRedis(), zap.NewNop())
+
+	err := exec.SetRolloutPct(context.Background(), "my-flag", "production", 50, "circuit_breaker")
+	if err == nil {
+		t.Error("SetRolloutPct() expected an error on HTTP 403, got nil")
+	}
+}
+
+// TestSetRolloutPct_RejectsOutOfRangePct verifies out-of-range percentages
+// are rejected locally, without making a network call at all.
+func TestSetRolloutPct_RejectsOutOfRangePct(t *testing.T) {
+	var called atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor(srv.URL, "test-token", newNoopRedis(), zap.NewNop())
+
+	for _, pct := range []int{-1, 101} {
+		if err := exec.SetRolloutPct(context.Background(), "my-flag", "production", pct, "circuit_breaker"); err == nil {
+			t.Errorf("SetRolloutPct(pct=%d) expected an error, got nil", pct)
+		}
+	}
+	if called.Load() != 0 {
+		t.Errorf("rollback-step endpoint called %d times for out-of-range input, want 0", called.Load())
+	}
+}
+
+// TestSetRolloutPct_AuthHeaderForwarded mirrors
+// TestRollbackExecute_AuthHeaderForwarded for the new endpoint.
+func TestSetRolloutPct_AuthHeaderForwarded(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exec := NewExecutor(srv.URL, "my-secret-token", newNoopRedis(), zap.NewNop())
+
+	_ = exec.SetRolloutPct(context.Background(), "auth-flag", "production", 50, "test")
+
+	want := "Bearer my-secret-token"
+	if gotAuth != want {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
+	}
+}
