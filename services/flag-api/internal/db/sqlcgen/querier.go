@@ -100,7 +100,6 @@ type Querier interface {
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
-	KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchFlagEnvironmentParams) (int64, error)
 	ListActiveFlagsByOwner(ctx context.Context, ownerID string) ([]ListActiveFlagsByOwnerRow, error)
 	// The project_id parameter is cast to ::uuid (never the column to text) on
 	// both sides of the OR — casting a uuid column to text to compare it against
@@ -151,6 +150,18 @@ type Querier interface {
 	// to `user_id = lower($1)`, which would make the column-side comparison
 	// case-sensitive again.
 	RevokeUserRoles(ctx context.Context, userEmail string) ([]string, error)
+	// EVAL-4: RollbackStep's atomic compare-and-swap write. The exposure guard
+	// ($7, the caller's own requested target) is evaluated by Postgres as part
+	// of the SAME statement that performs the write, closing a TOCTOU gap a
+	// separate SELECT-then-UPDATE would have between reading "current" state
+	// and committing the new one -- two concurrent rollback-step calls could
+	// otherwise each pass their own read-time check and then last-write-wins,
+	// letting a less-aggressive step silently overwrite a more-aggressive one
+	// (found by adversarial review of PR #220). Rows affected = 0 means either
+	// the flag/environment doesn't exist, or a concurrent write already
+	// reduced exposure below this request's own target -- the caller
+	// disambiguates via a follow-up read.
+	RollbackFlagEnvironment(ctx context.Context, arg RollbackFlagEnvironmentParams) (int64, error)
 	SelectDueScheduledChanges(ctx context.Context) ([]SelectDueScheduledChangesRow, error)
 	// Shared by flags.go's UpdateEnvironment and change_requests.go's
 	// ApproveChangeRequest apply path — byte-identical SQL in both original

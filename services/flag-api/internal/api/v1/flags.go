@@ -434,8 +434,22 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	)
 
 	actor := actorFromContext(r.Context())
-	n, err := sqlcgen.New(h.db).KillSwitchFlagEnvironment(r.Context(), sqlcgen.KillSwitchFlagEnvironmentParams{
-		UpdatedBy: actor, Key: key, Environment: req.Environment, ProjectID: projectID,
+	// Reuses UpdateFlagEnvironment (the same query UpdateEnvironment's own
+	// handler calls) rather than a dedicated kill-only query -- as a side
+	// effect this fixes a pre-existing gap where a full kill left
+	// rollout_pct untouched in the DB even though the published event/audit
+	// record always claimed 0: now both agree. KillSwitch stays a pure,
+	// always-safe binary action (enabled=false, rollout_pct=0) -- EVAL-4's
+	// graduated rollback-step capability is a SEPARATE endpoint
+	// (RollbackStep) with its own, narrower permission, specifically so
+	// this endpoint's existing require_approval bypass (see
+	// projectRequiresApproval's absence from this handler, contrasting
+	// UpdateEnvironment's explicit check) never widens into a general,
+	// OWNER/ADMIN-usable approval-bypass path for arbitrary percentage
+	// changes -- see PR #220's adversarial review.
+	n, err := sqlcgen.New(h.db).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+		Enabled: false, RolloutPct: 0, UpdatedBy: actor,
+		Key: key, Environment: req.Environment, ProjectID: projectID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -447,7 +461,7 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "kill_switch_activated",
-		nil, map[string]any{"enabled": false, "reason": req.Reason}, ipFromRequest(r))
+		nil, map[string]any{"enabled": false, "rollout_pct": 0, "reason": req.Reason}, ipFromRequest(r))
 	// GW-1: see UpdateEnvironment's identical comment above — one event
 	// value shared by both transports, not two independently-timestamped
 	// literals.
@@ -459,6 +473,167 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	h.publishToStream(r.Context(), req.Environment, killEvent)
 
 	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
+}
+
+// RollbackStep handles POST /api/v1/flags/{key}/rollback-step -- EVAL-4's
+// automated, graduated rollback capability, gated by flags:circuit_breaker
+// (RoleCircuitBreaker, assignable only via service_tokens.role -- never a
+// human project-membership grant, see migration 026) rather than
+// flags:kill_switch, so no OWNER/ADMIN gets this for free the way they
+// already hold the full kill switch. Deliberately bypasses require_approval
+// the same way KillSwitch does (see that handler's own comment) -- an
+// automated incident-response mechanism must not be blockable by a workflow
+// gate meant for routine, human-initiated changes.
+//
+// Unlike KillSwitch, this endpoint is NOT unconditional: it reads the
+// flag's current state first and REJECTS any request that would increase
+// exposure (raise rollout_pct or re-enable a disabled flag). A "rollback
+// step" that can accidentally widen blast radius during a real incident --
+// e.g. from a misconfigured caller or a wrong percentage -- would defeat
+// the entire point of this being a safety mechanism.
+func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	type stepReq struct {
+		Environment string `json:"environment"`
+		Reason      string `json:"reason"`
+		// RolloutPct is a required pointer, not a plain int: this endpoint's
+		// entire purpose is setting a SPECIFIC percentage, so an omitted
+		// field must be a validation error, not silently indistinguishable
+		// from an explicit 0 (full kill) -- a caller bug that drops the
+		// field must not be misread as a deliberate full rollback (found
+		// by adversarial review of PR #220).
+		RolloutPct *int `json:"rollout_pct"`
+	}
+	var req stepReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Environment == "" {
+		writeError(w, http.StatusBadRequest, "environment is required")
+		return
+	}
+	if req.RolloutPct == nil {
+		writeError(w, http.StatusBadRequest, "rollout_pct is required")
+		return
+	}
+	if *req.RolloutPct < 0 || *req.RolloutPct > 100 {
+		writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "circuit_breaker"
+	}
+
+	// currentExposure/targetExposure treat a disabled flag as 0% exposure
+	// regardless of its stored rollout_pct -- enabled=false already means
+	// no traffic sees it, so the comparison that matters is the EFFECTIVE
+	// exposure, not the raw column value.
+	targetEnabled := *req.RolloutPct > 0
+	targetExposure := 0
+	if targetEnabled {
+		targetExposure = *req.RolloutPct
+	}
+
+	prev, err := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "flag or environment not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	currentExposure := 0
+	if prev.Enabled {
+		currentExposure = int(prev.RolloutPct)
+	}
+	// This early check gives a fast, friendly error in the common
+	// (non-racing) case. It is NOT what actually enforces the invariant --
+	// RollbackFlagEnvironment's own WHERE clause below re-checks the SAME
+	// condition atomically as part of the write itself, closing the TOCTOU
+	// gap this read-then-decide sequence would otherwise have between two
+	// concurrent rollback-step calls (found by adversarial review of
+	// PR #220's first version, which used a separate, unconditional
+	// UpdateFlagEnvironment write here).
+	if targetExposure > currentExposure {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"rollback-step cannot increase exposure: requested %d%%, current effective exposure is %d%%",
+			targetExposure, currentExposure))
+		return
+	}
+
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("flag.key", key),
+		attribute.String("flag.environment", req.Environment),
+		attribute.Bool("flag.enabled", targetEnabled),
+		attribute.Int("flag.rollout_pct", targetExposure),
+		attribute.String("flag.rollback_reason", req.Reason),
+	)
+
+	actor := actorFromContext(r.Context())
+	n, err := sqlcgen.New(h.db).RollbackFlagEnvironment(r.Context(), sqlcgen.RollbackFlagEnvironmentParams{
+		Enabled: targetEnabled, RolloutPct: int32(targetExposure), UpdatedBy: actor,
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+		MinCurrentExposure: int32(targetExposure),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
+		// Either the flag/environment doesn't exist, or a concurrent
+		// rollback-step call already reduced exposure below this
+		// request's own target between our read above and this write --
+		// re-read to tell the two apart rather than guessing.
+		latest, latestErr := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+			Key: key, Environment: req.Environment, ProjectID: projectID,
+		})
+		if errors.Is(latestErr, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "flag or environment not found")
+			return
+		}
+		if latestErr != nil {
+			writeError(w, http.StatusInternalServerError, latestErr.Error())
+			return
+		}
+		latestExposure := 0
+		if latest.Enabled {
+			latestExposure = int(latest.RolloutPct)
+		}
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"a concurrent rollback step already reduced exposure to %d%%, below this request's target of %d%%",
+			latestExposure, targetExposure))
+		return
+	}
+
+	// A distinct event_type from KillSwitch's "kill_switch_activated" --
+	// PR #220's adversarial review found reusing that event_type made a
+	// destructive full kill indistinguishable from a non-destructive
+	// graduated reduction without opening every entry's new_state payload.
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "circuit_breaker_rollback_step",
+		map[string]any{"enabled": prev.Enabled, "rollout_pct": prev.RolloutPct},
+		map[string]any{"enabled": targetEnabled, "rollout_pct": targetExposure, "reason": req.Reason}, ipFromRequest(r))
+	stepEvent := FlagEvent{
+		FlagKey: key, Enabled: targetEnabled, RolloutPct: targetExposure,
+		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
+	}
+	h.publishEvent(r.Context(), req.Environment, stepEvent)
+	h.publishToStream(r.Context(), req.Environment, stepEvent)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flag_key": key, "environment": req.Environment,
+		"enabled": targetEnabled, "rollout_pct": targetExposure,
+	})
 }
 
 // ArchiveFlag handles DELETE /api/v1/flags/{key}

@@ -52,6 +52,13 @@ permissions := {
 		"audit:read", "experiments:read", "experiments:write",
 		"admin:admin",
 	},
+	# CIRCUIT_BREAKER is assignable only via service_tokens.role (migration
+	# 026) -- never held by a human project-membership grant. Deliberately
+	# excludes flags:write/flags:kill_switch: its sole purpose is
+	# flags:circuit_breaker (EVAL-4's automated rollback-step endpoint).
+	"circuit_breaker": {
+		"flags:read", "flags:circuit_breaker",
+	},
 }
 
 allow if {

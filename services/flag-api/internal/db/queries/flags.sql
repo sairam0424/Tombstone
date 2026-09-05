@@ -44,9 +44,21 @@ WHERE f.key=$1 AND fe.environment=$2 AND f.project_id=$3;
 UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
 FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6;
 
--- name: KillSwitchFlagEnvironment :execrows
-UPDATE flag_environments fe SET enabled=false, updated_at=now(), updated_by=$1
-FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.project_id=$4;
+-- EVAL-4: RollbackStep's atomic compare-and-swap write. The exposure guard
+-- ($7, the caller's own requested target) is evaluated by Postgres as part
+-- of the SAME statement that performs the write, closing a TOCTOU gap a
+-- separate SELECT-then-UPDATE would have between reading "current" state
+-- and committing the new one -- two concurrent rollback-step calls could
+-- otherwise each pass their own read-time check and then last-write-wins,
+-- letting a less-aggressive step silently overwrite a more-aggressive one
+-- (found by adversarial review of PR #220). Rows affected = 0 means either
+-- the flag/environment doesn't exist, or a concurrent write already
+-- reduced exposure below this request's own target -- the caller
+-- disambiguates via a follow-up read.
+-- name: RollbackFlagEnvironment :execrows
+UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
+FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
+  AND (CASE WHEN fe.enabled THEN fe.rollout_pct ELSE 0 END) >= sqlc.arg(min_current_exposure)::integer;
 
 -- name: ArchiveFlag :execrows
 UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2;

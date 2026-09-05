@@ -24,6 +24,13 @@ const (
 	RoleOperator Role = "OPERATOR"
 	RoleOwner    Role = "OWNER"
 	RoleAdmin    Role = "ADMIN"
+	// RoleCircuitBreaker is assignable ONLY via service_tokens.role
+	// (migration 026) -- user_roles' own CHECK constraint has no such value,
+	// so no human project-membership grant can ever resolve to this role.
+	// Scopes flags:circuit_breaker (EVAL-4's automated rollback-step
+	// endpoint) away from the human-held OWNER/ADMIN roles that already
+	// hold flags:kill_switch.
+	RoleCircuitBreaker Role = "CIRCUIT_BREAKER"
 )
 
 type Permission struct {
@@ -78,6 +85,14 @@ var permissionMatrix = map[Role][]Permission{
 		{Resource: "experiments", Action: "read"},
 		{Resource: "experiments", Action: "write"},
 		{Resource: "admin", Action: "admin"},
+	},
+	// RoleCircuitBreaker deliberately holds neither flags:write nor
+	// flags:kill_switch -- its entire purpose is the automated rollback-step
+	// endpoint, not general flag administration. flags:read lets a future
+	// caller sanity-check current state before acting; nothing else.
+	RoleCircuitBreaker: {
+		{Resource: "flags", Action: "read"},
+		{Resource: "flags", Action: "circuit_breaker"},
 	},
 }
 
