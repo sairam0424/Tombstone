@@ -9,6 +9,7 @@ from app.experiments.analyzer import ExperimentAnalyzer
 from app.experiments.collision import ExperimentSpec, detect_collisions
 from app.experiments.cuped import cuped_effect_size
 from app.experiments.models import ExperimentDefinition
+from app.experiments.srm import srm_check
 from app.warehouse.connector import get_connector
 
 router = APIRouter(prefix="/api/v1/experiments", tags=["experiments"])
@@ -52,12 +53,17 @@ class RunExperimentRequest(BaseModel):
 class RunExperimentResponse(BaseModel):
     experiment_id: str
     flag_key: str
+    # Valid values: "SHIP" | "NO_SHIP" | "CONTINUE" | "BLOCKED_SRM" (EXP-2 --
+    # see app/experiments/srm.py; a mismatch means the traffic split itself
+    # is broken, so relative_lift/is_significant/p_value above still reflect
+    # whatever the stat_method computed, but should not be trusted).
     recommendation: str
     relative_lift: float
     is_significant: bool
     sample_sizes: dict[str, int]
     probability_beats_control: float | None = None
     p_value: float | None = None
+    srm_p_value: float | None = None
     ai_explanation: str = ""
     explanation_generated: bool = False
 
@@ -188,6 +194,11 @@ async def analyze_experiment(req: RunExperimentRequest):
             detail="Insufficient data: one or both variants returned no rows",
         )
 
+    sample_sizes = {
+        "control": control.sample_size,
+        "treatment": treatment.sample_size,
+    }
+
     experiment = ExperimentDefinition(
         id=req.experiment_id,
         flag_key=req.flag_key,
@@ -211,7 +222,34 @@ async def analyze_experiment(req: RunExperimentRequest):
             metric_name=req.metric_name,
         )
 
-    recommendation = analyzer.recommend([result])
+    # EXP-2: n_control/n_treatment let recommend() check SRM (Sample Ratio
+    # Mismatch) FIRST, ahead of every metric result -- a broken traffic
+    # split invalidates any statistical result computed on top of it. See
+    # app/experiments/srm.py's module docstring for why. The stat_method
+    # analysis above still runs even when SRM ends up mismatched (it is a
+    # cheap, already-fetched in-process computation, not worth gating);
+    # what IS worth skipping is the real network round-trip below.
+    recommendation = analyzer.recommend(
+        [result], n_control=control.sample_size, n_treatment=treatment.sample_size
+    )
+    srm_p_value = round(
+        srm_check(control.sample_size, treatment.sample_size).p_value, 6
+    )
+
+    if recommendation == "BLOCKED_SRM":
+        return RunExperimentResponse(
+            experiment_id=req.experiment_id,
+            flag_key=req.flag_key,
+            recommendation=recommendation,
+            relative_lift=result.relative_lift,
+            is_significant=result.is_significant,
+            sample_sizes=sample_sizes,
+            probability_beats_control=result.probability_beats_control,
+            p_value=result.p_value,
+            srm_p_value=srm_p_value,
+            ai_explanation="",
+            explanation_generated=False,
+        )
 
     ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
     explanation = await generate_ship_explanation(
@@ -219,10 +257,7 @@ async def analyze_experiment(req: RunExperimentRequest):
         recommendation=recommendation,
         relative_lift=result.relative_lift,
         is_significant=result.is_significant,
-        sample_sizes={
-            "control": control.sample_size,
-            "treatment": treatment.sample_size,
-        },
+        sample_sizes=sample_sizes,
         metric_name=req.metric_name,
         probability_beats_control=result.probability_beats_control,
         anthropic_api_key=ai_key,
@@ -234,12 +269,10 @@ async def analyze_experiment(req: RunExperimentRequest):
         recommendation=recommendation,
         relative_lift=result.relative_lift,
         is_significant=result.is_significant,
-        sample_sizes={
-            "control": control.sample_size,
-            "treatment": treatment.sample_size,
-        },
+        sample_sizes=sample_sizes,
         probability_beats_control=result.probability_beats_control,
         p_value=result.p_value,
+        srm_p_value=srm_p_value,
         ai_explanation=explanation,
         explanation_generated=bool(explanation),
     )

@@ -14,7 +14,7 @@ import pytest
 from scipy import stats  # type: ignore[import]
 
 from app.experiments.analyzer import ExperimentAnalyzer
-from app.experiments.models import ExperimentDefinition
+from app.experiments.models import ExperimentDefinition, MetricResult, VariantStats
 from app.warehouse.connector import AggregatedMetric
 
 
@@ -771,3 +771,71 @@ class TestMSPRTEValueGroundTruth:
 
         assert actual_e == pytest.approx(expected_e, abs=5e-5, rel=1e-4)
         assert result.is_significant is True
+
+
+def _significant_positive_result() -> MetricResult:
+    return MetricResult(
+        metric_name="conversion",
+        control=VariantStats("control", 1000, 0.10, 0.3, 0.10),
+        treatment=VariantStats("treatment", 1000, 0.20, 0.4, 0.20),
+        relative_lift=1.0,
+        p_value=0.001,
+        probability_beats_control=None,
+        is_significant=True,
+    )
+
+
+class TestRecommendSRMGate:
+    """
+    EXP-2: ExperimentAnalyzer.recommend() had zero test coverage of any
+    kind before this class. Covers both the pre-existing SHIP/NO_SHIP/
+    CONTINUE logic (unchanged) and the new SRM gate, which must fire
+    BEFORE any metric result is even consulted -- a broken traffic split
+    invalidates every metric computed on top of it.
+    """
+
+    def test_srm_mismatch_blocks_regardless_of_a_significant_positive_result(self):
+        result = _significant_positive_result()
+
+        recommendation = ExperimentAnalyzer().recommend(
+            [result], n_control=6000, n_treatment=4000
+        )
+
+        assert recommendation == "BLOCKED_SRM"
+
+    def test_a_clean_split_still_reaches_the_real_ship_recommendation(self):
+        result = _significant_positive_result()
+
+        recommendation = ExperimentAnalyzer().recommend(
+            [result], n_control=5000, n_treatment=5000
+        )
+
+        assert recommendation == "SHIP"
+
+    def test_omitting_sample_sizes_entirely_skips_the_srm_gate(self):
+        """Backward compatibility: a caller with no sample-size figures
+        handy (n_control/n_treatment both default to None) must get
+        exactly today's pre-EXP-2 behavior, never BLOCKED_SRM."""
+        result = _significant_positive_result()
+
+        recommendation = ExperimentAnalyzer().recommend([result])
+
+        assert recommendation == "SHIP"
+
+    def test_a_non_default_expected_ratio_is_honored_not_ignored(self):
+        """A 90/10 rollout is intentional -- checking it against an
+        implicit 50/50 default would wrongly block a healthy experiment."""
+        result = _significant_positive_result()
+
+        recommendation = ExperimentAnalyzer().recommend(
+            [result], n_control=9000, n_treatment=1000, expected_ratio=0.9
+        )
+
+        assert recommendation == "SHIP"
+
+    def test_empty_results_with_a_clean_split_still_returns_continue_not_blocked(self):
+        recommendation = ExperimentAnalyzer().recommend(
+            [], n_control=5000, n_treatment=5000
+        )
+
+        assert recommendation == "CONTINUE"

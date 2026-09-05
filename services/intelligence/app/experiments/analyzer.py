@@ -6,6 +6,7 @@ from app.experiments.models import (
     MetricResult,
     VariantStats,
 )
+from app.experiments.srm import srm_check
 from app.warehouse.connector import AggregatedMetric
 
 
@@ -235,12 +236,30 @@ class ExperimentAnalyzer:
             is_significant=is_significant,
         )
 
-    def recommend(self, results: list[MetricResult]) -> str:
+    def recommend(
+        self,
+        results: list[MetricResult],
+        n_control: int | None = None,
+        n_treatment: int | None = None,
+        expected_ratio: float = 0.5,
+    ) -> str:
         """
+        BLOCKED_SRM: n_control/n_treatment were supplied and their split is
+                     statistically incompatible with expected_ratio (EXP-2)
+                     -- checked FIRST, before any metric result, since a
+                     broken traffic split invalidates every metric computed
+                     on top of it. n_control/n_treatment are optional
+                     (default None) so a caller with no sample-size figures
+                     handy keeps today's exact behavior.
         SHIP: all primary metrics significant and positive.
         NO_SHIP: any primary metric significant and negative.
         CONTINUE: insufficient data or mixed signals.
         """
+        if n_control is not None and n_treatment is not None:
+            srm = srm_check(n_control, n_treatment, expected_ratio)
+            if srm.is_mismatch:
+                return "BLOCKED_SRM"
+
         if not results:
             return "CONTINUE"
 
