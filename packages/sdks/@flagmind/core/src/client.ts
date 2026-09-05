@@ -61,6 +61,21 @@ export class TombstoneClient {
     // EVAL-2: opt-in only -- no telemetryUrl means no timer, no network
     // calls, no behavior change for any existing caller.
     if (this.config.telemetryUrl) {
+      // Clear any timer a PRIOR connect() call already started before
+      // creating a new one -- found by adversarial review of PR #218:
+      // isConnected() stays false for this method's entire fetchSnapshot()
+      // await above, so two overlapping connect() calls (e.g. two
+      // concurrent initialize() callers each guarding with
+      // `if (!isConnected()) await connect()`, a classic TOCTOU race) both
+      // reach here and would otherwise each create their OWN setInterval,
+      // overwriting this.telemetryFlushTimer and orphaning the earlier one
+      // forever -- it keeps firing (POSTing telemetry) even after a later
+      // disconnect() call, since disconnect() can only ever clear whichever
+      // timer this field currently points at. Reproduced empirically by
+      // the review before this fix.
+      if (this.telemetryFlushTimer !== undefined) {
+        clearInterval(this.telemetryFlushTimer);
+      }
       const intervalMs =
         this.config.telemetryFlushIntervalMs ??
         DEFAULT_TELEMETRY_FLUSH_INTERVAL_MS;
@@ -261,7 +276,16 @@ export class TombstoneClient {
     try {
       await fetch(`${this.config.telemetryUrl}/api/v1/telemetry`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // Matches fetchSnapshot's/fetchAndStoreRules's convention (both
+          // send this) even though the evaluator's /api/v1/telemetry route
+          // is currently unauthenticated (found by adversarial review of
+          // PR #218) -- if that route is ever put behind auth, sending
+          // this now means telemetry keeps working with zero SDK change
+          // instead of every POST silently starting to 401 and drop.
+          Authorization: `Bearer ${this.config.sdkKey}`,
+        },
         body: JSON.stringify(batch),
       });
     } catch {

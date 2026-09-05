@@ -10,14 +10,59 @@
  * this file installs a minimal fake before constructing TombstoneClient —
  * matching streaming.test.ts's FakeEventSource convention for the same
  * reason (no real network calls in unit tests).
+ *
+ * This file installs its OWN EventSource stub (rather than relying on
+ * streaming.test.ts having already set globalThis.EventSource as a side
+ * effect of mocha's file-load order) -- found by adversarial review of
+ * PR #218: running this file in isolation without streaming.test.ts
+ * previously threw ReferenceError: EventSource is not defined from inside
+ * connect().
  */
 import { strict as assert } from "assert";
 import { TombstoneClient } from "../client.js";
 import type { FlagSnapshot, TombstoneClientConfig } from "../types.js";
 
+type Listener = (e: { data?: string }) => void;
+
+class FakeEventSource {
+  listeners: Record<string, Listener[]> = {};
+  onerror: (() => void) | null = null;
+  closed = false;
+
+  constructor(
+    public url: string,
+    public opts?: unknown,
+  ) {}
+
+  addEventListener(type: string, cb: Listener): void {
+    (this.listeners[type] ??= []).push(cb);
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+}
+
+(globalThis as unknown as { EventSource: unknown }).EventSource =
+  FakeEventSource;
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 500,
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor: condition never became true");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 interface RecordedCall {
   url: string;
   method: string;
+  headers: Record<string, string>;
   body?: string;
 }
 
@@ -27,10 +72,15 @@ class FakeFetch {
 
   fn = async (
     url: string,
-    init?: { method?: string; body?: string },
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
   ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> => {
     const method = init?.method ?? "GET";
-    this.calls.push({ url, method, body: init?.body });
+    this.calls.push({
+      url,
+      method,
+      headers: init?.headers ?? {},
+      body: init?.body,
+    });
 
     if (url.includes("/api/v1/environments/snapshot")) {
       const snapshot: FlagSnapshot = {
@@ -117,6 +167,12 @@ describe("TombstoneClient — EVAL-2 telemetry", () => {
     const posts = fakeFetch.postCalls();
     assert.equal(posts.length, 1);
     assert.equal(posts[0].url, "http://localhost:8082/api/v1/telemetry");
+    // Method AND headers -- a regression to GET, a missing Content-Type,
+    // or a missing Authorization would previously have been invisible to
+    // every test in this file (found by adversarial review of PR #218).
+    assert.equal(posts[0].method, "POST");
+    assert.equal(posts[0].headers["Content-Type"], "application/json");
+    assert.equal(posts[0].headers.Authorization, "Bearer test-key");
     const batch = JSON.parse(posts[0].body ?? "[]") as Array<
       Record<string, unknown>
     >;
@@ -236,5 +292,124 @@ describe("TombstoneClient — EVAL-2 telemetry", () => {
 
     await assert.doesNotReject(client.flush());
     client.disconnect();
+  });
+
+  it("the periodic interval timer itself flushes -- not just the manual flush() wrapper", async () => {
+    /**
+     * Every other test in this file drives flushTelemetry() via the manual
+     * client.flush() wrapper or disconnect()'s explicit final flush -- none
+     * of them let the setInterval-based periodic flush (this PR's own
+     * stated purpose) actually fire on its own. Found by adversarial
+     * review of PR #218, which proved this gap empirically by disabling
+     * the interval callback's body and confirming the full suite still
+     * passed. Uses a short REAL interval + waitFor polling (matching
+     * streaming.test.ts's own debounce-timing test convention) since no
+     * fake-timer library is a devDependency of this package.
+     */
+    const client = new TombstoneClient(
+      baseConfig({
+        telemetryUrl: "http://localhost:8082",
+        telemetryFlushIntervalMs: 5,
+      }),
+    );
+    await client.connect();
+
+    client.evaluate("some-flag", { userId: "u1" });
+    assert.equal(fakeFetch.postCalls().length, 0); // not flushed yet
+
+    await waitFor(() => fakeFetch.postCalls().length === 1);
+
+    client.disconnect();
+  });
+
+  it("caps the buffer at 1000 events and drops the OLDEST, not the newest", async () => {
+    /**
+     * The documented TELEMETRY_BUFFER_MAX=1000 drop-oldest cap was
+     * previously claimed only in a source comment and never exercised by
+     * any test -- the largest evaluate() loop anywhere else in this file
+     * is 20 iterations. Found by adversarial review of PR #218, which
+     * proved the gap empirically by disabling the cap in the compiled
+     * output and confirming the full suite still passed. Pushes 1001
+     * events with DISTINCT, ordered flag keys so the flushed batch's
+     * actual contents can prove both halves of the claim: the buffer
+     * stayed capped at exactly 1000, AND the survivor is the newest event
+     * (flag-1000) while the oldest (flag-0) was the one dropped -- a
+     * drop-newest bug would leave flag-0 present and flag-1000 missing
+     * instead.
+     */
+    const client = new TombstoneClient(
+      baseConfig({ telemetryUrl: "http://localhost:8082" }),
+    );
+    await client.connect();
+
+    for (let i = 0; i <= 1000; i++) {
+      client.evaluate(`flag-${i}`, { userId: "u1" });
+    }
+    await client.flush();
+
+    const batch = JSON.parse(fakeFetch.postCalls()[0].body ?? "[]") as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(batch.length, 1000);
+    assert.equal(
+      batch.some((e) => e.flag_key === "flag-0"),
+      false,
+      "the oldest event (flag-0) should have been dropped once the buffer hit its cap",
+    );
+    assert.equal(
+      batch.some((e) => e.flag_key === "flag-1000"),
+      true,
+      "the newest event (flag-1000) must survive the cap",
+    );
+
+    client.disconnect();
+  });
+
+  it("a second connect() call replaces, not leaks, the telemetry flush timer", async () => {
+    /**
+     * Regression test for a real HIGH-severity bug found by adversarial
+     * review of PR #218, reproduced empirically against the compiled
+     * output before this fix: connect() had no idempotency guard before
+     * creating the telemetry setInterval. isConnected() stays false for
+     * this method's ENTIRE fetchSnapshot() await, so two overlapping
+     * connect() calls (e.g. two concurrent callers each guarding with
+     * `if (!isConnected()) await connect()`, exactly what
+     * TombstoneProvider.initialize()/openfeature.ts's provider both do)
+     * both reached the timer-setup code, each creating their OWN
+     * setInterval and overwriting the single telemetryFlushTimer field --
+     * orphaning the first timer forever, since disconnect() can only ever
+     * clear whichever one the field currently points at. This proves
+     * disconnect() now stops ALL periodic flushing after a double
+     * connect(), not just the most recently created timer: if the fix
+     * regressed, the orphaned first timer would keep firing after
+     * disconnect() and flush a THIRD time.
+     */
+    const client = new TombstoneClient(
+      baseConfig({
+        telemetryUrl: "http://localhost:8082",
+        telemetryFlushIntervalMs: 5,
+      }),
+    );
+
+    await client.connect();
+    await client.connect(); // overlapping/repeated connect() -- must not leak the first timer
+
+    client.evaluate("some-flag", { userId: "u1" });
+    await waitFor(() => fakeFetch.postCalls().length >= 1);
+
+    client.disconnect();
+    const countAtDisconnect = fakeFetch.postCalls().length;
+
+    // If an earlier timer were leaked, it would still be alive here and
+    // could fire again during this wait, growing postCalls() past
+    // countAtDisconnect. Waiting several multiples of the 5ms interval
+    // gives a leaked timer ample opportunity to do so.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(
+      fakeFetch.postCalls().length,
+      countAtDisconnect,
+      "no further telemetry POSTs should occur after disconnect(), even after a double connect()",
+    );
   });
 });
