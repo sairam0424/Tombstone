@@ -409,6 +409,21 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	type killReq struct {
 		Environment string `json:"environment"`
 		Reason      string `json:"reason"`
+		// RolloutPct is optional and nil by default -- EVAL-4's stepped
+		// auto-rollback ladder (100->50->25->0) needs to reduce a flag's
+		// exposure to a specific intermediate percentage, not just cut it
+		// to zero. A nil (omitted) or explicit 0 value means "full kill",
+		// matching every caller of this endpoint before this field existed.
+		// A value in (0,100] means "reduce to this percentage, keep
+		// evaluating" -- enabled stays true, only rollout_pct changes.
+		// This deliberately reuses the kill-switch's own "kill_switch"
+		// permission and its bypass of the require_approval gate below
+		// (see projectRequiresApproval's absence from this handler,
+		// contrasting UpdateEnvironment's explicit check): an automated
+		// incident-response ladder must not be blockable by a workflow
+		// gate designed for routine, human-initiated changes, exactly the
+		// same reasoning that already exempts a full kill.
+		RolloutPct *int `json:"rollout_pct,omitempty"`
 	}
 	var req killReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -423,19 +438,39 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "manual_kill_switch"
 	}
 
+	enabled := false
+	rolloutPct := 0
+	if req.RolloutPct != nil {
+		if *req.RolloutPct < 0 || *req.RolloutPct > 100 {
+			writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
+			return
+		}
+		if *req.RolloutPct > 0 {
+			enabled = true
+			rolloutPct = *req.RolloutPct
+		}
+	}
+
 	// Inject kill-switch state into the active trace span.
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(
 		attribute.String("flag.key", key),
 		attribute.String("flag.environment", req.Environment),
-		attribute.Bool("flag.enabled", false),
-		attribute.Int("flag.rollout_pct", 0),
+		attribute.Bool("flag.enabled", enabled),
+		attribute.Int("flag.rollout_pct", rolloutPct),
 		attribute.String("flag.kill_reason", req.Reason),
 	)
 
 	actor := actorFromContext(r.Context())
-	n, err := sqlcgen.New(h.db).KillSwitchFlagEnvironment(r.Context(), sqlcgen.KillSwitchFlagEnvironmentParams{
-		UpdatedBy: actor, Key: key, Environment: req.Environment, ProjectID: projectID,
+	// Reuses UpdateFlagEnvironment (the same query UpdateEnvironment's own
+	// handler calls) rather than a dedicated kill-only query, since setting
+	// enabled/rollout_pct together is exactly what a graduated step needs --
+	// and, as a side effect, fixes a pre-existing gap where a full kill left
+	// rollout_pct untouched in the DB even though the published event/audit
+	// record always claimed 0: now both agree.
+	n, err := sqlcgen.New(h.db).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+		Enabled: enabled, RolloutPct: int32(rolloutPct), UpdatedBy: actor,
+		Key: key, Environment: req.Environment, ProjectID: projectID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -447,18 +482,21 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "kill_switch_activated",
-		nil, map[string]any{"enabled": false, "reason": req.Reason}, ipFromRequest(r))
+		nil, map[string]any{"enabled": enabled, "rollout_pct": rolloutPct, "reason": req.Reason}, ipFromRequest(r))
 	// GW-1: see UpdateEnvironment's identical comment above — one event
 	// value shared by both transports, not two independently-timestamped
 	// literals.
 	killEvent := FlagEvent{
-		FlagKey: key, Enabled: false, RolloutPct: 0,
+		FlagKey: key, Enabled: enabled, RolloutPct: rolloutPct,
 		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
 	}
 	h.publishEvent(r.Context(), req.Environment, killEvent)
 	h.publishToStream(r.Context(), req.Environment, killEvent)
 
-	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"killed": true, "flag_key": key, "environment": req.Environment,
+		"enabled": enabled, "rollout_pct": rolloutPct,
+	})
 }
 
 // ArchiveFlag handles DELETE /api/v1/flags/{key}

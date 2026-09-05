@@ -242,31 +242,6 @@ func (q *Queries) GetProjectRequireApproval(ctx context.Context, id string) (boo
 	return require_approval, err
 }
 
-const killSwitchFlagEnvironment = `-- name: KillSwitchFlagEnvironment :execrows
-UPDATE flag_environments fe SET enabled=false, updated_at=now(), updated_by=$1
-FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.project_id=$4
-`
-
-type KillSwitchFlagEnvironmentParams struct {
-	UpdatedBy   string
-	Key         string
-	Environment string
-	ProjectID   string
-}
-
-func (q *Queries) KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchFlagEnvironmentParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, killSwitchFlagEnvironment,
-		arg.UpdatedBy,
-		arg.Key,
-		arg.Environment,
-		arg.ProjectID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 const listFlagEnvironmentsForKey = `-- name: ListFlagEnvironmentsForKey :many
 SELECT fe.environment
 FROM flag_environments fe JOIN flags f ON f.id = fe.flag_id

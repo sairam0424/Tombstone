@@ -44,10 +44,6 @@ WHERE f.key=$1 AND fe.environment=$2 AND f.project_id=$3;
 UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
 FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6;
 
--- name: KillSwitchFlagEnvironment :execrows
-UPDATE flag_environments fe SET enabled=false, updated_at=now(), updated_by=$1
-FROM flags f WHERE f.id=fe.flag_id AND f.key=$2 AND fe.environment=$3 AND f.project_id=$4;
-
 -- name: ArchiveFlag :execrows
 UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2;
 

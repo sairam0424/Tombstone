@@ -100,7 +100,6 @@ type Querier interface {
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
-	KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchFlagEnvironmentParams) (int64, error)
 	ListActiveFlagsByOwner(ctx context.Context, ownerID string) ([]ListActiveFlagsByOwnerRow, error)
 	// The project_id parameter is cast to ::uuid (never the column to text) on
 	// both sides of the OR — casting a uuid column to text to compare it against
