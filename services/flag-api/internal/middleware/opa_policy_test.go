@@ -55,7 +55,7 @@ func allPermissionPairs() []Permission {
 // tightens permissionMatrix — without updating the other, this fails.
 func TestOPAPolicyMatchesPermissionMatrix(t *testing.T) {
 	rbac := realOPARBAC(t)
-	roles := []Role{RoleViewer, RoleOperator, RoleOwner, RoleAdmin}
+	roles := []Role{RoleViewer, RoleOperator, RoleOwner, RoleAdmin, RoleCircuitBreaker}
 
 	pairs := allPermissionPairs()
 	pairs = append(pairs, Permission{Resource: "flags", Action: "become_root"}) // held by nobody

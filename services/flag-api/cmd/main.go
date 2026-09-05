@@ -265,6 +265,16 @@ func main() {
 			With(idempotencyMw.Handle("POST /flags/{key}/kill")).
 			Post("/flags/{key}/kill", flagH.KillSwitch)
 
+		// EVAL-4: automated graduated rollback, restricted to
+		// flags:circuit_breaker (RoleCircuitBreaker -- assignable only via
+		// service_tokens.role, never a human project-membership grant).
+		// Deliberately a SEPARATE permission from flags:kill_switch above,
+		// so no OWNER/ADMIN gets this capability for free -- see PR #220's
+		// adversarial review and RollbackStep's own doc comment.
+		r.With(rbacMw.RequirePermission("flags", "circuit_breaker")).
+			With(idempotencyMw.Handle("POST /flags/{key}/rollback-step")).
+			Post("/flags/{key}/rollback-step", flagH.RollbackStep)
+
 		// Flag prerequisites (GrowthBook ParentConditions pattern).
 		// Prerequisites gate whether a flag evaluates at all, so mutating them
 		// is a flag-state change -> flags:write.

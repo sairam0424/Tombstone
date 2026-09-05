@@ -409,21 +409,6 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	type killReq struct {
 		Environment string `json:"environment"`
 		Reason      string `json:"reason"`
-		// RolloutPct is optional and nil by default -- EVAL-4's stepped
-		// auto-rollback ladder (100->50->25->0) needs to reduce a flag's
-		// exposure to a specific intermediate percentage, not just cut it
-		// to zero. A nil (omitted) or explicit 0 value means "full kill",
-		// matching every caller of this endpoint before this field existed.
-		// A value in (0,100] means "reduce to this percentage, keep
-		// evaluating" -- enabled stays true, only rollout_pct changes.
-		// This deliberately reuses the kill-switch's own "kill_switch"
-		// permission and its bypass of the require_approval gate below
-		// (see projectRequiresApproval's absence from this handler,
-		// contrasting UpdateEnvironment's explicit check): an automated
-		// incident-response ladder must not be blockable by a workflow
-		// gate designed for routine, human-initiated changes, exactly the
-		// same reasoning that already exempts a full kill.
-		RolloutPct *int `json:"rollout_pct,omitempty"`
 	}
 	var req killReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -438,38 +423,32 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "manual_kill_switch"
 	}
 
-	enabled := false
-	rolloutPct := 0
-	if req.RolloutPct != nil {
-		if *req.RolloutPct < 0 || *req.RolloutPct > 100 {
-			writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
-			return
-		}
-		if *req.RolloutPct > 0 {
-			enabled = true
-			rolloutPct = *req.RolloutPct
-		}
-	}
-
 	// Inject kill-switch state into the active trace span.
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(
 		attribute.String("flag.key", key),
 		attribute.String("flag.environment", req.Environment),
-		attribute.Bool("flag.enabled", enabled),
-		attribute.Int("flag.rollout_pct", rolloutPct),
+		attribute.Bool("flag.enabled", false),
+		attribute.Int("flag.rollout_pct", 0),
 		attribute.String("flag.kill_reason", req.Reason),
 	)
 
 	actor := actorFromContext(r.Context())
 	// Reuses UpdateFlagEnvironment (the same query UpdateEnvironment's own
-	// handler calls) rather than a dedicated kill-only query, since setting
-	// enabled/rollout_pct together is exactly what a graduated step needs --
-	// and, as a side effect, fixes a pre-existing gap where a full kill left
+	// handler calls) rather than a dedicated kill-only query -- as a side
+	// effect this fixes a pre-existing gap where a full kill left
 	// rollout_pct untouched in the DB even though the published event/audit
-	// record always claimed 0: now both agree.
+	// record always claimed 0: now both agree. KillSwitch stays a pure,
+	// always-safe binary action (enabled=false, rollout_pct=0) -- EVAL-4's
+	// graduated rollback-step capability is a SEPARATE endpoint
+	// (RollbackStep) with its own, narrower permission, specifically so
+	// this endpoint's existing require_approval bypass (see
+	// projectRequiresApproval's absence from this handler, contrasting
+	// UpdateEnvironment's explicit check) never widens into a general,
+	// OWNER/ADMIN-usable approval-bypass path for arbitrary percentage
+	// changes -- see PR #220's adversarial review.
 	n, err := sqlcgen.New(h.db).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
-		Enabled: enabled, RolloutPct: int32(rolloutPct), UpdatedBy: actor,
+		Enabled: false, RolloutPct: 0, UpdatedBy: actor,
 		Key: key, Environment: req.Environment, ProjectID: projectID,
 	})
 	if err != nil {
@@ -482,20 +461,134 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "kill_switch_activated",
-		nil, map[string]any{"enabled": enabled, "rollout_pct": rolloutPct, "reason": req.Reason}, ipFromRequest(r))
+		nil, map[string]any{"enabled": false, "rollout_pct": 0, "reason": req.Reason}, ipFromRequest(r))
 	// GW-1: see UpdateEnvironment's identical comment above — one event
 	// value shared by both transports, not two independently-timestamped
 	// literals.
 	killEvent := FlagEvent{
-		FlagKey: key, Enabled: enabled, RolloutPct: rolloutPct,
+		FlagKey: key, Enabled: false, RolloutPct: 0,
 		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
 	}
 	h.publishEvent(r.Context(), req.Environment, killEvent)
 	h.publishToStream(r.Context(), req.Environment, killEvent)
 
+	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
+}
+
+// RollbackStep handles POST /api/v1/flags/{key}/rollback-step -- EVAL-4's
+// automated, graduated rollback capability, gated by flags:circuit_breaker
+// (RoleCircuitBreaker, assignable only via service_tokens.role -- never a
+// human project-membership grant, see migration 026) rather than
+// flags:kill_switch, so no OWNER/ADMIN gets this for free the way they
+// already hold the full kill switch. Deliberately bypasses require_approval
+// the same way KillSwitch does (see that handler's own comment) -- an
+// automated incident-response mechanism must not be blockable by a workflow
+// gate meant for routine, human-initiated changes.
+//
+// Unlike KillSwitch, this endpoint is NOT unconditional: it reads the
+// flag's current state first and REJECTS any request that would increase
+// exposure (raise rollout_pct or re-enable a disabled flag). A "rollback
+// step" that can accidentally widen blast radius during a real incident --
+// e.g. from a misconfigured caller or a wrong percentage -- would defeat
+// the entire point of this being a safety mechanism.
+func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	type stepReq struct {
+		Environment string `json:"environment"`
+		Reason      string `json:"reason"`
+		RolloutPct  int    `json:"rollout_pct"`
+	}
+	var req stepReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Environment == "" {
+		writeError(w, http.StatusBadRequest, "environment is required")
+		return
+	}
+	if req.RolloutPct < 0 || req.RolloutPct > 100 {
+		writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "circuit_breaker"
+	}
+
+	prev, err := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "flag or environment not found")
+		return
+	}
+
+	// currentExposure/targetExposure treat a disabled flag as 0% exposure
+	// regardless of its stored rollout_pct -- enabled=false already means
+	// no traffic sees it, so the comparison that matters is the EFFECTIVE
+	// exposure, not the raw column value.
+	currentExposure := 0
+	if prev.Enabled {
+		currentExposure = int(prev.RolloutPct)
+	}
+	targetEnabled := req.RolloutPct > 0
+	targetExposure := 0
+	if targetEnabled {
+		targetExposure = req.RolloutPct
+	}
+	if targetExposure > currentExposure {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"rollback-step cannot increase exposure: requested %d%%, current effective exposure is %d%%",
+			targetExposure, currentExposure))
+		return
+	}
+
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("flag.key", key),
+		attribute.String("flag.environment", req.Environment),
+		attribute.Bool("flag.enabled", targetEnabled),
+		attribute.Int("flag.rollout_pct", targetExposure),
+		attribute.String("flag.rollback_reason", req.Reason),
+	)
+
+	actor := actorFromContext(r.Context())
+	n, err := sqlcgen.New(h.db).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
+		Enabled: targetEnabled, RolloutPct: int32(targetExposure), UpdatedBy: actor,
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
+		writeError(w, http.StatusNotFound, "flag or environment not found")
+		return
+	}
+
+	// A distinct event_type from KillSwitch's "kill_switch_activated" --
+	// PR #220's adversarial review found reusing that event_type made a
+	// destructive full kill indistinguishable from a non-destructive
+	// graduated reduction without opening every entry's new_state payload.
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "circuit_breaker_rollback_step",
+		map[string]any{"enabled": prev.Enabled, "rollout_pct": prev.RolloutPct},
+		map[string]any{"enabled": targetEnabled, "rollout_pct": targetExposure, "reason": req.Reason}, ipFromRequest(r))
+	stepEvent := FlagEvent{
+		FlagKey: key, Enabled: targetEnabled, RolloutPct: targetExposure,
+		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
+	}
+	h.publishEvent(r.Context(), req.Environment, stepEvent)
+	h.publishToStream(r.Context(), req.Environment, stepEvent)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"killed": true, "flag_key": key, "environment": req.Environment,
-		"enabled": enabled, "rollout_pct": rolloutPct,
+		"flag_key": key, "environment": req.Environment,
+		"enabled": targetEnabled, "rollout_pct": targetExposure,
 	})
 }
 
