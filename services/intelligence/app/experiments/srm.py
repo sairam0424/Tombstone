@@ -28,12 +28,23 @@ from scipy import stats  # type: ignore[import]
 
 SRM_ALPHA: float = 0.001
 
+# Textbook validity rule for the chi-square goodness-of-fit approximation:
+# it is only reliable when every expected cell count is >= 5. Below that,
+# its p-value diverges from the true distribution -- found by adversarial
+# review of PR #216 to diverge by roughly 2x in exactly the range this
+# gate's strict p<0.001 threshold is most sensitive to (e.g. observed
+# (7,1) against expected (4,4): chi-square p~=0.034 vs the exact
+# binomial p~=0.070). Below this floor, srm_check uses the EXACT binomial
+# test instead, which has no such sample-size precondition.
+_MIN_EXPECTED_CELL_COUNT: float = 5.0
+
 
 @dataclass
 class SRMResult:
     chi2_stat: float
     p_value: float
     is_mismatch: bool
+    method: str  # "chi_square" | "exact_binomial" | "not_computable"
 
 
 def srm_check(
@@ -42,15 +53,20 @@ def srm_check(
     expected_ratio: float = 0.5,
 ) -> SRMResult:
     """
-    Chi-square goodness-of-fit test for sample ratio mismatch between two
-    experiment arms.
+    Goodness-of-fit test for sample ratio mismatch between two experiment
+    arms — chi-square when both expected cell counts are large enough for
+    that approximation to be valid, the exact binomial test otherwise.
 
     Args:
         n_control:      observed sample count in the control arm.
         n_treatment:    observed sample count in the treatment arm.
         expected_ratio: intended fraction of traffic allocated to control
                         (0.5 for an even 50/50 split; e.g. 0.9 for a 90/10
-                        control-heavy rollout).
+                        control-heavy rollout -- Tombstone's own
+                        rollout_pct-driven canaries are routinely non-50/50,
+                        so callers MUST pass the experiment's real intended
+                        ratio, not rely on the 0.5 default, for this check
+                        to be meaningful).
 
     Returns:
         SRMResult with is_mismatch=True when p_value < SRM_ALPHA — the
@@ -58,18 +74,33 @@ def srm_check(
         ratio and any statistical result from this data should be
         distrusted until the allocation bug is found and fixed.
 
-        Returns chi2_stat=0.0/p_value=1.0/is_mismatch=False (i.e. "not
-        computable, do not block") when there is no real total to test —
-        n_control=0 and n_treatment=0 together, or expected_ratio is
-        outside (0.0, 1.0) exclusive (a degenerate 0% or 100% allocation
-        has no "mismatch" to detect against).
+        Returns chi2_stat=0.0/p_value=1.0/is_mismatch=False/
+        method="not_computable" (i.e. "do not block") when there is no
+        real total to test — n_control=0 and n_treatment=0 together, or
+        expected_ratio is outside (0.0, 1.0) exclusive (a degenerate 0%
+        or 100% allocation has no "mismatch" to detect against).
     """
     total = n_control + n_treatment
     if total <= 0 or not (0.0 < expected_ratio < 1.0):
-        return SRMResult(chi2_stat=0.0, p_value=1.0, is_mismatch=False)
+        return SRMResult(
+            chi2_stat=0.0, p_value=1.0, is_mismatch=False, method="not_computable"
+        )
 
     expected_control = total * expected_ratio
     expected_treatment = total * (1.0 - expected_ratio)
+
+    if (
+        expected_control < _MIN_EXPECTED_CELL_COUNT
+        or expected_treatment < _MIN_EXPECTED_CELL_COUNT
+    ):
+        binom_result = stats.binomtest(n_control, total, expected_ratio)
+        p_value = float(binom_result.pvalue)
+        return SRMResult(
+            chi2_stat=0.0,
+            p_value=p_value,
+            is_mismatch=bool(p_value < SRM_ALPHA),
+            method="exact_binomial",
+        )
 
     chi2_stat, p_value = stats.chisquare(
         f_obs=[n_control, n_treatment],
@@ -80,4 +111,5 @@ def srm_check(
         chi2_stat=float(chi2_stat),
         p_value=float(p_value),
         is_mismatch=bool(p_value < SRM_ALPHA),
+        method="chi_square",
     )

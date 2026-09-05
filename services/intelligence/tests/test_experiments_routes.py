@@ -260,6 +260,17 @@ def test_analyze_srm_mismatch_blocks_rather_than_reporting_ship(
     assert body["srm_p_value"] is not None
     assert body["srm_p_value"] < 0.001
     assert body["sample_sizes"] == {"control": 6000, "treatment": 4000}
+    # The stat_method analysis still ran (cheap, in-process), but its
+    # output must NOT reach the response once SRM is mismatched -- these
+    # fields are nulled/zeroed, not passed through raw, so a client
+    # reading is_significant/p_value alone (without special-casing
+    # recommendation=="BLOCKED_SRM" first) cannot be misled into rendering
+    # "treatment up X%, statistically significant" from a split known to
+    # be broken (found by adversarial review of PR #216).
+    assert body["relative_lift"] == 0.0
+    assert body["is_significant"] is False
+    assert body["p_value"] is None
+    assert body["probability_beats_control"] is None
     # The warehouse query DOES need to run (the real sample sizes are only
     # known after it), but the real network round-trip to the LLM must be
     # skipped once SRM is found mismatched -- an untrustworthy result is
@@ -268,6 +279,54 @@ def test_analyze_srm_mismatch_blocks_rather_than_reporting_ship(
     mock_explanation.assert_not_called()
     assert body["ai_explanation"] == ""
     assert body["explanation_generated"] is False
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_a_legitimate_90_10_canary_is_not_falsely_blocked(mock_get_connector):
+    """
+    Regression test for a real gap found by adversarial review of PR #216:
+    /analyze used to have no way to express a non-50/50 intended split, so
+    a legitimate 90/10 canary-style rollout -- Tombstone's own domain is
+    rollout_pct-driven, so this is the NORM, not an edge case -- would get
+    compared against an implicit 50/50 expectation and permanently return
+    recommendation="BLOCKED_SRM" for a perfectly healthy experiment.
+    expected_control_ratio now lets a caller declare the real intended
+    split; passing it must actually change the outcome, not be silently
+    ignored.
+    """
+    mock_get_connector.return_value = FakeConnector(
+        {
+            "control": AggregatedMetric(
+                variant="control",
+                sample_size=9000,
+                mean=0.30,
+                std=0.4583,
+                variance=0.21,
+                sum=2700.0,
+                conversion_count=2700,
+            ),
+            "treatment": AggregatedMetric(
+                variant="treatment",
+                sample_size=1000,
+                mean=0.32,
+                std=0.4665,
+                variance=0.2176,
+                sum=320.0,
+                conversion_count=320,
+            ),
+        }
+    )
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze",
+        json=_request_body(expected_control_ratio=0.9),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recommendation"] != "BLOCKED_SRM"
+    assert body["srm_p_value"] == pytest.approx(1.0)
 
 
 @patch("app.experiments.routes.get_connector")

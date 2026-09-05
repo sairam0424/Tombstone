@@ -6,7 +6,7 @@ from app.experiments.models import (
     MetricResult,
     VariantStats,
 )
-from app.experiments.srm import srm_check
+from app.experiments.srm import SRMResult
 from app.warehouse.connector import AggregatedMetric
 
 
@@ -239,26 +239,29 @@ class ExperimentAnalyzer:
     def recommend(
         self,
         results: list[MetricResult],
-        n_control: int | None = None,
-        n_treatment: int | None = None,
-        expected_ratio: float = 0.5,
+        srm_result: SRMResult | None = None,
     ) -> str:
         """
-        BLOCKED_SRM: n_control/n_treatment were supplied and their split is
-                     statistically incompatible with expected_ratio (EXP-2)
-                     -- checked FIRST, before any metric result, since a
-                     broken traffic split invalidates every metric computed
-                     on top of it. n_control/n_treatment are optional
-                     (default None) so a caller with no sample-size figures
-                     handy keeps today's exact behavior.
+        BLOCKED_SRM: srm_result was supplied and is_mismatch -- checked
+                     FIRST, before any metric result, since a broken
+                     traffic split invalidates every metric computed on
+                     top of it. srm_result is optional (default None) so a
+                     caller with no SRM check handy keeps today's exact
+                     behavior.
+
+                     Takes an ALREADY-COMPUTED SRMResult, not raw
+                     n_control/n_treatment/expected_ratio, so there is
+                     exactly one srm_check() call per request rather than
+                     two independent ones that could drift apart if a
+                     future change updated one call site's expected_ratio
+                     without updating the other (found by adversarial
+                     review of PR #216).
         SHIP: all primary metrics significant and positive.
         NO_SHIP: any primary metric significant and negative.
         CONTINUE: insufficient data or mixed signals.
         """
-        if n_control is not None and n_treatment is not None:
-            srm = srm_check(n_control, n_treatment, expected_ratio)
-            if srm.is_mismatch:
-                return "BLOCKED_SRM"
+        if srm_result is not None and srm_result.is_mismatch:
+            return "BLOCKED_SRM"
 
         if not results:
             return "CONTINUE"

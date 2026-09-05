@@ -38,6 +38,15 @@ class RunExperimentRequest(BaseModel):
     stat_method: str = "bayesian"
     min_sample_size: int = 100
     min_detectable_effect: float = 0.05
+    # EXP-2: the intended fraction of traffic allocated to control, used
+    # ONLY by the SRM (Sample Ratio Mismatch) gate below. Defaults to an
+    # even 50/50 split, but Tombstone's own rollout_pct-driven canaries are
+    # routinely non-50/50 (e.g. 0.9 for a 90/10 control-heavy rollout) --
+    # callers running a real canary-style experiment MUST set this, or the
+    # gate will compare their real, healthy split against the wrong
+    # expectation and permanently return recommendation="BLOCKED_SRM"
+    # (found by adversarial review of PR #216).
+    expected_control_ratio: float = 0.5
 
     @field_validator("warehouse_type")
     @classmethod
@@ -222,31 +231,42 @@ async def analyze_experiment(req: RunExperimentRequest):
             metric_name=req.metric_name,
         )
 
-    # EXP-2: n_control/n_treatment let recommend() check SRM (Sample Ratio
-    # Mismatch) FIRST, ahead of every metric result -- a broken traffic
-    # split invalidates any statistical result computed on top of it. See
-    # app/experiments/srm.py's module docstring for why. The stat_method
-    # analysis above still runs even when SRM ends up mismatched (it is a
-    # cheap, already-fetched in-process computation, not worth gating);
-    # what IS worth skipping is the real network round-trip below.
-    recommendation = analyzer.recommend(
-        [result], n_control=control.sample_size, n_treatment=treatment.sample_size
+    # EXP-2: SRM (Sample Ratio Mismatch) is checked exactly ONCE here, then
+    # the same already-computed SRMResult is passed into recommend() below
+    # -- not two independent srm_check() calls with the same arguments,
+    # which could silently drift apart if a future change updated one call
+    # site's expected_control_ratio without updating the other (found by
+    # adversarial review of PR #216). recommend() checks it FIRST, ahead of
+    # every metric result, since a broken traffic split invalidates any
+    # statistical result computed on top of it -- see app/experiments/
+    # srm.py's module docstring for why. The stat_method analysis above
+    # still runs even when SRM ends up mismatched (it is a cheap,
+    # already-fetched in-process computation, not worth gating); what IS
+    # worth skipping is the real network round-trip below.
+    srm = srm_check(
+        control.sample_size, treatment.sample_size, req.expected_control_ratio
     )
-    srm_p_value = round(
-        srm_check(control.sample_size, treatment.sample_size).p_value, 6
-    )
+    recommendation = analyzer.recommend([result], srm_result=srm)
 
     if recommendation == "BLOCKED_SRM":
+        # Null out the fields that were computed on top of a split this
+        # gate just determined is broken -- an API consumer reading
+        # is_significant=False/p_value=None gets an unambiguous signal
+        # even without special-casing recommendation=="BLOCKED_SRM" first
+        # (found by adversarial review of PR #216: returning the raw,
+        # untrustworthy computed values here let a naive client render
+        # "treatment up 20%, statistically significant" from data known to
+        # be corrupted -- exactly what this gate exists to prevent).
         return RunExperimentResponse(
             experiment_id=req.experiment_id,
             flag_key=req.flag_key,
             recommendation=recommendation,
-            relative_lift=result.relative_lift,
-            is_significant=result.is_significant,
+            relative_lift=0.0,
+            is_significant=False,
             sample_sizes=sample_sizes,
-            probability_beats_control=result.probability_beats_control,
-            p_value=result.p_value,
-            srm_p_value=srm_p_value,
+            probability_beats_control=None,
+            p_value=None,
+            srm_p_value=round(srm.p_value, 6),
             ai_explanation="",
             explanation_generated=False,
         )
@@ -272,7 +292,7 @@ async def analyze_experiment(req: RunExperimentRequest):
         sample_sizes=sample_sizes,
         probability_beats_control=result.probability_beats_control,
         p_value=result.p_value,
-        srm_p_value=srm_p_value,
+        srm_p_value=round(srm.p_value, 6),
         ai_explanation=explanation,
         explanation_generated=bool(explanation),
     )

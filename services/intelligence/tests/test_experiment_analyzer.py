@@ -15,6 +15,7 @@ from scipy import stats  # type: ignore[import]
 
 from app.experiments.analyzer import ExperimentAnalyzer
 from app.experiments.models import ExperimentDefinition, MetricResult, VariantStats
+from app.experiments.srm import SRMResult, srm_check
 from app.warehouse.connector import AggregatedMetric
 
 
@@ -792,30 +793,34 @@ class TestRecommendSRMGate:
     CONTINUE logic (unchanged) and the new SRM gate, which must fire
     BEFORE any metric result is even consulted -- a broken traffic split
     invalidates every metric computed on top of it.
+
+    recommend() takes an ALREADY-COMPUTED SRMResult (via srm_check()), not
+    raw n_control/n_treatment/expected_ratio -- see recommend()'s own
+    docstring for why (found by adversarial review of PR #216: two
+    independent srm_check() calls with the same nominal arguments could
+    silently drift apart under a future change).
     """
 
     def test_srm_mismatch_blocks_regardless_of_a_significant_positive_result(self):
         result = _significant_positive_result()
+        srm = srm_check(n_control=6000, n_treatment=4000)
 
-        recommendation = ExperimentAnalyzer().recommend(
-            [result], n_control=6000, n_treatment=4000
-        )
+        recommendation = ExperimentAnalyzer().recommend([result], srm_result=srm)
 
         assert recommendation == "BLOCKED_SRM"
 
     def test_a_clean_split_still_reaches_the_real_ship_recommendation(self):
         result = _significant_positive_result()
+        srm = srm_check(n_control=5000, n_treatment=5000)
 
-        recommendation = ExperimentAnalyzer().recommend(
-            [result], n_control=5000, n_treatment=5000
-        )
+        recommendation = ExperimentAnalyzer().recommend([result], srm_result=srm)
 
         assert recommendation == "SHIP"
 
-    def test_omitting_sample_sizes_entirely_skips_the_srm_gate(self):
-        """Backward compatibility: a caller with no sample-size figures
-        handy (n_control/n_treatment both default to None) must get
-        exactly today's pre-EXP-2 behavior, never BLOCKED_SRM."""
+    def test_omitting_srm_result_entirely_skips_the_srm_gate(self):
+        """Backward compatibility: a caller with no SRM check handy
+        (srm_result defaults to None) must get exactly today's pre-EXP-2
+        behavior, never BLOCKED_SRM."""
         result = _significant_positive_result()
 
         recommendation = ExperimentAnalyzer().recommend([result])
@@ -826,16 +831,28 @@ class TestRecommendSRMGate:
         """A 90/10 rollout is intentional -- checking it against an
         implicit 50/50 default would wrongly block a healthy experiment."""
         result = _significant_positive_result()
+        srm = srm_check(n_control=9000, n_treatment=1000, expected_ratio=0.9)
 
-        recommendation = ExperimentAnalyzer().recommend(
-            [result], n_control=9000, n_treatment=1000, expected_ratio=0.9
-        )
+        recommendation = ExperimentAnalyzer().recommend([result], srm_result=srm)
 
         assert recommendation == "SHIP"
 
     def test_empty_results_with_a_clean_split_still_returns_continue_not_blocked(self):
-        recommendation = ExperimentAnalyzer().recommend(
-            [], n_control=5000, n_treatment=5000
-        )
+        srm = srm_check(n_control=5000, n_treatment=5000)
+
+        recommendation = ExperimentAnalyzer().recommend([], srm_result=srm)
 
         assert recommendation == "CONTINUE"
+
+    def test_a_non_mismatched_srm_result_with_is_mismatch_false_does_not_block(self):
+        """Directly constructing SRMResult(is_mismatch=False) (rather than
+        going through srm_check()) still must not block -- recommend()
+        checks srm_result.is_mismatch, not merely srm_result's presence."""
+        result = _significant_positive_result()
+        srm = SRMResult(
+            chi2_stat=0.0, p_value=1.0, is_mismatch=False, method="chi_square"
+        )
+
+        recommendation = ExperimentAnalyzer().recommend([result], srm_result=srm)
+
+        assert recommendation == "SHIP"
