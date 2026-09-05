@@ -61,11 +61,27 @@ class ThompsonSamplingEngine:
 
     Posteriors are written through to Redis on every update so that the engine
     can be restored to its previous state after a service restart.
+
+    EXP-2's SRM (Sample Ratio Mismatch) gate deliberately does NOT apply
+    here, checked and disclosed rather than silently skipped: SRM detects
+    an ACTUAL traffic split diverging from an INTENDED allocation ratio
+    between two or more arms (see app/experiments/srm.py). This engine has
+    no such ratio anywhere in its data model -- FlagPosterior tracks ONE
+    arm's success rate (the flag's current rollout) via a single
+    Beta(alpha, beta) posterior, with no second arm and no "expected split"
+    to compare actual traffic against. There is nothing for a chi-square
+    goodness-of-fit test to check here. A meaningfully analogous safety
+    check for THIS engine -- e.g. confirming actual observed traffic volume
+    roughly tracks the configured rollout_pct -- would be a different,
+    new mechanism entirely, not a literal SRM gate, and needs its own
+    design decision if ever pursued.
     """
 
     def __init__(self) -> None:
         self._posteriors: dict[str, FlagPosterior] = {}
-        self._redis: Any | None = None  # set via set_redis_client or load_all_from_redis
+        self._redis: Any | None = (
+            None  # set via set_redis_client or load_all_from_redis
+        )
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -129,7 +145,9 @@ class ThompsonSamplingEngine:
                     # Key format: tombstone:thompson:{flag_key}:{environment}
                     # flag_key itself may contain colons, so split from the right
                     # to isolate environment (last segment) and flag_key (all middle segments).
-                    parts = key_str.split(":", 3)  # ['tombstone', 'thompson', flag_key, env]
+                    parts = key_str.split(
+                        ":", 3
+                    )  # ['tombstone', 'thompson', flag_key, env]
                     if len(parts) != 4:
                         logger.warning("Skipping malformed Redis key: %s", key_str)
                         continue
@@ -140,7 +158,9 @@ class ThompsonSamplingEngine:
                         continue
                     try:
                         data = json.loads(
-                            raw_value.decode() if isinstance(raw_value, bytes) else raw_value
+                            raw_value.decode()
+                            if isinstance(raw_value, bytes)
+                            else raw_value
                         )
                         posterior = FlagPosterior(
                             flag_key=flag_key,
@@ -355,7 +375,9 @@ class ThompsonSamplingEngine:
         self._posteriors[key] = updated
         return updated
 
-    def disable_autonomous(self, flag_key: str, environment: str) -> FlagPosterior | None:
+    def disable_autonomous(
+        self, flag_key: str, environment: str
+    ) -> FlagPosterior | None:
         """Remove a flag-environment pair from autonomous rollout mode.
 
         Returns the updated posterior, or None if the flag was not tracked.
