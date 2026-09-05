@@ -2,6 +2,8 @@ package circuit
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,6 +117,76 @@ func TestStateKeyDoesNotCollideAcrossAColonInEitherComponent(t *testing.T) {
 	b := stateKey("checkout", "v2:production")
 	if a == b {
 		t.Errorf("stateKey(%q, %q) == stateKey(%q, %q) == %q -- colon-split collision", "checkout:v2", "production", "checkout", "v2:production", a)
+	}
+}
+
+// TestTryTrip_OnlyOneCallerWins is the regression test for a real finding
+// from adversarial review of PR #219: Aggregator.Flush's own
+// GetState-then-ShouldTrip-then-SetState sequence is a check-then-act race
+// across evaluator replicas sharing this Redis-backed breaker state.
+// TryTrip's SETNX-based claim must let exactly one racing caller through.
+func TestTryTrip_OnlyOneCallerWins(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	const racers = 20
+	var wonCount atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			if b.TryTrip(ctx, "checkout", "production") {
+				wonCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if wonCount.Load() != 1 {
+		t.Errorf("TryTrip: %d of %d racing callers won the claim, want exactly 1", wonCount.Load(), racers)
+	}
+}
+
+// TestTryTrip_IsEnvironmentScoped mirrors TestGetSetStateIsEnvironmentScoped:
+// a trip claim for one environment must never block a trip claim for
+// another environment on the same flag key.
+func TestTryTrip_IsEnvironmentScoped(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: mr.Addr()}), zap.NewNop())
+	ctx := context.Background()
+
+	if !b.TryTrip(ctx, "checkout", "staging") {
+		t.Fatal("first TryTrip for staging should win the claim")
+	}
+	if !b.TryTrip(ctx, "checkout", "production") {
+		t.Error("TryTrip for production was blocked by staging's claim -- trip locks must be environment-scoped")
+	}
+	if b.TryTrip(ctx, "checkout", "staging") {
+		t.Error("a second TryTrip for staging won the claim again -- SETNX should have refused it")
+	}
+}
+
+// TestTryTrip_FailsOpenOnRedisError verifies TryTrip returns true (allows
+// the trip) when Redis is unreachable -- refusing to trip because the
+// dedup mechanism itself is down would silently disable the entire
+// auto-rollback safety net during a Redis outage, worse than an
+// occasional harmless duplicate.
+func TestTryTrip_FailsOpenOnRedisError(t *testing.T) {
+	b := NewBreaker(redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"}), zap.NewNop())
+	if !b.TryTrip(context.Background(), "checkout", "production") {
+		t.Error("TryTrip = false on a Redis error, want true (fail open)")
 	}
 }
 
