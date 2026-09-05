@@ -144,9 +144,36 @@ func (b *Breaker) ReleaseTrip(ctx context.Context, flagKey, env string) {
 // SetState updates the circuit state for a flag in an environment in Redis.
 func (b *Breaker) SetState(ctx context.Context, flagKey, env string, state State, ttl time.Duration) {
 	_ = b.rdb.Set(ctx, stateKey(flagKey, env), string(state), ttl).Err()
+	// EVAL-3: a per-hour snapshot, read by services/evaluator/internal/
+	// api/v1/slo.go's buildHistory to render "what was the circuit state
+	// during THIS hour" in the SLO history graph -- that reader has always
+	// expected this exact key shape (circuit:{flag}:{env}:state:{unix_hour}),
+	// but nothing ever wrote it (found alongside the identical gap for the
+	// telemetry:{flag}:{env}:hour:{unix_hour} bucket blast radius also
+	// depends on). Written here, not by each SetState caller individually,
+	// so every transition Flush drives gets one for free; multiple
+	// transitions within the same hour just overwrite this hour's value
+	// (last-write-wins), which is the right granularity for an hourly
+	// history point.
+	unixHour := time.Now().UTC().Truncate(time.Hour).Unix() / 3600
+	_ = b.rdb.Set(ctx, stateSnapshotKey(flagKey, env, unixHour), string(state), TelemetryRetention).Err()
 	b.logger.Info("circuit breaker state change",
 		zap.String("flag", flagKey), zap.String("env", env), zap.String("state", string(state)))
 }
+
+// stateSnapshotKey builds the Redis key for SetState's per-hour state
+// snapshot (see its own doc comment above for why this exists).
+func stateSnapshotKey(flagKey, env string, unixHour int64) string {
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":state:" + strconv.FormatInt(unixHour, 10)
+}
+
+// TelemetryRetention bounds how long hourly telemetry/circuit-trip/state-
+// snapshot buckets are kept -- generously longer than slo.go's own
+// maxWindowDays (90d) so the longest window it can ever request is never
+// missing data purely because this TTL expired first. Exported so
+// aggregator.go's own telemetry/trip-counter bucket writes use the
+// identical retention rather than a second, independently-drifting value.
+const TelemetryRetention = 91 * 24 * time.Hour
 
 // rollbackSteps is the ladder Aggregator.Flush walks DOWN once tripped,
 // each step a lower rollout percentage than the last (100% is implicit --

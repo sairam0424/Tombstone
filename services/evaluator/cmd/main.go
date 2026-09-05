@@ -173,7 +173,7 @@ func main() {
 
 	var blastCalc *blast.Calculator
 	if db != nil {
-		blastCalc = blast.NewCalculator(db, flagAPIURL)
+		blastCalc = blast.NewCalculator(db, rdb, flagAPIURL)
 	}
 
 	// OBS-1 (rollout): pull-based, no OTLP_ENDPOINT/collector needed —

@@ -139,7 +139,10 @@ Computed by `services/evaluator/internal/blast/blast_radius.go` via `GET /api/v1
 
 ```go
 func (c *Calculator) scoreRisk(r *BlastRadiusResult) RiskScore {
-    if r.TrafficPctAffected >= 50 && r.HistoricalErrorDelta > 0.05 {
+    // Confidence == "LOW" means HistoricalErrorRate is 0 because it was
+    // never measured (cold start), not because it was measured and found
+    // healthy -- treated as seriously as a measured-bad error rate.
+    if r.TrafficPctAffected >= 50 && (r.HistoricalErrorRate > 0.05 || r.Confidence == "LOW") {
         return RiskBlocked   // Requires typed justification to proceed
     }
     if r.TrafficPctAffected >= 25 || r.DependentFlagsCount > 5 {
@@ -152,11 +155,19 @@ func (c *Calculator) scoreRisk(r *BlastRadiusResult) RiskScore {
 }
 ```
 
+`HistoricalErrorRate` is the flag's real recent error rate, read from the
+hourly telemetry buckets `telemetry.Aggregator` writes (EVAL-3) -- not a
+before/after delta (this schema has no snapshot to diff). `DependentFlagKeys`/
+`DependentFlagsCount` come from the real `flag_prerequisites` dependency
+graph, not audit-log co-change timing. `Confidence` is `"LOW"` below a
+cold-start evaluation-count floor, so an unmeasured error rate is never
+silently read as "verified safe".
+
 | Score | Condition | Action |
 |-------|-----------|--------|
-| `BLOCKED` | ≥50% traffic AND historical error delta >5% | Requires typed justification. Change request blocked until approved. |
-| `HIGH` | ≥25% traffic OR >5 dependent flags (co-changed in 30 days) | Warning shown in dashboard. Change requests auto-created. |
-| `MEDIUM` | ≥10% traffic OR >2 dependent flags | Yellow indicator. |
+| `BLOCKED` | ≥50% traffic AND (historical error rate >5% OR cold-start/LOW confidence) | Requires typed justification. Change request blocked until approved. |
+| `HIGH` | ≥25% traffic OR >5 real `flag_prerequisites` dependents | Warning shown in dashboard. Change requests auto-created. |
+| `MEDIUM` | ≥10% traffic OR >2 real `flag_prerequisites` dependents | Yellow indicator. |
 | `LOW` | Below all thresholds | Green. Proceed normally. |
 
 ---

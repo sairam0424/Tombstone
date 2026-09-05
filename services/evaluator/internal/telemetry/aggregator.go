@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -112,6 +114,8 @@ func (a *Aggregator) Flush(ctx context.Context) {
 			TotalCount: w.total,
 		}
 
+		a.persistTelemetryBucket(ctx, flagKey, env, w)
+
 		switch a.breaker.GetState(ctx, flagKey, env) {
 		case circuit.StateClosed:
 			a.handleClosed(ctx, flagKey, env, win)
@@ -121,6 +125,89 @@ func (a *Aggregator) Flush(ctx context.Context) {
 			a.handleHalfOpen(ctx, flagKey, env, win)
 		}
 	}
+}
+
+// telemetryBucket is the JSON shape services/evaluator/internal/api/v1/
+// slo.go's aggregateTelemetry/buildHistory read at
+// telemetry:{flagKey}:{env}:hour:{unix_hour} -- that reader has always
+// expected this exact shape (its own doc comment even names the key
+// convention) but nothing ever wrote it, so the SLO endpoint has been
+// silently returning zeroed history for real production data since it was
+// built. persistTelemetryBucket closes that gap -- and, since blast
+// radius (EVAL-3) needs the identical data, fixes both at once.
+//
+// P99Ms is deliberately never populated here: TelemetryEvent carries no
+// latency measurement (SDK-side latency instrumentation, called out in
+// EVAL-2's own original plan bullet, was never implemented in any SDK) --
+// leaving it at whatever was already recorded (0 if never set) rather
+// than inventing a fake value.
+type telemetryBucket struct {
+	Total  int64   `json:"total"`
+	Errors int64   `json:"errors"`
+	P99Ms  float64 `json:"p99_ms"`
+}
+
+// persistTelemetryBucket accumulates this tick's window counts into the
+// CURRENT hour's Redis bucket via a read-modify-write -- not an atomic
+// Redis-side increment, because the value is a JSON blob (matching
+// slo.go's existing reader) rather than a plain counter. Multiple
+// evaluator replicas flushing the SAME flag+env's telemetry concurrently
+// could race and lose an update, undercounting this specific hour
+// slightly; unlike the circuit breaker's own state transitions (guarded
+// by TryTrip/TryStep specifically because a race there duplicates a real
+// side effect -- a kill-switch call, a Slack alert), this is a purely
+// observational metric, so an occasional minor undercount is an
+// acceptable, disclosed tradeoff against the complexity of a distributed
+// atomic accumulator for a JSON-shaped value.
+func (a *Aggregator) persistTelemetryBucket(ctx context.Context, flagKey, env string, w *windowState) {
+	unixHour := time.Now().UTC().Truncate(time.Hour).Unix() / 3600
+	key := fmt.Sprintf("telemetry:%s:%s:hour:%d",
+		circuit.EscapeKeyComponent(flagKey), circuit.EscapeKeyComponent(env), unixHour)
+
+	var bucket telemetryBucket
+	if val, err := a.rdb.Get(ctx, key).Result(); err == nil {
+		_ = json.Unmarshal([]byte(val), &bucket)
+	}
+	bucket.Total += w.total
+	bucket.Errors += w.errors
+
+	payload, err := json.Marshal(bucket)
+	if err != nil {
+		a.logger.Warn("marshal telemetry bucket failed", zap.String("flag", flagKey), zap.String("env", env), zap.Error(err))
+		return
+	}
+	if err := a.rdb.Set(ctx, key, payload, circuit.TelemetryRetention).Err(); err != nil {
+		a.logger.Warn("persist telemetry bucket failed", zap.String("flag", flagKey), zap.String("env", env), zap.Error(err))
+	}
+}
+
+// recordCircuitTrip increments the current hour's trip counter --
+// services/evaluator/internal/api/v1/slo.go's countCircuitTrips has always
+// read circuit:{flagKey}:{env}:trips:{unix_hour} but nothing ever wrote
+// it. Unlike persistTelemetryBucket, this IS a plain integer, so a real
+// atomic INCR is both possible and used. This is only called after TryTrip's
+// SETNX claim succeeds, so it inherits TryTrip's own disclosed fail-open
+// behavior on a Redis error (see TryTrip's doc comment): under an actual
+// Redis outage, >=2 replicas can each win a claim for what is really one
+// trip, and this counter double-increments for it. Before this PR, that
+// same race only produced a duplicate rollback call and a duplicate Slack
+// alert -- both self-evidently duplicate to a human. This counter has no
+// such tell and no correction mechanism (slo.go's countCircuitTrips/
+// buildHistory expose it as the authoritative per-hour trip count), so an
+// inflated value here looks exactly like two real trips happened (found
+// by adversarial review of this PR). Not fixed here: doing so would mean
+// revisiting TryTrip's own fail-open posture, which PR #219 deliberately
+// chose because refusing to trip at all during a Redis outage is strictly
+// worse than an occasional overcounted metric.
+func (a *Aggregator) recordCircuitTrip(ctx context.Context, flagKey, env string) {
+	unixHour := time.Now().UTC().Truncate(time.Hour).Unix() / 3600
+	key := fmt.Sprintf("circuit:%s:%s:trips:%d",
+		circuit.EscapeKeyComponent(flagKey), circuit.EscapeKeyComponent(env), unixHour)
+	if err := a.rdb.Incr(ctx, key).Err(); err != nil {
+		a.logger.Warn("record circuit trip failed", zap.String("flag", flagKey), zap.String("env", env), zap.Error(err))
+		return
+	}
+	_ = a.rdb.Expire(ctx, key, circuit.TelemetryRetention).Err()
 }
 
 // handleClosed decides whether to trip: ShouldTrip gates on this window's
@@ -152,6 +239,7 @@ func (a *Aggregator) handleClosed(ctx context.Context, flagKey, env string, win 
 	}
 	a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
 	a.breaker.SetStep(ctx, flagKey, env, target)
+	a.recordCircuitTrip(ctx, flagKey, env)
 }
 
 // handleOpen drives BOTH halves of the OPEN state: while step>0, an
