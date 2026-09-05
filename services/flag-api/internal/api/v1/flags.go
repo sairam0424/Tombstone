@@ -570,6 +570,21 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 			targetExposure, currentExposure))
 		return
 	}
+	// Already exactly at the target -- most commonly a caller retrying the
+	// same step because ITS OWN downstream bookkeeping commit failed after
+	// this exact write already landed on an earlier attempt (found by
+	// adversarial review of PR #221: the evaluator's Redis step-tracking
+	// commit can fail independently of this call's own success, and its
+	// retry re-sends the identical target). Returning success here without
+	// touching the DB avoids a duplicate audit_log row and a duplicate SSE
+	// broadcast for what is semantically a no-op repeat, not a new event.
+	if prev.Enabled == targetEnabled && int(prev.RolloutPct) == targetExposure {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"flag_key": key, "environment": req.Environment,
+			"enabled": targetEnabled, "rollout_pct": targetExposure,
+		})
+		return
+	}
 
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(
@@ -621,6 +636,161 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 	// destructive full kill indistinguishable from a non-destructive
 	// graduated reduction without opening every entry's new_state payload.
 	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "circuit_breaker_rollback_step",
+		map[string]any{"enabled": prev.Enabled, "rollout_pct": prev.RolloutPct},
+		map[string]any{"enabled": targetEnabled, "rollout_pct": targetExposure, "reason": req.Reason}, ipFromRequest(r))
+	stepEvent := FlagEvent{
+		FlagKey: key, Enabled: targetEnabled, RolloutPct: targetExposure,
+		Reason: req.Reason, Ts: time.Now().Unix(), Environment: req.Environment,
+	}
+	h.publishEvent(r.Context(), req.Environment, stepEvent)
+	h.publishToStream(r.Context(), req.Environment, stepEvent)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flag_key": key, "environment": req.Environment,
+		"enabled": targetEnabled, "rollout_pct": targetExposure,
+	})
+}
+
+// RecoveryStep handles POST /api/v1/flags/{key}/recovery-step -- the
+// mirror image of RollbackStep above, for EVAL-4's HALF_OPEN recovery
+// ladder (10->25->50->100) instead of the rollback ladder's descent.
+//
+// RollbackStep was deliberately restricted to never INCREASE exposure --
+// exactly the operation a verified recovery probe needs to perform. Adding
+// a second, direction-specific endpoint (rather than relaxing
+// RollbackStep's own guard, or adding a bypass flag to it) keeps each
+// endpoint's invariant simple and absolute: RollbackStep can never
+// increase, RecoveryStep can never decrease, and the SAME flags:
+// circuit_breaker permission gates both -- the fix for a HIGH finding
+// from adversarial review of PR #221 (the recovery ladder could never
+// succeed at all, since every probe step is by definition an increase
+// that RollbackStep unconditionally rejected).
+func (h *FlagHandler) RecoveryStep(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+
+	type stepReq struct {
+		Environment string `json:"environment"`
+		Reason      string `json:"reason"`
+		RolloutPct  *int   `json:"rollout_pct"`
+	}
+	var req stepReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Environment == "" {
+		writeError(w, http.StatusBadRequest, "environment is required")
+		return
+	}
+	if req.RolloutPct == nil {
+		writeError(w, http.StatusBadRequest, "rollout_pct is required")
+		return
+	}
+	if *req.RolloutPct < 0 || *req.RolloutPct > 100 {
+		writeError(w, http.StatusBadRequest, "rollout_pct must be between 0 and 100")
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "circuit_breaker"
+	}
+
+	targetEnabled := *req.RolloutPct > 0
+	targetExposure := 0
+	if targetEnabled {
+		targetExposure = *req.RolloutPct
+	}
+
+	prev, err := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+	})
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "flag or environment not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	currentExposure := 0
+	if prev.Enabled {
+		currentExposure = int(prev.RolloutPct)
+	}
+	// Fast, friendly error in the common case -- RecoveryFlagEnvironment's
+	// own WHERE clause below re-checks this atomically as part of the
+	// write, same TOCTOU-closing technique as RollbackStep's identical
+	// early check.
+	if targetExposure < currentExposure {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"recovery-step cannot decrease exposure: requested %d%%, current effective exposure is %d%%",
+			targetExposure, currentExposure))
+		return
+	}
+	// Already exactly at the target -- see RollbackStep's identical check
+	// for why (a retried request whose caller's own bookkeeping commit
+	// failed after this exact write already landed).
+	if prev.Enabled == targetEnabled && int(prev.RolloutPct) == targetExposure {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"flag_key": key, "environment": req.Environment,
+			"enabled": targetEnabled, "rollout_pct": targetExposure,
+		})
+		return
+	}
+
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("flag.key", key),
+		attribute.String("flag.environment", req.Environment),
+		attribute.Bool("flag.enabled", targetEnabled),
+		attribute.Int("flag.rollout_pct", targetExposure),
+		attribute.String("flag.recovery_reason", req.Reason),
+	)
+
+	actor := actorFromContext(r.Context())
+	n, err := sqlcgen.New(h.db).RecoveryFlagEnvironment(r.Context(), sqlcgen.RecoveryFlagEnvironmentParams{
+		Enabled: targetEnabled, RolloutPct: int32(targetExposure), UpdatedBy: actor,
+		Key: key, Environment: req.Environment, ProjectID: projectID,
+		MaxCurrentExposure: int32(targetExposure),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
+		// Either the flag/environment doesn't exist, or a concurrent
+		// recovery/rollback call already changed exposure past this
+		// request's own target between our read above and this write --
+		// re-read to tell the two apart rather than guessing.
+		latest, latestErr := sqlcgen.New(h.db).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
+			Key: key, Environment: req.Environment, ProjectID: projectID,
+		})
+		if errors.Is(latestErr, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "flag or environment not found")
+			return
+		}
+		if latestErr != nil {
+			writeError(w, http.StatusInternalServerError, latestErr.Error())
+			return
+		}
+		latestExposure := 0
+		if latest.Enabled {
+			latestExposure = int(latest.RolloutPct)
+		}
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"exposure is now %d%%, which no longer supports this request's recovery target of %d%%",
+			latestExposure, targetExposure))
+		return
+	}
+
+	// A distinct event_type from both KillSwitch's "kill_switch_activated"
+	// and RollbackStep's "circuit_breaker_rollback_step" -- an increase in
+	// exposure is a meaningfully different event for incident forensics
+	// than either a full kill or a further reduction.
+	h.writeAudit(r.Context(), projectID, key, req.Environment, actor, "circuit_breaker_recovery_step",
 		map[string]any{"enabled": prev.Enabled, "rollout_pct": prev.RolloutPct},
 		map[string]any{"enabled": targetEnabled, "rollout_pct": targetExposure, "reason": req.Reason}, ipFromRequest(r))
 	stepEvent := FlagEvent{

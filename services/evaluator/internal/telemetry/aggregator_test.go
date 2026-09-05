@@ -165,6 +165,55 @@ func TestFlush_OnRolloutChangeFiresExactlyOnceAcrossRacingReplicas(t *testing.T)
 	}
 }
 
+// TestFlush_HandleOpenRespectsAnAlreadyClaimedStep is the regression test
+// for a real finding from adversarial review of PR #221:
+// TestFlush_OnRolloutChangeFiresExactlyOnceAcrossRacingReplicas above only
+// covers the INITIAL trip (TryTrip's own claim) -- every LATER step-down
+// transition had no equivalent dedup before Breaker.TryStep existed, so
+// two replicas racing the SAME already-OPEN flag+env could each
+// independently commit the SAME step-down, each producing its own
+// audit_log row, SSE broadcast, and (at the terminal step) Slack alert
+// for what is really one transition.
+//
+// This drives the scenario deterministically rather than via two real
+// goroutines: launching two truly concurrent Flush() calls and hoping
+// they collide on the exact same target is inherently nondeterministic
+// (whichever goroutine's OS thread runs first can complete its ENTIRE
+// Flush -- including the SetStep that advances the ladder -- before the
+// other even starts, so the "loser" ends up computing a different,
+// legitimately later target instead of colliding on the same one; an
+// earlier version of this test asserted count==1 and flaked exactly this
+// way). Pre-claiming the target with TryStep directly reproduces the
+// state a genuinely racing replica would have already committed,
+// deterministically, on every run -- TestTryStep_OnlyOneCallerWins
+// separately proves TryStep's own SETNX claim is atomic under a true
+// concurrent race.
+func TestFlush_HandleOpenRespectsAnAlreadyClaimedStep(t *testing.T) {
+	agg, _, breaker := newTestAggregator(t)
+	ctx := context.Background()
+
+	breaker.SetState(ctx, "checkout", "production", circuit.StateOpen, time.Minute)
+	breaker.SetStep(ctx, "checkout", "production", 50)
+	// Simulates another replica having already won the claim for this
+	// exact transition moments earlier.
+	if !breaker.TryStep(ctx, "checkout", "production", "down", 25) {
+		t.Fatal("test setup: pre-claim should have succeeded on a fresh key")
+	}
+
+	fired := false
+	agg.OnRolloutChange = func(string, string, int, float64, circuit.RolloutPhase) bool { fired = true; return true }
+
+	agg.Record(TelemetryEvent{FlagKey: "checkout", Environment: "production", IsError: false})
+	agg.Flush(ctx)
+
+	if fired {
+		t.Error("OnRolloutChange fired despite the target step already being claimed -- handleOpen must respect TryStep's result")
+	}
+	if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 50 {
+		t.Errorf("step = (%d, %v), want unchanged (50, true) -- a respected claim must not advance local state either", got, found)
+	}
+}
+
 // TestFlush_FailedInitialStepReleasesTripClaim verifies that when
 // OnRolloutChange's first call (the initial trip) returns false (the API
 // call failed), Flush does NOT commit StateOpen/SetStep, and releases the
@@ -186,8 +235,8 @@ func TestFlush_FailedInitialStepReleasesTripClaim(t *testing.T) {
 	if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateClosed {
 		t.Errorf("state = %q after a failed initial step, want CLOSED (never committed)", got)
 	}
-	if got := breaker.GetStep(ctx, "checkout", "production"); got != 100 {
-		t.Errorf("step = %d after a failed initial step, want 100 (never committed)", got)
+	if _, found := breaker.GetStep(ctx, "checkout", "production"); found {
+		t.Error("step recorded after a failed initial step, want not found (never committed)")
 	}
 
 	// Retry immediately (no sleep) -- a released trip claim should let
@@ -240,8 +289,8 @@ func TestFlush_StepsDownTheFullLadderAcrossTicks(t *testing.T) {
 		}
 	}
 
-	if got := breaker.GetStep(ctx, "checkout", "production"); got != 0 {
-		t.Errorf("final step = %d, want 0", got)
+	if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 0 {
+		t.Errorf("final step = (%d, %v), want (0, true)", got, found)
 	}
 	if _, ok := breaker.GetOpenedAt(ctx, "checkout", "production"); !ok {
 		t.Error("openedAt not recorded after reaching the ladder's terminal 0% step")
@@ -290,8 +339,8 @@ func TestFlush_HalfOpenTransitionWaitsOutObservationWindow(t *testing.T) {
 		if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateHalfOpen {
 			t.Errorf("state = %q after cooldown elapsed, want HALF_OPEN", got)
 		}
-		if got := breaker.GetStep(ctx, "checkout", "production"); got != 10 {
-			t.Errorf("step = %d, want 10 (the recovery ladder's first probe)", got)
+		if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 10 {
+			t.Errorf("step = (%d, %v), want (10, true) (the recovery ladder's first probe)", got, found)
 		}
 	})
 }
@@ -353,8 +402,8 @@ func TestFlush_HalfOpenRevertsOnABadWindow(t *testing.T) {
 	if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateOpen {
 		t.Errorf("state = %q, want OPEN", got)
 	}
-	if got := breaker.GetStep(ctx, "checkout", "production"); got != 0 {
-		t.Errorf("step = %d, want 0", got)
+	if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 0 {
+		t.Errorf("step = (%d, %v), want (0, true)", got, found)
 	}
 	if _, ok := breaker.GetOpenedAt(ctx, "checkout", "production"); !ok {
 		t.Error("openedAt not reset after a failed recovery probe -- the next HALF_OPEN attempt must wait out a fresh cooldown")
@@ -384,7 +433,59 @@ func TestFlush_HalfOpenHoldsWithInsufficientTraffic(t *testing.T) {
 	if got := breaker.GetState(ctx, "checkout", "production"); got != circuit.StateHalfOpen {
 		t.Errorf("state = %q, want unchanged HALF_OPEN", got)
 	}
-	if got := breaker.GetStep(ctx, "checkout", "production"); got != 25 {
-		t.Errorf("step = %d, want unchanged 25", got)
+	if got, found := breaker.GetStep(ctx, "checkout", "production"); !found || got != 25 {
+		t.Errorf("step = (%d, %v), want unchanged (25, true)", got, found)
 	}
+}
+
+// TestFlush_NilOnRolloutChangeDoesNotPanicWhileOpen and its HALF_OPEN
+// counterpart below close a real test-coverage gap found by adversarial
+// review of PR #221: every other test in this file explicitly assigns
+// OnRolloutChange before driving OPEN/HALF_OPEN through Flush, so a
+// regression removing one of handleOpen/handleHalfOpen's nil guards would
+// have gone completely undetected here -- and because Aggregator.Run
+// drives Flush from a background goroutine outside chi's Recoverer
+// middleware (which only catches panics inside HTTP handler execution), a
+// nil-pointer call panicking there crashes the entire evaluator process,
+// not just one request.
+func TestFlush_NilOnRolloutChangeDoesNotPanicWhileOpen(t *testing.T) {
+	agg, _, breaker := newTestAggregator(t)
+	ctx := context.Background()
+	breaker.SetState(ctx, "checkout", "production", circuit.StateOpen, time.Minute)
+	breaker.SetStep(ctx, "checkout", "production", 50)
+	// agg.OnRolloutChange deliberately left nil.
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Flush panicked with OnRolloutChange nil while OPEN: %v", r)
+		}
+	}()
+	agg.Record(TelemetryEvent{FlagKey: "checkout", Environment: "production", IsError: false})
+	agg.Flush(ctx)
+}
+
+// TestFlush_NilOnRolloutChangeDoesNotPanicWhileHalfOpen mirrors the OPEN
+// case above for HALF_OPEN's own two OnRolloutChange call sites (the
+// revert branch and the advance branch).
+func TestFlush_NilOnRolloutChangeDoesNotPanicWhileHalfOpen(t *testing.T) {
+	agg, _, breaker := newTestAggregator(t)
+	ctx := context.Background()
+	breaker.SetState(ctx, "checkout", "production", circuit.StateHalfOpen, time.Minute)
+	breaker.SetStep(ctx, "checkout", "production", 25)
+	// agg.OnRolloutChange deliberately left nil.
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Flush panicked with OnRolloutChange nil while HALF_OPEN: %v", r)
+		}
+	}()
+
+	t.Run("advance branch (healthy window)", func(t *testing.T) {
+		recordErrorBurst(agg, "checkout", "production", 100, 0)
+		agg.Flush(ctx)
+	})
+	t.Run("revert branch (bad window)", func(t *testing.T) {
+		recordErrorBurst(agg, "checkout", "production", 100, 10)
+		agg.Flush(ctx)
+	})
 }

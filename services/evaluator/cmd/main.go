@@ -116,7 +116,8 @@ func main() {
 	agg.OnRolloutChange = func(flagKey, env string, targetPct int, errorRate float64, phase circuit.RolloutPhase) bool {
 		ctx := context.Background()
 		var err error
-		if targetPct == 0 {
+		switch rolloutActionFor(targetPct, phase) {
+		case rolloutActionKill:
 			err = exec.Execute(ctx, rollback.RollbackRequest{
 				FlagKey:     flagKey,
 				Environment: env,
@@ -124,7 +125,9 @@ func main() {
 				ErrorRate:   errorRate,
 				TriggeredBy: "circuit_breaker",
 			})
-		} else {
+		case rolloutActionIncrease:
+			err = exec.IncreaseRolloutPct(ctx, flagKey, env, targetPct, "circuit_breaker")
+		case rolloutActionDecrease:
 			err = exec.SetRolloutPct(ctx, flagKey, env, targetPct, "circuit_breaker")
 		}
 		if err != nil {
@@ -293,6 +296,46 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// rolloutAction identifies which flag-api endpoint (and direction
+// semantics) an OnRolloutChange call should use.
+type rolloutAction int
+
+const (
+	// rolloutActionKill calls the binary kill switch (Executor.Execute) --
+	// used for the ladder's terminal 0% step in EITHER direction (a full
+	// descent, or a HALF_OPEN probe reverting).
+	rolloutActionKill rolloutAction = iota
+	// rolloutActionIncrease calls the recovery-step endpoint
+	// (Executor.IncreaseRolloutPct) -- flag-api's rollback-step endpoint
+	// can never increase exposure by design, so every HALF_OPEN recovery
+	// step (which is by definition an increase) MUST go through this
+	// separate, mirror-image endpoint instead (fix for a HIGH finding from
+	// adversarial review of PR #221: routing every non-zero step through
+	// rollback-step meant the recovery ladder could never actually climb --
+	// every probe was unconditionally rejected).
+	rolloutActionIncrease
+	// rolloutActionDecrease calls the rollback-step endpoint
+	// (Executor.SetRolloutPct) -- every other non-zero step, i.e. the
+	// descent ladder's intermediate rungs.
+	rolloutActionDecrease
+)
+
+// rolloutActionFor decides the action for a given OnRolloutChange call.
+// Extracted as a pure function specifically so this dispatch -- the exact
+// logic that was wrong before the PR #221 fix above -- has direct unit
+// test coverage without needing a live flag-api server, matching this
+// file's own shouldNotifySlack/isAuthorizedManualRollback convention.
+func rolloutActionFor(targetPct int, phase circuit.RolloutPhase) rolloutAction {
+	switch {
+	case targetPct == 0:
+		return rolloutActionKill
+	case phase == circuit.PhaseRecovering || phase == circuit.PhaseRecovered:
+		return rolloutActionIncrease
+	default:
+		return rolloutActionDecrease
+	}
 }
 
 // isAuthorizedManualRollback requires a Bearer token matching expectedToken

@@ -160,11 +160,27 @@ func (a *Aggregator) handleClosed(ctx context.Context, flagKey, env string, win 
 // cutting exposure); once step reaches 0, waiting out ObservationWindow's
 // cooldown before attempting a HALF_OPEN recovery probe.
 func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win circuit.Window) {
-	currentStep := a.breaker.GetStep(ctx, flagKey, env)
+	currentStep, found := a.breaker.GetStep(ctx, flagKey, env)
+	if !found {
+		// Lost track of ladder position while OPEN (transient Redis error,
+		// individual-key eviction, or an unusually long incident outliving
+		// stepTTL) -- assume the SAFEST case, already fully killed, never
+		// "nothing stepped down yet": the latter could re-request an
+		// INCREASE that flag-api's own CAS guard would reject, stalling
+		// the ladder here forever with no self-healing path (found by
+		// adversarial review of PR #221).
+		currentStep = 0
+	}
 	errorRate := a.breaker.ErrorRate(win)
 
 	if currentStep > 0 {
 		target, done := circuit.NextRollbackStep(currentStep)
+		// Dedup across racing evaluator replicas -- TryTrip above only
+		// covers the INITIAL trip; every later step needs its own claim
+		// (found by adversarial review of PR #221).
+		if !a.breaker.TryStep(ctx, flagKey, env, "down", target) {
+			return
+		}
 		phase := circuit.PhaseStepped
 		if done {
 			phase = circuit.PhaseKilled
@@ -187,12 +203,24 @@ func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win ci
 		// start the cooldown clock now rather than assuming it already
 		// elapsed (which would let a HALF_OPEN probe fire immediately).
 		a.breaker.SetOpenedAt(ctx, flagKey, env, time.Now())
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
 		return
 	}
 	if time.Since(openedAt) < a.breaker.ObservationWindow {
+		// Still waiting out the cooldown -- refresh the state key's TTL on
+		// every tick that observes this flag+env, so a long ObservationWindow
+		// (an operator-configurable field) can never let stateTTL (fixed at
+		// 10 minutes, set once at the CLOSED->OPEN transition) expire out
+		// from under an incident that's still actively being held open,
+		// silently reverting GetState's own fail-safe default to CLOSED
+		// mid-cooldown (found by adversarial review of PR #221).
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateOpen, stateTTL)
 		return
 	}
 	target, _ := circuit.NextRecoveryStep(0)
+	if !a.breaker.TryStep(ctx, flagKey, env, "up", target) {
+		return
+	}
 	if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, target, errorRate, circuit.PhaseRecovering) {
 		a.logger.Error("HALF_OPEN recovery probe failed to start; will retry next tick",
 			zap.String("flag", flagKey), zap.String("env", env))
@@ -209,10 +237,21 @@ func (a *Aggregator) handleOpen(ctx context.Context, flagKey, env string, win ci
 // Breaker.MinRequests) -- hold at the current step and wait for more data
 // rather than guessing.
 func (a *Aggregator) handleHalfOpen(ctx context.Context, flagKey, env string, win circuit.Window) {
-	currentStep := a.breaker.GetStep(ctx, flagKey, env)
+	currentStep, found := a.breaker.GetStep(ctx, flagKey, env)
+	if !found {
+		// Lost track of probe position while HALF_OPEN -- resume from the
+		// recovery ladder's FLOOR (NextRecoveryStep(0) == 10), never its
+		// ceiling: assuming more progress than may have actually happened
+		// could skip real verification rungs entirely (found by
+		// adversarial review of PR #221).
+		currentStep = 0
+	}
 	errorRate := a.breaker.ErrorRate(win)
 
 	if a.breaker.ShouldTrip(win) {
+		if !a.breaker.TryStep(ctx, flagKey, env, "down", 0) {
+			return
+		}
 		if a.OnRolloutChange == nil || !a.OnRolloutChange(flagKey, env, 0, errorRate, circuit.PhaseRevertedDuringRecovery) {
 			a.logger.Error("failed to revert a failed recovery probe; will retry next tick",
 				zap.String("flag", flagKey), zap.String("env", env))
@@ -225,10 +264,18 @@ func (a *Aggregator) handleHalfOpen(ctx context.Context, flagKey, env string, wi
 	}
 
 	if win.TotalCount < a.breaker.MinRequests {
+		// Not enough traffic at this probe level to trust it either way --
+		// refresh the state TTL (see handleOpen's identical comment on the
+		// cooldown-wait branch) so a low-traffic flag can hold HALF_OPEN
+		// indefinitely without stateTTL expiring out from under it.
+		a.breaker.SetState(ctx, flagKey, env, circuit.StateHalfOpen, stateTTL)
 		return
 	}
 
 	target, recovered := circuit.NextRecoveryStep(currentStep)
+	if !a.breaker.TryStep(ctx, flagKey, env, "up", target) {
+		return
+	}
 	phase := circuit.PhaseRecovering
 	if recovered {
 		phase = circuit.PhaseRecovered

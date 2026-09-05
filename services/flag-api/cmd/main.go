@@ -275,6 +275,15 @@ func main() {
 			With(idempotencyMw.Handle("POST /flags/{key}/rollback-step")).
 			Post("/flags/{key}/rollback-step", flagH.RollbackStep)
 
+		// EVAL-4: the mirror image of rollback-step above, for the
+		// HALF_OPEN recovery ladder's ascent direction -- SAME permission,
+		// opposite invariant (can only increase, never decrease). See
+		// RecoveryStep's own doc comment for why this is a separate
+		// endpoint rather than relaxing rollback-step's own guard.
+		r.With(rbacMw.RequirePermission("flags", "circuit_breaker")).
+			With(idempotencyMw.Handle("POST /flags/{key}/recovery-step")).
+			Post("/flags/{key}/recovery-step", flagH.RecoveryStep)
+
 		// Flag prerequisites (GrowthBook ParentConditions pattern).
 		// Prerequisites gate whether a flag evaluates at all, so mutating them
 		// is a flag-state change -> flags:write.

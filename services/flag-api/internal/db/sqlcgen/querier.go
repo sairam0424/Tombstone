@@ -140,6 +140,14 @@ type Querier interface {
 	MarkScheduledChangeFailedTerminal(ctx context.Context, arg MarkScheduledChangeFailedTerminalParams) error
 	PurgeExpiredIdempotencyKeys(ctx context.Context) (int64, error)
 	RecordApproval(ctx context.Context, arg RecordApprovalParams) error
+	// EVAL-4: RecoveryStep's atomic compare-and-swap write -- the mirror
+	// image of RollbackFlagEnvironment above, for the HALF_OPEN recovery
+	// ladder's ascent direction (10->25->50->100) instead of the rollback
+	// ladder's descent. The guard is reversed (<=, not >=): only apply an
+	// INCREASE if the live exposure hasn't already risen past this
+	// request's own target (a more-aggressive concurrent recovery already
+	// won), same TOCTOU-closing technique as the descent side.
+	RecoveryFlagEnvironment(ctx context.Context, arg RecoveryFlagEnvironmentParams) (int64, error)
 	RejectChangeRequest(ctx context.Context, arg RejectChangeRequestParams) (RejectChangeRequestRow, error)
 	ResolveFlagIDByKey(ctx context.Context, arg ResolveFlagIDByKeyParams) (string, error)
 	ResolveServiceToken(ctx context.Context, tokenHash sql.NullString) (ResolveServiceTokenRow, error)

@@ -207,31 +207,87 @@ func openedAtKey(flagKey, env string) string {
 // stepTTL bounds both stepKey and openedAtKey -- generously longer than any
 // plausible full descent-cooldown-recovery cycle, so a crashed evaluator
 // replica's abandoned mid-ladder state self-heals rather than persisting
-// forever. GetStep/GetOpenedAt's own "not found" defaults (100 and "not
-// set", respectively) are exactly the right values to resume a fresh
-// CLOSED-state assessment from, so an expired key is never a correctness
-// problem -- only ever a (harmless) loss of ladder-position memory.
+// forever. Losing the key mid-ladder is still a real, if rare, event
+// (transient Redis error on SetStep's own write, individual-key eviction
+// under memory pressure, or simply this TTL elapsing on an unusually long
+// incident) -- GetStep's found=false return lets its two callers
+// (aggregator.go's handleOpen/handleHalfOpen) apply a context-appropriate,
+// SAFE recovery instead of a single baked-in default: handleOpen assumes
+// "already fully killed" (0), never "nothing stepped down yet" (100),
+// because assuming less descent than may have already happened could
+// re-request an INCREASE that flag-api's RollbackFlagEnvironment CAS guard
+// would then correctly reject, permanently stalling the ladder; handleOpen
+// then also re-arms the ObservationWindow cooldown from now rather than
+// guessing it already elapsed. handleHalfOpen assumes the recovery
+// ladder's floor (0, so NextRecoveryStep resumes at the safe first rung),
+// never its ceiling (100), because assuming more progress than may have
+// actually happened could skip real verification rungs entirely (found by
+// adversarial review of PR #221).
 const stepTTL = 24 * time.Hour
 
 // GetStep returns the last rollout percentage this breaker itself set for
-// flagKey/env via the stepped ladder, or 100 if none is recorded (CLOSED,
-// or the key expired) -- 100 is the correct "nothing stepped down yet"
-// starting point for NextRollbackStep.
-func (b *Breaker) GetStep(ctx context.Context, flagKey, env string) int {
+// flagKey/env via the stepped ladder, and whether that value is actually
+// on record (false means CLOSED, key expired, or a transient Redis error --
+// callers must not treat a bare int as trustworthy without checking this).
+func (b *Breaker) GetStep(ctx context.Context, flagKey, env string) (step int, found bool) {
 	val, err := b.rdb.Get(ctx, stepKey(flagKey, env)).Result()
 	if err != nil {
-		return 100
+		return 0, false
 	}
 	n, err := strconv.Atoi(val)
 	if err != nil {
-		return 100
+		return 0, false
 	}
-	return n
+	return n, true
 }
 
 // SetStep records the rollout percentage this breaker just set.
 func (b *Breaker) SetStep(ctx context.Context, flagKey, env string, pct int) {
 	_ = b.rdb.Set(ctx, stepKey(flagKey, env), strconv.Itoa(pct), stepTTL).Err()
+}
+
+// stepClaimKey builds the Redis key for TryStep's per-transition claim
+// guard -- TryTrip only deduplicates the INITIAL trip across racing
+// evaluator replicas; every LATER step-down/step-up transition had no
+// equivalent claim (found by adversarial review of PR #221), so two
+// replicas both observing the same OPEN/HALF_OPEN position for the same
+// flag+env could each independently call OnRolloutChange and commit
+// SetStep for the same target, each producing its own audit_log row, SSE
+// broadcast, and (at the terminal 0% step) Slack alert for what is really
+// one transition. Scoped by (target step, direction), not just flag+env+
+// target: rollbackSteps and recoverySteps overlap in value (25 and 50 each
+// appear in both ladders), so a claim keyed on the bare target alone would
+// let the descent's own claim for 25 spuriously block the recovery
+// ladder's later, entirely unrelated claim for the SAME number reached
+// from the opposite direction -- caught empirically by
+// TestEndToEndDescentThenRecoveryCycle before this fix, which is exactly
+// why that test exists.
+func stepClaimKey(flagKey, env, direction string, targetStep int) string {
+	return "circuit:" + EscapeKeyComponent(flagKey) + ":" + EscapeKeyComponent(env) + ":step-claim:" + direction + ":" + strconv.Itoa(targetStep)
+}
+
+// stepClaimTTL only needs to outlast one Flush tick interval (10s) -- long
+// enough that two replicas ticking at roughly the same cadence collide on
+// the SAME claim window, short enough that a claim from an earlier,
+// unrelated pass through this exact target (e.g. a HALF_OPEN probe that
+// reverted and later climbs back through the same rung) never blocks a
+// later, legitimate attempt.
+const stepClaimTTL = 15 * time.Second
+
+// TryStep atomically claims the right to apply targetStep, in the given
+// direction ("down" for the rollback ladder, "up" for the recovery
+// ladder), for flagKey/env -- returning true for exactly one caller among
+// any that race it for the same (flagKey, env, direction, targetStep)
+// quadruple. Mirrors TryTrip's own SETNX technique and fail-open-on-
+// Redis-error posture (see TryTrip's doc comment for the full reasoning --
+// refusing to act because the dedup mechanism itself is down would be
+// strictly worse than an occasional harmless duplicate).
+func (b *Breaker) TryStep(ctx context.Context, flagKey, env, direction string, targetStep int) bool {
+	ok, err := b.rdb.SetNX(ctx, stepClaimKey(flagKey, env, direction, targetStep), "1", stepClaimTTL).Result()
+	if err != nil {
+		return true
+	}
+	return ok
 }
 
 // GetOpenedAt returns when flagKey/env last reached the rollback ladder's

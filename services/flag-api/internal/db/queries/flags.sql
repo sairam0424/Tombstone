@@ -60,6 +60,18 @@ UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), up
 FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
   AND (CASE WHEN fe.enabled THEN fe.rollout_pct ELSE 0 END) >= sqlc.arg(min_current_exposure)::integer;
 
+-- EVAL-4: RecoveryStep's atomic compare-and-swap write -- the mirror
+-- image of RollbackFlagEnvironment above, for the HALF_OPEN recovery
+-- ladder's ascent direction (10->25->50->100) instead of the rollback
+-- ladder's descent. The guard is reversed (<=, not >=): only apply an
+-- INCREASE if the live exposure hasn't already risen past this
+-- request's own target (a more-aggressive concurrent recovery already
+-- won), same TOCTOU-closing technique as the descent side.
+-- name: RecoveryFlagEnvironment :execrows
+UPDATE flag_environments fe SET enabled=$1, rollout_pct=$2, updated_at=now(), updated_by=$3
+FROM flags f WHERE f.id=fe.flag_id AND f.key=$4 AND fe.environment=$5 AND f.project_id=$6
+  AND (CASE WHEN fe.enabled THEN fe.rollout_pct ELSE 0 END) <= sqlc.arg(max_current_exposure)::integer;
+
 -- name: ArchiveFlag :execrows
 UPDATE flags SET state='ARCHIVED', archived_at=now() WHERE key=$1 AND project_id=$2;
 

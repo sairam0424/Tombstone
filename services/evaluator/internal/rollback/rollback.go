@@ -195,3 +195,76 @@ func (e *Executor) SetRolloutPct(ctx context.Context, flagKey, environment strin
 		zap.String("flag", flagKey), zap.String("env", environment), zap.Int("rollout_pct", pct))
 	return nil
 }
+
+// IncreaseRolloutPct calls flag-api's EVAL-4 graduated recovery-step
+// endpoint (POST /flags/{key}/recovery-step) to raise a flag's exposure to
+// pct -- the HALF_OPEN recovery ladder's ascent counterpart to
+// SetRolloutPct's descent above. A separate flag-api endpoint exists
+// specifically because RollbackStep/rollback-step can never increase
+// exposure (see that handler's own doc comment); recovery-step is its
+// mirror image, which can never decrease.
+//
+// Unlike SetRolloutPct, a 409 here is treated as an ERROR, not success:
+// on the descent side, a stale target superseded by a MORE aggressive
+// concurrent step down still satisfies the caller's own goal ("exposure is
+// now at most pct"). On the ascent side, a 409 is genuinely ambiguous --
+// it could mean a more-aggressive concurrent recovery already won (this
+// call's goal is still satisfied), OR it could mean a fresh incident
+// dropped exposure back down while this call was in flight (this call's
+// goal is NOT satisfied, and treating it as success would mask a real
+// revert). Retrying is the safe default for an ambiguous signal: Flush's
+// next tick re-reads Redis-tracked position and recomputes the correct
+// target from wherever the ladder actually is by then.
+func (e *Executor) IncreaseRolloutPct(ctx context.Context, flagKey, environment string, pct int, reason string) error {
+	if pct < 0 || pct > 100 {
+		return fmt.Errorf("rollout_pct must be between 0 and 100, got %d", pct)
+	}
+
+	e.logger.Info("executing recovery step",
+		zap.String("flag", flagKey), zap.String("env", environment),
+		zap.Int("rollout_pct", pct), zap.String("reason", reason))
+
+	body, _ := json.Marshal(map[string]any{
+		"environment": environment,
+		"rollout_pct": pct,
+		"reason":      reason,
+	})
+	stepReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/flags/%s/recovery-step", e.flagAPIURL, flagKey),
+		bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build recovery-step request: %w", err)
+	}
+	stepReq.Header.Set("Authorization", "Bearer "+e.flagAPIToken)
+	stepReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.resilientHTTP.Do(ctx, stepReq)
+	if err != nil {
+		return fmt.Errorf("recovery-step call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("recovery-step returned HTTP %d", resp.StatusCode)
+	}
+
+	// Belt-and-suspenders alongside flag-api's own SSE broadcast, matching
+	// SetRolloutPct/Execute's identical pattern above.
+	event := map[string]interface{}{
+		"flag_key":    flagKey,
+		"enabled":     pct > 0,
+		"rollout_pct": pct,
+		"reason":      reason,
+		"ts":          time.Now().Unix(),
+		"environment": environment,
+	}
+	payload, _ := json.Marshal(event)
+	channel := fmt.Sprintf("stream:%s:updates", environment)
+	if pubErr := e.rdb.Publish(ctx, channel, payload).Err(); pubErr != nil {
+		e.logger.Warn("redis publish on recovery-step failed", zap.Error(pubErr))
+	}
+
+	e.logger.Info("recovery-step executed successfully",
+		zap.String("flag", flagKey), zap.String("env", environment), zap.Int("rollout_pct", pct))
+	return nil
+}
