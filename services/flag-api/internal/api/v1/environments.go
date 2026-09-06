@@ -24,9 +24,18 @@ func NewSnapshotHandler(db *sql.DB, logger *zap.Logger) *SnapshotHandler {
 
 // SnapshotPrerequisite is a lightweight prerequisite record embedded in the snapshot.
 // SDKs use this to evaluate prerequisite gates in-process without extra API calls.
+//
+// FlagKey's wire tag is "flag_key", matching proto/v1/flags/flags.proto's
+// ParentCondition message and every SDK's FlagPrerequisite type -- NOT
+// "prereq_flag_key" (that's only flag_prerequisites' own DB column name).
+// Before this fix this struct's wire tag was "prereq_flag_key", silently
+// diverging from the proto contract every SDK was written against: every
+// SDK's prerequisite dependency lookup read the wrong key against a real
+// snapshot response (found while investigating SDK-4's prerequisites-
+// streaming follow-up).
 type SnapshotPrerequisite struct {
 	ID                string `json:"id"`
-	PrereqFlagKey     string `json:"prereq_flag_key"`
+	FlagKey           string `json:"flag_key"`
 	RequiredVariation string `json:"required_variation"`
 	Gate              bool   `json:"gate"`
 	Priority          int    `json:"priority"`
@@ -118,7 +127,7 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		for _, pr := range prereqRows {
 			p := SnapshotPrerequisite{
 				ID:                pr.ID,
-				PrereqFlagKey:     pr.PrereqFlagKey,
+				FlagKey:           pr.PrereqFlagKey,
 				RequiredVariation: pr.RequiredVariation,
 				Gate:              pr.Gate,
 				Priority:          int(pr.Priority),
