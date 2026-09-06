@@ -6,6 +6,8 @@ import type {
   EvaluationContext,
   EvaluationResult,
   FlagSnapshot,
+  FlagEnvironmentState,
+  FlagPrerequisite,
   FlagEvent,
   TargetingRule,
   TelemetryEvent,
@@ -112,7 +114,7 @@ export class TombstoneClient {
       });
 
       if (resp.ok) {
-        const snap = (await resp.json()) as FlagSnapshot;
+        const snap = this.parseSnapshot(await resp.json());
         this.cache.loadSnapshot(snap);
 
         // Best-effort: for flags whose snapshot entry has no targeting rules,
@@ -154,12 +156,27 @@ export class TombstoneClient {
     // Pull targeting rules from cache (defaults to [] if not present)
     const rules: TargetingRule[] = flagState?.targetingRules ?? [];
 
-    const result = this.engine.evaluate<T>(
-      flagState,
-      rules,
+    // Passes this.cache itself (a real FlagLookup over every cached flag),
+    // NOT engine.evaluate()'s legacy single-flag overload, which this
+    // method used to call with `flagState` in the flagKeyOrRules-arg
+    // position -- that overload builds an internal singleCache that only
+    // ever resolves the ONE flag being evaluated (see evaluation.ts's
+    // `evaluate()` legacy path). checkPrerequisites's own cache.get(dep.
+    // flagKey) call for ANY other flag key then always returned undefined,
+    // so every hard-gated prerequisite was unconditionally treated as
+    // PREREQUISITE_FAILED regardless of the dependency's real state --
+    // prerequisite gating was completely non-functional in this SDK
+    // independent of, and in addition to, the wire-parsing bug (found while
+    // investigating SDK-4's prerequisites-streaming follow-up).
+    // evaluateWithDetail's own cache param takes any object shaped like
+    // FlagLookup (get(flagKey): FlagEnvironmentState | undefined) --
+    // FlagCache already satisfies that structurally.
+    const result = this.engine.evaluateWithDetail<T>(
+      flagKey,
       context,
       defaultValue,
-      flagKey,
+      this.cache,
+      rules,
     );
 
     this.recordTelemetry(flagKey, result);
@@ -208,8 +225,105 @@ export class TombstoneClient {
   }
 
   /**
+   * Parses the raw JSON body of GET /api/v1/environments/snapshot into this
+   * SDK's own camelCase FlagSnapshot/FlagEnvironmentState/FlagPrerequisite
+   * types.
+   *
+   * flag-api's real response (services/flag-api/internal/api/v1/
+   * environments.go's Snapshot/FlagEnvironmentStateWithPrereqs/
+   * SnapshotPrerequisite structs) is snake_case throughout: flag_id,
+   * flag_key, rollout_pct, safe_default, updated_at, and (per-prerequisite)
+   * flag_key/required_variation/gate/priority. Before this fix, fetchSnapshot
+   * did `(await resp.json()) as FlagSnapshot` -- a bare type assertion with
+   * NO key translation -- so every camelCase field this SDK's own types
+   * declare (flagKey, rolloutPct, safeDefault, updatedAt, and every
+   * prerequisite's flagKey/requiredVariation) read as undefined against a
+   * real backend response. loadSnapshot then keyed its cache Map by
+   * `flag.flagKey` (undefined for every entry), so the ENTIRE snapshot
+   * collapsed into effectively nothing usable -- evaluate() could not
+   * correctly serve ANY flag's real state after a fresh connect(), not just
+   * prerequisites (found while investigating SDK-4's prerequisites-
+   * streaming follow-up). This SDK's own tests never caught it because
+   * client.test.ts's fake fetch returned an already-camelCase object
+   * directly, never a real JSON string round-trip.
+   *
+   * targeting_rules/target_list/hash_version are read defensively (default
+   * []/[]/1) since the real snapshot endpoint does not send them today --
+   * see fetchAndStoreRules's own comment for why that gap is separate and
+   * out of scope here.
+   */
+  private parseSnapshot(raw: unknown): FlagSnapshot {
+    const obj = (raw ?? {}) as Record<string, unknown>;
+    const rawFlags = Array.isArray(obj["flags"]) ? obj["flags"] : [];
+    return {
+      environment: String(obj["environment"] ?? ""),
+      flags: rawFlags.map((f) =>
+        this.parseFlagEnvironmentState(f as Record<string, unknown>),
+      ),
+      hash: String(obj["hash"] ?? ""),
+      ts: Number(obj["ts"] ?? 0),
+    };
+  }
+
+  private parseFlagEnvironmentState(
+    f: Record<string, unknown>,
+  ): FlagEnvironmentState {
+    const rawPrereqs = Array.isArray(f["prerequisites"])
+      ? f["prerequisites"]
+      : [];
+    const prerequisites: FlagPrerequisite[] = rawPrereqs.map((p) => {
+      const pr = p as Record<string, unknown>;
+      return {
+        flagKey: String(pr["flag_key"] ?? ""),
+        requiredVariation: String(pr["required_variation"] ?? "true"),
+        // Matches flag-api's AddPrerequisite default: gate defaults to true
+        // unless explicitly false.
+        gate: pr["gate"] !== false,
+      };
+    });
+    const rawRules = Array.isArray(f["targeting_rules"])
+      ? f["targeting_rules"]
+      : [];
+    const targetingRules: TargetingRule[] = rawRules.map((r) => {
+      const rule = r as Record<string, unknown>;
+      return {
+        id: String(rule["id"] ?? ""),
+        ruleType: (rule["rule_type"] as TargetingRule["ruleType"]) ?? "CUSTOM",
+        attribute: String(rule["attribute"] ?? ""),
+        operator: rule["operator"] as TargetingRule["operator"],
+        values: Array.isArray(rule["values"]) ? rule["values"] : [],
+        variation: String(rule["variation"] ?? ""),
+        priority: Number(rule["priority"] ?? 0),
+      };
+    });
+    return {
+      flagId: String(f["flag_id"] ?? ""),
+      flagKey: String(f["flag_key"] ?? ""),
+      environment: String(f["environment"] ?? ""),
+      enabled: Boolean(f["enabled"]),
+      rolloutPct: Number(f["rollout_pct"] ?? 0),
+      safeDefault: String(f["safe_default"] ?? "false"),
+      updatedAt: Number(f["updated_at"] ?? 0),
+      hashVersion: (f["hash_version"] as 1 | 2) ?? 1,
+      targetList: Array.isArray(f["target_list"])
+        ? (f["target_list"] as string[])
+        : [],
+      targetingRules,
+      prerequisites,
+    };
+  }
+
+  /**
    * Fetch targeting rules for a single flag from the flag-api.
    * Stores the result in the cache on success; silently ignores any error.
+   *
+   * NOTE: GET /api/v1/flags/{key}/rules has no server-side route registered
+   * anywhere in flag-api's cmd/main.go today -- this always 404s against a
+   * real backend (confirmed by grep; also encoded honestly in this SDK's own
+   * client.test.ts fake fetch, which returns 404 for any /rules URL). Real-
+   * time targeting-rule propagation is a separate, larger, already-deferred
+   * project (no mutation endpoint or snapshot inclusion exists yet) -- not
+   * fixed here.
    */
   private async fetchAndStoreRules(
     apiUrl: string,
