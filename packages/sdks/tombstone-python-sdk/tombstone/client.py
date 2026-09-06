@@ -246,16 +246,58 @@ class TombstoneClient:
             flag_key = event.get("flag_key")
             if not flag_key:
                 return
-            state = FlagEnvironmentState(
-                flag_key=flag_key,
-                enabled=event.get("enabled", False),
-                rollout_pct=float(event.get("rollout_pct", 0)),
-                safe_default=event.get("safe_default", False),
-                environment=event.get("environment", self._environment),
-                hash_version=event.get("hash_version", 1),
-                target_list=event.get("target_list", []),
-            )
+            # flag-api's real FlagEvent (services/flag-api/internal/api/v1/
+            # flags.go) carries exactly flag_key/enabled/rollout_pct/reason/
+            # ts/environment -- never safe_default/hash_version/target_list/
+            # targeting_rules/prerequisites (SDK-4 investigation). Before
+            # this fix, every field the event doesn't carry was overwritten
+            # with a hardcoded default (False/1/[]) instead of preserved,
+            # so ANY real SSE event for a flag -- a kill-switch, a rollback
+            # step, literally any enabled/rollout_pct change -- silently
+            # wiped that flag's cached prerequisites and targeting_rules to
+            # empty client-side, until the next full snapshot refetch
+            # restored them: a live correctness regression window, not
+            # merely "rules don't propagate live". Merging against the
+            # existing cached entry (mirroring @tombstone/core's cache.ts
+            # applyEvent, which already does this correctly) closes it.
             with self._lock:
+                existing = self._cache.get(flag_key)
+
+                # event.get(key, fallback) only falls back when key is
+                # ABSENT -- a key present with an explicit JSON null returns
+                # None itself, not the fallback (found by adversarial
+                # review of this fix). For this merge, "the event doesn't
+                # tell us this field's value" and "the event explicitly
+                # says null" should both mean the same thing -- fall back to
+                # whatever's already cached, never overwrite a real value
+                # with a bare None -- so this treats a None RESULT as
+                # "no real value provided" regardless of why it's None.
+                # Currently dormant either way (flag-api's real FlagEvent,
+                # all non-pointer Go types, never serializes these keys as
+                # JSON null today), but hardens the pattern before any
+                # future event schema legitimately sends an explicit null
+                # for one of these fields (e.g. a Go pointer/slice field).
+                def _field_or_existing(key: str, existing_value):
+                    value = event.get(key)
+                    return existing_value if value is None else value
+
+                state = FlagEnvironmentState(
+                    flag_key=flag_key,
+                    enabled=event.get("enabled", False),
+                    rollout_pct=float(event.get("rollout_pct", 0)),
+                    safe_default=_field_or_existing(
+                        "safe_default", existing.safe_default if existing else False
+                    ),
+                    environment=event.get("environment", self._environment),
+                    hash_version=_field_or_existing(
+                        "hash_version", existing.hash_version if existing else 1
+                    ),
+                    target_list=_field_or_existing(
+                        "target_list", existing.target_list if existing else []
+                    ),
+                    targeting_rules=existing.targeting_rules if existing else [],
+                    prerequisites=existing.prerequisites if existing else [],
+                )
                 new_cache = dict(self._cache)
                 new_cache[flag_key] = state
                 self._cache = new_cache
