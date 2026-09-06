@@ -72,7 +72,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 
 	t.Run("AddPrerequisite succeeds and InsertPrerequisite's RETURNING columns map correctly", func(t *testing.T) {
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+parent.Key+"/prerequisites", map[string]any{
-			"prereq_flag_key":    dep.Key,
+			"flag_key":           dep.Key,
 			"required_variation": "false",
 			"gate":               false,
 			"priority":           7,
@@ -91,8 +91,8 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 		// values chosen (gate=false, priority=7) deliberately differ from
 		// AddPrerequisite's own defaults (true, 0), so a swap can't
 		// accidentally look correct.
-		if created.PrereqFlagKey != dep.Key {
-			t.Errorf("PrereqFlagKey = %q, want %q", created.PrereqFlagKey, dep.Key)
+		if created.FlagKey != dep.Key {
+			t.Errorf("FlagKey = %q, want %q", created.FlagKey, dep.Key)
 		}
 		if created.RequiredVariation != "false" {
 			t.Errorf("RequiredVariation = %q, want %q", created.RequiredVariation, "false")
@@ -130,7 +130,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 			t.Fatalf("total = %d, want 1", resp.Total)
 		}
 		got := resp.Prerequisites[0]
-		if got.ID != created.ID || got.PrereqFlagKey != dep.Key || got.Gate != false || got.Priority != 7 {
+		if got.ID != created.ID || got.FlagKey != dep.Key || got.Gate != false || got.Priority != 7 {
 			t.Errorf("ListPrerequisitesForFlag returned %+v, want it to match the inserted row %+v", got, created)
 		}
 	})
@@ -145,7 +145,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 			t.Fatalf("Prerequisites = %+v, want exactly 1 entry", entry.Prerequisites)
 		}
 		p := entry.Prerequisites[0]
-		if p.PrereqFlagKey != dep.Key || p.Gate != false || p.Priority != 7 || p.RequiredVariation != "false" {
+		if p.FlagKey != dep.Key || p.Gate != false || p.Priority != 7 || p.RequiredVariation != "false" {
 			t.Errorf("GetEnvironmentSnapshotPrerequisites returned %+v, want it to match the inserted row", p)
 		}
 	})
@@ -155,7 +155,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 		// Making dep depend on parent would close a 2-hop cycle: this walks
 		// ListPrereqFlagKeysForFlag with REAL rows present, not an empty table.
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+dep.Key+"/prerequisites", map[string]any{
-			"prereq_flag_key": parent.Key,
+			"flag_key": parent.Key,
 		}, projectID, map[string]string{"key": dep.Key})
 		rec := httptest.NewRecorder()
 		prereqH.AddPrerequisite(rec, req)

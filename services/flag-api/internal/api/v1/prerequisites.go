@@ -28,10 +28,22 @@ func NewPrerequisiteHandler(db *sql.DB, logger *zap.Logger) *PrerequisiteHandler
 }
 
 // Prerequisite is the API-level representation of a flag_prerequisites row.
+//
+// FlagKey's json tag is "flag_key", NOT "prereq_flag_key" -- the latter is
+// only the flag_prerequisites TABLE's own column name (distinguishing it
+// from that row's flag_id, which refers to the PARENT flag). The wire-level
+// API contract must match proto/v1/flags/flags.proto's ParentCondition
+// message (flag_key/required_variation/gate/priority) since every SDK's
+// FlagPrerequisite type (Python/Java/Ruby/.NET/TS) was written against that
+// proto naming. Before this fix this struct used "prereq_flag_key" on the
+// wire, silently diverging from the proto contract -- every SDK's
+// prerequisite dependency lookup read the wrong key against a real
+// response and got an empty/missing value (found while investigating
+// SDK-4's prerequisites-streaming follow-up).
 type Prerequisite struct {
 	ID                string `json:"id"`
 	FlagID            string `json:"flag_id"`
-	PrereqFlagKey     string `json:"prereq_flag_key"`
+	FlagKey           string `json:"flag_key"`
 	RequiredVariation string `json:"required_variation"`
 	Gate              bool   `json:"gate"`
 	Priority          int    `json:"priority"`
@@ -39,8 +51,9 @@ type Prerequisite struct {
 }
 
 // AddPrerequisiteRequest is the request body for POST /api/v1/flags/{key}/prerequisites.
+// FlagKey's wire name is "flag_key" -- see Prerequisite's doc comment above.
 type AddPrerequisiteRequest struct {
-	PrereqFlagKey     string `json:"prereq_flag_key"`
+	FlagKey           string `json:"flag_key"`
 	RequiredVariation string `json:"required_variation"`
 	Gate              *bool  `json:"gate"`     // pointer so we can distinguish false from omitted
 	Priority          int    `json:"priority"` // default 0
@@ -50,7 +63,7 @@ type AddPrerequisiteRequest struct {
 //
 // Validates:
 //  1. The parent flag ({key}) exists.
-//  2. The prerequisite flag (prereq_flag_key) exists.
+//  2. The prerequisite flag (flag_key) exists.
 //  3. No circular dependency exists (depth-first, max 5 hops).
 func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
@@ -72,8 +85,8 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.PrereqFlagKey == "" {
-		writeError(w, http.StatusBadRequest, "prereq_flag_key is required")
+	if req.FlagKey == "" {
+		writeError(w, http.StatusBadRequest, "flag_key is required")
 		return
 	}
 	if req.RequiredVariation == "" {
@@ -100,23 +113,23 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 	// Verify the prerequisite flag exists IN THE SAME PROJECT — a
 	// prerequisite pointing at another project's flag is never valid, not
 	// even if that flag key also happens to exist there.
-	prereqExists, _ := q.FlagExistsInProject(r.Context(), sqlcgen.FlagExistsInProjectParams{Key: req.PrereqFlagKey, ProjectID: projectID})
+	prereqExists, _ := q.FlagExistsInProject(r.Context(), sqlcgen.FlagExistsInProjectParams{Key: req.FlagKey, ProjectID: projectID})
 	if !prereqExists {
-		writeError(w, http.StatusUnprocessableEntity, "prereq_flag_key does not exist")
+		writeError(w, http.StatusUnprocessableEntity, "flag_key does not exist")
 		return
 	}
 
 	// Circular dependency check (depth-first, max 5 hops).
-	// We walk the prerequisite graph starting from prereq_flag_key and ensure we
+	// We walk the prerequisite graph starting from flag_key and ensure we
 	// never arrive back at key.
-	if err := h.detectCycle(r, projectID, key, req.PrereqFlagKey, 0); err != nil {
+	if err := h.detectCycle(r, projectID, key, req.FlagKey, 0); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
 	inserted, err := q.InsertPrerequisite(r.Context(), sqlcgen.InsertPrerequisiteParams{
 		FlagID:            flagID,
-		PrereqFlagKey:     req.PrereqFlagKey,
+		PrereqFlagKey:     req.FlagKey,
 		RequiredVariation: req.RequiredVariation,
 		Gate:              gate,
 		Priority:          int32(req.Priority),
@@ -124,13 +137,13 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		h.logger.Error("insert prerequisite", zap.Error(err))
 		// Unique-constraint violation (duplicate prereq for same flag).
-		writeError(w, http.StatusConflict, "prerequisite already exists for this flag+prereq_flag_key pair")
+		writeError(w, http.StatusConflict, "prerequisite already exists for this flag+flag_key pair")
 		return
 	}
 	p := Prerequisite{
 		ID:                inserted.ID,
 		FlagID:            inserted.FlagID,
-		PrereqFlagKey:     inserted.PrereqFlagKey,
+		FlagKey:           inserted.PrereqFlagKey,
 		RequiredVariation: inserted.RequiredVariation,
 		Gate:              inserted.Gate,
 		Priority:          int(inserted.Priority),
@@ -161,7 +174,7 @@ func (h *PrerequisiteHandler) ListPrerequisites(w http.ResponseWriter, r *http.R
 		prereqs = append(prereqs, Prerequisite{
 			ID:                r.ID,
 			FlagID:            r.FlagID,
-			PrereqFlagKey:     r.PrereqFlagKey,
+			FlagKey:           r.PrereqFlagKey,
 			RequiredVariation: r.RequiredVariation,
 			Gate:              r.Gate,
 			Priority:          int(r.Priority),

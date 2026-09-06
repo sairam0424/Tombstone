@@ -270,16 +270,16 @@ func TestTenancyIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("AddPrerequisite rejects a prereq_flag_key that only exists in another project", func(t *testing.T) {
+	t.Run("AddPrerequisite rejects a flag_key that only exists in another project", func(t *testing.T) {
 		onlyInB := createTestFlag(t, flagH, projectB, "ten1a-only-in-b")
 
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+sharedKey+"/prerequisites",
-			map[string]any{"prereq_flag_key": onlyInB.Key}, projectA, map[string]string{"key": sharedKey})
+			map[string]any{"flag_key": onlyInB.Key}, projectA, map[string]string{"key": sharedKey})
 		rec := httptest.NewRecorder()
 		prereqH.AddPrerequisite(rec, req)
 
 		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422 (prereq_flag_key must not resolve across projects); body: %s",
+			t.Fatalf("status = %d, want 422 (flag_key must not resolve across projects); body: %s",
 				rec.Code, rec.Body.String())
 		}
 	})
