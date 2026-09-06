@@ -55,6 +55,17 @@ class FlagEnvironmentState:
     # than failing the whole evaluation.
     hash_version: int = 1
     target_list: list = field(default_factory=list)
+    # Unix seconds this flag's prerequisites were last known-good as of --
+    # either the snapshot fetch that loaded them, or a live prerequisites_
+    # updated event applied since. Lets a live event be compared against
+    # what's already cached and rejected if it's older (see
+    # _apply_prerequisites_event's own doc comment for why: concurrent
+    # AddPrerequisite/DeletePrerequisite calls on the same flag can have
+    # their events arrive out of real commit order under scheduling delays
+    # -- services/flag-api/internal/api/v1/prerequisites.go's own
+    # PrerequisitesEvent doc comment discloses this and designed Ts
+    # specifically so SDKs could guard against it this way).
+    prerequisites_updated_at: int = 0
 
 
 @dataclass
