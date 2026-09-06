@@ -395,3 +395,71 @@ func TestDLQStreamKey_MatchesConvention(t *testing.T) {
 		t.Errorf("DLQStreamKey(StreamKey(%q)) = %q, want %q", "production", got, want)
 	}
 }
+
+// TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled is
+// the direct regression proof for a HIGH-severity finding from adversarial
+// review of the prerequisites-streaming PR: reprocessClaimedMessage (this
+// function is what ReclaimStalePending's own-group retry branch calls) used
+// to unconditionally json.Unmarshal every reclaimed payload into a
+// FlagEvent, with NO discriminator check at all -- unlike RunStreamConsumer
+// and BuildReplayFrames, which both check the "kind" Values-map field
+// first. A prerequisites_updated payload (flag_key/environment/
+// prerequisites/ts) has none of FlagEvent's real keys (enabled/rollout_pct/
+// reason), so Go's json.Unmarshal would NOT error -- it silently leaves
+// those missing fields at their zero values -- and this would have
+// rebroadcast a bogus "flag disabled, 0% rollout" event to every connected
+// client for an entry that never touched the flag's enabled/rollout state
+// at all. Reproduces the exact scenario that requires reclaim in the first
+// place: the message is delivered but never acked (simulating
+// RunStreamConsumer crashing/stalling mid-processing), goes idle past
+// reclaimIdleThreshold, and is picked up by this replica's own reclaim
+// sweep.
+func TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	payload := `{"flag_key":"child-flag","environment":"production","prerequisites":[{"flag_key":"parent-flag","required_variation":"true","gate":true}],"ts":1700000000}`
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{
+			"kind":        "prerequisites_updated",
+			"event":       "prerequisites_updated",
+			"flag_key":    "child-flag",
+			"environment": "production",
+			"payload":     payload,
+		},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	// Deliver into b's OWN group but never ack, simulating a stuck consumer
+	// (the exact precondition ReclaimStalePending exists to recover from).
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: b.Group(), Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(own): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	frameStr := string(frame)
+
+	if !strings.Contains(frameStr, "event: prerequisites_updated") {
+		t.Errorf("reclaimed prerequisites_updated entry was not relayed under its real event name: %s", frameStr)
+	}
+	if !strings.Contains(frameStr, payload) {
+		t.Errorf("reclaimed entry did not carry the real payload verbatim: %s", frameStr)
+	}
+	if strings.Contains(frameStr, "event: flag_updated") || strings.Contains(frameStr, "event: kill_switch") {
+		t.Errorf("reclaimed prerequisites_updated entry was misrouted through the FlagEvent path: %s", frameStr)
+	}
+}

@@ -221,6 +221,7 @@ func TestBuildReplayFrames_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey,
 		Values: map[string]interface{}{
+			"kind":        "prerequisites_updated",
 			"event":       "prerequisites_updated",
 			"flag_key":    "child-flag",
 			"environment": "production",

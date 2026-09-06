@@ -265,6 +265,14 @@ func TestPrerequisitesPublishLiveUpdateEvent(t *testing.T) {
 				t.Fatalf("tombstone:stream:%s: got %d entries, want exactly 1", env, len(msgs))
 			}
 			fields := msgs[0].Values
+			// "kind" is the field gateway actually routes on (see
+			// publishPrerequisitesEvent's own doc comment for why "event"
+			// alone is not safe as the sole discriminator); asserting on it
+			// here is what proves gateway would relay this correctly, not
+			// misroute it as a FlagEvent.
+			if got := fields["kind"]; got != prerequisitesEventKind {
+				t.Errorf("%s: kind = %q, want %q", env, got, prerequisitesEventKind)
+			}
 			if got := fields["event"]; got != "prerequisites_updated" {
 				t.Errorf("%s: event = %q, want %q", env, got, "prerequisites_updated")
 			}

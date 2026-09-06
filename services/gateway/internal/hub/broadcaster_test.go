@@ -216,6 +216,7 @@ func TestRunStreamConsumer_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 	if _, err := rdb.XAdd(context.Background(), &redis.XAddArgs{
 		Stream: streamKey,
 		Values: map[string]interface{}{
+			"kind":        "prerequisites_updated",
 			"event":       "prerequisites_updated",
 			"flag_key":    "child-flag",
 			"environment": env,
@@ -243,5 +244,69 @@ func TestRunStreamConsumer_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 	// "event: kill_switch", never the real prerequisites_updated name.
 	if strings.Contains(frameStr, "event: flag_updated") || strings.Contains(frameStr, "event: kill_switch") {
 		t.Errorf("frame was misrouted through the FlagEvent path: %s", frameStr)
+	}
+}
+
+// TestRunStreamConsumer_KillSwitchReasonCannotCollideWithPrerequisitesUpdated
+// is the direct regression proof for a HIGH-severity finding from
+// adversarial review of the prerequisites-streaming PR: an earlier version
+// discriminated a PrerequisitesEvent purely via the XAdd Values map's
+// "event" field -- but that SAME field is set to a FlagEvent's own Reason
+// for every ordinary flag-toggle event, and Reason is a free-text,
+// unvalidated, caller-supplied string for KillSwitch/RollbackStep/
+// RecoveryStep. A caller supplying reason="prerequisites_updated" (a
+// plausible string now that it's a real domain term, not just a
+// hypothetical attack) would have made this consumer misroute a genuine
+// kill-switch event through Hub.BroadcastRaw, delivering it to clients as
+// a bogus "zero prerequisites" update instead of the real flag_updated/
+// kill_switch frame. This constructs EXACTLY that colliding FlagEvent
+// (via xaddEvent, which sets Values["event"] = event.Reason and never
+// sets "kind" at all, matching flag-api's own real publishFlagEventToStream)
+// and proves it is routed correctly.
+func TestRunStreamConsumer_KillSwitchReasonCannotCollideWithPrerequisitesUpdated(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	const env = "production"
+	streamKey := StreamKey(env)
+
+	h := NewHub(zap.NewNop())
+	b := newTestBroadcaster(rdb, h, ReplicaGroupName("collision-replica"))
+	CreateConsumerGroups(context.Background(), rdb, []string{env}, b.Group(), zap.NewNop())
+
+	ch := h.Subscribe(env, "client")
+	defer h.Unsubscribe(env, "client", ch)
+
+	// A real KillSwitch call whose (unvalidated, free-text) reason happens
+	// to equal the prerequisites-streaming sentinel string.
+	xaddEvent(t, rdb, streamKey, FlagEvent{
+		FlagKey: "payments-flag", Enabled: false, RolloutPct: 0,
+		Reason: "prerequisites_updated", Ts: 1_700_000_004, Environment: env,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.RunStreamConsumer(ctx, env)
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	frameStr := string(frame)
+
+	// Must be classified as a real kill_switch (eventTypeFor: !Enabled +
+	// this exact Reason string does NOT match its own kill_switch reason
+	// allowlist, so this specific Reason value actually falls through to
+	// "flag_updated" -- either is correct here; what must NEVER happen is
+	// BroadcastRaw's verbatim relay under "event: prerequisites_updated"
+	// with a payload that has no "prerequisites" key at all).
+	if strings.Contains(frameStr, "event: prerequisites_updated") {
+		t.Fatalf("a real FlagEvent was misrouted as prerequisites_updated: %s", frameStr)
+	}
+	if !strings.Contains(frameStr, "payments-flag") {
+		t.Errorf("did not receive the real FlagEvent frame at all: %s", frameStr)
 	}
 }
