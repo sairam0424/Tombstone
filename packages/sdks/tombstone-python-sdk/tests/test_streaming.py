@@ -343,6 +343,47 @@ def test_apply_prerequisites_event_rejects_a_stale_out_of_order_delivery():
     client.close()
 
 
+def test_apply_prerequisites_event_with_ts_equal_to_cached_is_applied():
+    """Pins down the strict `<` comparison in _apply_prerequisites_event,
+    not a `<=` regression. A "clearly older" ts alone (the test above)
+    cannot distinguish the two: both correctly reject that input. Only an
+    equal-ts input tells them apart -- `<=` would incorrectly reject this
+    one too, silently dropping a live update that arrived at the exact
+    same ts as what's already cached."""
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        prerequisites=[
+            {"flag_key": "current-parent", "required_variation": "true", "gate": True}
+        ],
+        prerequisites_updated_at=5_000,
+    )
+
+    client._apply_prerequisites_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "prerequisites": [
+                    {"flag_key": "new-parent", "required_variation": "true"}
+                ],
+                "ts": 5_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == [
+        {"flag_key": "new-parent", "required_variation": "true"}
+    ], "an equal-ts event must be applied, not dropped as stale"
+    assert updated.prerequisites_updated_at == 5_000
+    client.close()
+
+
 def test_snapshot_seeds_prerequisites_updated_at_from_the_snapshot_ts():
     client = _client()
     client._apply_snapshot(
