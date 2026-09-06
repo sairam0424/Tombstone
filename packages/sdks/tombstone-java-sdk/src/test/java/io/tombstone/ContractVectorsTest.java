@@ -61,6 +61,37 @@ public class ContractVectorsTest {
         return list.stream();
     }
 
+    /** target_list_vectors (Step 3 -- individual targeting) had zero
+     *  consumers in ANY SDK before this fix (Java/Ruby/.NET, TS core,
+     *  WASM, Edge) -- confirmed via a repo-wide grep for
+     *  target_list_vectors/TargetListVectors turning up no hits at all,
+     *  making it dead test data despite covering a real pipeline step
+     *  (docs/SDK_CONTRACT.md's Step 3). This is the first real consumer. */
+    @TestFactory
+    Stream<DynamicTest> targetListVectors() throws Exception {
+        var root = loadVectors();
+        var list = new ArrayList<DynamicTest>();
+        for (JsonNode v : root.get("target_list_vectors")) {
+            String id = v.get("id").asText();
+            List<String> targetList = new ArrayList<>();
+            v.get("target_list").forEach(t -> targetList.add(t.asText()));
+            String userId = v.get("user_id").asText();
+            boolean expectedMatch = v.get("expected_target_match").asBoolean();
+
+            list.add(DynamicTest.dynamicTest(id, () -> {
+                var flag = new FlagEnvironmentState(
+                    "id", "test-flag", "test", true, 0, "false", 0L,
+                    List.of(), List.of(), targetList, 1
+                );
+                var context = new EvaluationContext(userId, "", Map.of());
+                var result = ENGINE.evaluate(flag, context, false, "test-flag");
+                boolean matched = result.reason() == EvaluationReason.TARGET_MATCH;
+                assertEquals(expectedMatch, matched, "target-list vector mismatch for " + id);
+            }));
+        }
+        return list.stream();
+    }
+
     @TestFactory
     Stream<DynamicTest> prerequisiteVectors() throws Exception {
         var root = loadVectors();
