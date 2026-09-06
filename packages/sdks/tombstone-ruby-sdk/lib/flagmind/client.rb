@@ -30,7 +30,22 @@ module Tombstone
     def evaluate(flag_key, context)
       state = @cache.get(flag_key)
       default_value = @defaults.fetch(flag_key, false)
-      @engine.evaluate(state, context, default_value, flag_key)
+      # Passes a real flag_lookup backed by @cache, NOT the 4-positional-arg
+      # call used before -- EvaluationEngine#evaluate defaults flag_lookup to
+      # ->(k) { nil } when omitted, documented there as being for callers
+      # with no snapshot access. This client DOES have snapshot access via
+      # @cache, but never threaded it through. Before this same PR's other
+      # fix (parse_prerequisites), prerequisites was always [] and Step 2
+      # never actually ran against real data, so a nil-returning lookup was
+      # dead code from this call path specifically. Once prerequisites are
+      # real, omitting flag_lookup here would make ANY hard-gated
+      # prerequisite permanently PREREQUISITE_FAILED regardless of the real
+      # dependency's state (nil never equals a real required_variation
+      # string) -- swapping "prerequisites silently ignored" for "every
+      # gated flag permanently blocked", which is worse. Found while
+      # verifying this PR against the identical bug an adversarial review
+      # found in the Java SDK's equivalent fix (PR #231).
+      @engine.evaluate(state, context, default_value, flag_key, flag_lookup: ->(k) { @cache.get(k) })
     end
 
     def enabled?(flag_key, context)
@@ -54,18 +69,51 @@ module Tombstone
       req["Authorization"] = "Bearer #{@sdk_key}"
       resp = Net::HTTP.start(uri.host, uri.port) { |h| h.request(req) }
       return unless resp.is_a?(Net::HTTPSuccess)
-      data = JSON.parse(resp.body)
-      flags = (data["flags"] || []).map do |f|
+      @cache.load_snapshot(parse_snapshot_flags(JSON.parse(resp.body)))
+    rescue => e
+      warn "[Tombstone] snapshot fetch failed: #{e.message}"
+    end
+
+    # Extracted so a spec can exercise the real wire-parsing logic directly
+    # with a hand-built Hash (already run through JSON.parse), without
+    # stubbing Net::HTTP -- mirrors client_lag_spec.rb's existing
+    # `client.send(:private_method)` convention for testing private methods.
+    def parse_snapshot_flags(data)
+      (data["flags"] || []).map do |f|
         FlagEnvironmentState.new(
           flag_id: f["flag_id"] || "", flag_key: f["flag_key"] || "",
           environment: f["environment"] || "", enabled: f["enabled"] == true,
           rollout_pct: (f["rollout_pct"] || 0).to_i,
-          safe_default: f["safe_default"] || "false", updated_at: 0
+          safe_default: f["safe_default"] || "false",
+          updated_at: (f["updated_at"] || 0).to_i,
+          prerequisites: parse_prerequisites(f["prerequisites"])
         )
       end
-      @cache.load_snapshot(flags)
-    rescue => e
-      warn "[Tombstone] snapshot fetch failed: #{e.message}"
+    end
+
+    # flag-api's real per-prerequisite wire shape (services/flag-api/
+    # internal/api/v1/environments.go's SnapshotPrerequisite): "flag_key"
+    # (NOT "prereq_flag_key" -- that's only flag_prerequisites' own DB
+    # column name, matching proto's ParentCondition message and every other
+    # SDK's own FlagPrerequisite type), plus "required_variation"/"gate".
+    # "gate" defaults to true (hard-blocking) when the wire omits it,
+    # matching flag-api's own AddPrerequisite default.
+    #
+    # Before this fix, fetch_snapshot never passed prerequisites: at all,
+    # so every FlagEnvironmentState defaulted to prerequisites: [] --
+    # PrerequisiteChecker.check_all's algorithm is otherwise correct, but
+    # was completely unreachable with real gating data (found by
+    # adversarial review of the Python SDK's equivalent fix, PR #229).
+    def parse_prerequisites(raw)
+      return [] unless raw.is_a?(Array)
+      raw.filter_map do |p|
+        next unless p.is_a?(Hash)
+        FlagPrerequisite.new(
+          flag_key: p["flag_key"] || "",
+          required_variation: p["required_variation"] || "true",
+          gate: p["gate"] != false
+        )
+      end
     end
 
     def start_sse_listener
