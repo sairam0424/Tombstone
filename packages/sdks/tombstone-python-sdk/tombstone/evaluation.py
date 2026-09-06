@@ -2,11 +2,12 @@
 """Tombstone 5-step evaluation pipeline — mirrors TypeScript evaluation.ts.
 
 Step 1: Preliminary checks (flag missing, disabled)
-Step 2: Prerequisites (gate flags must evaluate to required_value)
+Step 2: Prerequisites (gate flags must evaluate to required_variation)
 Step 3: Individual targeting rules (attribute-based rule matching)
 Step 4: Rule matching fallthrough — not used here; rules already checked in step 3
 Step 5: Fallthrough rollout (MurmurHash3 bucket)
 """
+
 from __future__ import annotations
 
 import logging
@@ -48,11 +49,28 @@ def _is_in_rollout_fnv(flag_key: str, user_id: str, rollout_pct: float) -> bool:
     return (h2 % 10000) / 10000 < rollout_pct / 100
 
 
+def _stringify_variation(value: object) -> str:
+    """Render an evaluated flag value the same way Java's PrerequisiteChecker
+    does (String.valueOf) so a prerequisite's required_variation -- always a
+    wire string, e.g. "true"/"false" -- compares equal across languages.
+
+    Python's str(True) is "True" (capital T), unlike Java's
+    String.valueOf(true) or Ruby/JS's native lowercase boolean stringification
+    -- comparing that directly against the wire's lowercase "true"/"false"
+    convention would silently and permanently fail every boolean-flag
+    prerequisite check, exactly the class of bug this function exists to
+    avoid reintroducing.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _check_prerequisites(
     flag_state: FlagEnvironmentState,
     context: EvaluationContext,
     all_flags: dict[str, FlagEnvironmentState],
-    evaluation_cache: dict[str, bool],
+    evaluation_cache: dict[str, str | None],
     flag_key: str,
     seen_keys: set[str] | None = None,
 ) -> bool:
@@ -61,6 +79,22 @@ def _check_prerequisites(
     Uses evaluation_cache to memoize results — each dependent flag is
     evaluated at most once per top-level call (PostHog shipped pattern).
     seen_keys tracks the current dependency chain to detect and break cycles.
+
+    Prerequisite dict keys match the real wire contract (flag-api's
+    SnapshotPrerequisite / proto's ParentCondition): "flag_key" (NOT
+    "prereq_flag_key" -- that name is flag_prerequisites' own DB column,
+    never the REST/snapshot JSON key) and "required_variation" (a string,
+    e.g. "true"/"false"/a variation key -- NOT a bool under "required_value",
+    which was never a real key any backend sends). Before this fix both
+    reads used the wrong key name and dict.get's fallback default silently
+    stood in for every real prerequisite: dep_key resolved to "" (no flag
+    is ever keyed by empty string, so every dependency lookup missed) and
+    required defaulted to True regardless of the real required_variation,
+    so any flag with a hard-gated (gate=True, the default) prerequisite was
+    unconditionally blocked, and any flag with a soft-gated one was
+    unconditionally skipped -- prerequisite gating did not work at all
+    against a real backend (found while investigating SDK-4's
+    prerequisites-streaming follow-up).
     """
     if seen_keys is None:
         seen_keys = set()
@@ -68,34 +102,38 @@ def _check_prerequisites(
 
     for prereq in flag_state.prerequisites:
         dep_key = prereq.get("flag_key", "")
-        required = prereq.get("required_value", True)
+        required_variation = prereq.get("required_variation", "true")
         gate = prereq.get("gate", True)
 
         if dep_key in evaluation_cache:
-            dep_result = evaluation_cache[dep_key]
+            dep_variation = evaluation_cache[dep_key]
         elif dep_key in seen_keys:
             # Cycle detected — fail-open (skip this prereq, treat as satisfied)
             logger.debug(
-                "Circular prerequisite detected: '%s' already in chain %s", dep_key, seen_keys
+                "Circular prerequisite detected: '%s' already in chain %s",
+                dep_key,
+                seen_keys,
             )
             continue
         else:
             dep_flag = all_flags.get(dep_key)
             if dep_flag is None:
                 logger.debug("Prerequisite flag '%s' not found in snapshot", dep_key)
-                evaluation_cache[dep_key] = False
-                dep_result = False
+                dep_variation = None
             else:
                 dep_eval = evaluate(
-                    dep_flag, context, False, dep_key,
+                    dep_flag,
+                    context,
+                    False,
+                    dep_key,
                     all_flags=all_flags,
                     evaluation_cache=evaluation_cache,
                     _seen_keys=seen_keys,
                 )
-                dep_result = bool(dep_eval.value)
-                evaluation_cache[dep_key] = dep_result
+                dep_variation = _stringify_variation(dep_eval.value)
+            evaluation_cache[dep_key] = dep_variation
 
-        if dep_result != required:
+        if dep_variation != required_variation:
             if not gate:
                 # Soft prerequisite — unmet, but non-blocking. Skip and continue.
                 continue
@@ -116,7 +154,9 @@ def _match_targeting_rules(
                 match_property(cond, context) for cond in rule.conditions
             )
         except InconclusiveMatchError as exc:
-            logger.debug("Rule '%s' inconclusive for flag '%s': %s", rule.id, flag_key, exc)
+            logger.debug(
+                "Rule '%s' inconclusive for flag '%s': %s", rule.id, flag_key, exc
+            )
             continue  # try next rule
 
         if all_conditions_met:
@@ -139,7 +179,7 @@ def evaluate(
     default_value: object,
     flag_key: str,
     all_flags: dict[str, FlagEnvironmentState] | None = None,
-    evaluation_cache: dict[str, bool] | None = None,
+    evaluation_cache: dict[str, str | None] | None = None,
     _seen_keys: set[str] | None = None,
 ) -> EvaluationResult:
     """5-step evaluation pipeline.
@@ -171,7 +211,11 @@ def evaluate(
     # ── Step 2: Prerequisites ─────────────────────────────────────────────────
     if flag_state.prerequisites:
         prereqs_met = _check_prerequisites(
-            flag_state, context, all_flags, evaluation_cache, flag_key,
+            flag_state,
+            context,
+            all_flags,
+            evaluation_cache,
+            flag_key,
             seen_keys=_seen_keys,
         )
         if not prereqs_met:
@@ -203,11 +247,16 @@ def evaluate(
 
     if flag_state.rollout_pct <= 0:
         return EvaluationResult(
-            value=default_value, reason="FALLTHROUGH", from_cache=True, flag_key=flag_key
+            value=default_value,
+            reason="FALLTHROUGH",
+            from_cache=True,
+            flag_key=flag_key,
         )
 
     if flag_state.hash_version == 2:
-        in_rollout = _is_in_rollout_fnv(flag_key, context.user_id, flag_state.rollout_pct)
+        in_rollout = _is_in_rollout_fnv(
+            flag_key, context.user_id, flag_state.rollout_pct
+        )
     else:
         bucket = mmh3.hash(flag_key + context.user_id, seed=0, signed=False) % 100
         in_rollout = bucket < flag_state.rollout_pct

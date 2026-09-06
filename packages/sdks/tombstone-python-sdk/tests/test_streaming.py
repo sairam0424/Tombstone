@@ -100,7 +100,7 @@ def test_apply_event_preserves_prerequisites_and_targeting_rules():
         safe_default=False,
         environment="prod",
         targeting_rules=[seeded_rule],
-        prerequisites=[{"flag_key": "parent", "required_value": True, "gate": True}],
+        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": True}],
     )
 
     # A real SSE event as flag-api actually publishes it -- no
@@ -119,7 +119,7 @@ def test_apply_event_preserves_prerequisites_and_targeting_rules():
         "targeting_rules must survive an unrelated event"
     )
     assert updated.prerequisites == [
-        {"flag_key": "parent", "required_value": True, "gate": True}
+        {"flag_key": "parent", "required_variation": "true", "gate": True}
     ], "prerequisites must survive an unrelated event"
     client.close()
 

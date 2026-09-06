@@ -179,7 +179,7 @@ def test_snapshot_deserialization_includes_targeting_rules():
                 "enabled": True,
                 "rollout_pct": 100.0,
                 "safe_default": False,
-                "prerequisites": [{"flag_key": "parent", "required_value": True}],
+                "prerequisites": [{"flag_key": "parent", "required_variation": "true"}],
                 "targeting_rules": [
                     {
                         "id": "r1",
@@ -288,8 +288,8 @@ def test_rule_priority_ordering():
 
 
 def test_circular_prerequisite_does_not_recurse_infinitely():
-    a = _flag("a", prerequisites=[{"flag_key": "b", "required_value": True}])
-    b = _flag("b", prerequisites=[{"flag_key": "a", "required_value": True}])
+    a = _flag("a", prerequisites=[{"flag_key": "b", "required_variation": "true"}])
+    b = _flag("b", prerequisites=[{"flag_key": "a", "required_variation": "true"}])
     all_flags = {"a": a, "b": b}
     # Should not raise RecursionError
     result = evaluate(
@@ -308,7 +308,7 @@ def test_soft_prerequisite_unmet_does_not_block_evaluation():
     child = _flag(
         "child",
         rollout_pct=100.0,
-        prerequisites=[{"flag_key": "parent", "required_value": True, "gate": False}],
+        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": False}],
     )
     all_flags = {"parent": parent, "child": child}
     result = evaluate(
@@ -325,7 +325,7 @@ def test_hard_prerequisite_gate_true_unmet_blocks_evaluation():
     child = _flag(
         "child",
         rollout_pct=100.0,
-        prerequisites=[{"flag_key": "parent", "required_value": True, "gate": True}],
+        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": True}],
     )
     all_flags = {"parent": parent, "child": child}
     result = evaluate(
@@ -342,7 +342,7 @@ def test_default_prerequisite_gate_omitted_unmet_blocks_evaluation():
     child = _flag(
         "child",
         rollout_pct=100.0,
-        prerequisites=[{"flag_key": "parent", "required_value": True}],
+        prerequisites=[{"flag_key": "parent", "required_variation": "true"}],
     )
     all_flags = {"parent": parent, "child": child}
     result = evaluate(
