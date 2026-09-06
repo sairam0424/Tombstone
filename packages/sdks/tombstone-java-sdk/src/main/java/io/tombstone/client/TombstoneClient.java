@@ -61,7 +61,25 @@ public class TombstoneClient implements Closeable {
     public <T> EvaluationResult<T> evaluate(String flagKey, EvaluationContext context) {
         Optional<FlagEnvironmentState> state = cache.get(flagKey);
         T def = (T) defaults.getOrDefault(flagKey, Boolean.FALSE);
-        return engine.evaluate(state.orElse(null), context, def, flagKey);
+        // Passes a real flagLookup backed by this.cache, NOT the 4-arg
+        // convenience overload used before (which hardcodes flagLookup to
+        // `key -> null`, documented on that overload as being for "callers
+        // with no snapshot access"). This client DOES have snapshot access
+        // via cache -- before parseSnapshotResponse() populated real
+        // prerequisites (this same PR's other fix), Step 2 never actually
+        // ran against real data, so this null-returning lookup was dead
+        // code from this call path specifically. Once prerequisites are
+        // real, calling the 4-arg overload here would make ANY hard-gated
+        // prerequisite permanently PREREQUISITE_FAILED regardless of the
+        // real dependency's state (a null lookup result never equals a
+        // real requiredVariation string) -- swapping "prerequisites
+        // silently ignored" for "every gated flag permanently blocked",
+        // which is worse. Found by adversarial review of this PR.
+        return engine.evaluate(
+            state.orElse(null), context, def, flagKey,
+            key -> cache.get(key).orElse(null),
+            new HashMap<>(), new HashSet<>()
+        );
     }
 
     public boolean isEnabled(String flagKey, EvaluationContext context) {
@@ -71,6 +89,14 @@ public class TombstoneClient implements Closeable {
 
     public boolean isConnected() { return connected.get(); }
     public Set<String> flagKeys() { return cache.flagKeys(); }
+
+    // Package-private test seam: lets a same-package test populate the
+    // cache directly with hand-built FlagEnvironmentStates, so evaluate()'s
+    // real prerequisite-lookup wiring (cache::get, not a null-returning
+    // stub) can be exercised end to end without a mock HTTP server.
+    void loadSnapshotForTesting(List<FlagEnvironmentState> states) {
+        cache.loadSnapshot(states);
+    }
 
     // Package-private (not private) so the SSE-recovery unit test can override it
     // to observe refetch calls without touching the network. connect(), reconnect,

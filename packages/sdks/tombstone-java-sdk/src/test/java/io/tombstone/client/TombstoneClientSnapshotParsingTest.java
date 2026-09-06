@@ -1,5 +1,8 @@
 package io.tombstone.client;
 
+import io.tombstone.types.EvaluationContext;
+import io.tombstone.types.EvaluationReason;
+import io.tombstone.types.EvaluationResult;
 import io.tombstone.types.FlagEnvironmentState;
 import io.tombstone.types.FlagPrerequisite;
 import org.junit.jupiter.api.Test;
@@ -111,5 +114,53 @@ public class TombstoneClientSnapshotParsingTest {
             """;
         List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
         assertEquals(List.of(), states.get(0).prerequisites());
+    }
+
+    /** Regression suite for a SECOND bug, found by adversarial review of this
+     *  PR's own fix above: evaluate() called EvaluationEngine's 4-arg
+     *  convenience overload, which hardcodes flagLookup to `key -> null` --
+     *  documented on that overload as being for "callers with no snapshot
+     *  access". TombstoneClient DOES have snapshot access via its own cache,
+     *  but never threaded it through. Before real prerequisites existed
+     *  (fetchSnapshot always built FlagEnvironmentState.simple(), which
+     *  hardcodes prerequisites to empty), this was dead code. Once
+     *  prerequisites are real (this PR's other fix), a null-returning
+     *  lookup makes EVERY hard-gated prerequisite permanently
+     *  PREREQUISITE_FAILED regardless of the real dependency's state --
+     *  worse than the original bug, not better. These tests drive the real,
+     *  public evaluate()/isEnabled() entry points end to end (via the
+     *  package-private loadSnapshotForTesting seam), not
+     *  PrerequisiteChecker.checkAll or the 7-arg EvaluationEngine.evaluate()
+     *  directly -- neither of which would have caught this, since both
+     *  bypass TombstoneClient's own wiring entirely. */
+    @Test
+    void evaluateResolvesARealSatisfiedHardGatedPrerequisiteFromItsOwnCache() {
+        TombstoneClient client = newClient();
+        client.loadSnapshotForTesting(List.of(
+            new FlagEnvironmentState("1", "parent-flag", "test", true, 100, "false", 0L,
+                List.of(), List.of(), List.of(), 1),
+            new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
+                List.of(new FlagPrerequisite("parent-flag", "true", true)),
+                List.of(), List.of(), 1)
+        ));
+
+        EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));
+        assertEquals(Boolean.TRUE, result.value());
+        assertNotEquals(EvaluationReason.PREREQUISITE_FAILED, result.reason());
+    }
+
+    @Test
+    void evaluateBlocksOnAGenuinelyUnmetHardGatedPrerequisite() {
+        TombstoneClient client = newClient();
+        client.loadSnapshotForTesting(List.of(
+            new FlagEnvironmentState("1", "parent-flag", "test", false, 0, "false", 0L,
+                List.of(), List.of(), List.of(), 1),
+            new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
+                List.of(new FlagPrerequisite("parent-flag", "true", true)),
+                List.of(), List.of(), 1)
+        ));
+
+        EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));
+        assertEquals(EvaluationReason.PREREQUISITE_FAILED, result.reason());
     }
 }
