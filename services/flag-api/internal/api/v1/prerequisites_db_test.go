@@ -61,7 +61,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	defer func() { _ = rdb.Close() }()
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, nil, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, nil, nil, "")
 	prereqH := NewPrerequisiteHandler(database, logger)
 	snapH := NewSnapshotHandler(database, logger)
 

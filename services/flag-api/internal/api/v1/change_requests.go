@@ -25,11 +25,21 @@ type ChangeRequestHandler struct {
 	// audit is the single writer for the hash-chained audit log (AUD-1).
 	// change_requests previously had no audit integration at all (SEC-3b).
 	audit *audit.Writer
+	// marketplaceURL/marketplaceHTTPClient mirror FlagHandler's own fields
+	// of the same name -- see the standalone notifyMarketplace function in
+	// flags.go for why this handler calls that function directly instead
+	// of holding a *FlagHandler reference.
+	marketplaceURL        string
+	marketplaceHTTPClient *http.Client
 }
 
 // NewChangeRequestHandler constructs a ChangeRequestHandler.
-func NewChangeRequestHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer) *ChangeRequestHandler {
-	return &ChangeRequestHandler{db: db, rdb: rdb, logger: logger, audit: auditW}
+func NewChangeRequestHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, auditW *audit.Writer, marketplaceURL string) *ChangeRequestHandler {
+	return &ChangeRequestHandler{
+		db: db, rdb: rdb, logger: logger, audit: auditW,
+		marketplaceURL:        marketplaceURL,
+		marketplaceHTTPClient: &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
 // flagEnvironmentChangePayload is the change_requests.change_payload shape
@@ -350,6 +360,12 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	// Quorum met on a real flag-environment proposal — apply it now, in the
 	// same transaction as recording the approval that completed the quorum.
 	var prev FlagEnvironmentState
+	// prevKnown: see flags.go's UpdateEnvironment for why a transient read
+	// error here must not silently masquerade as "prior state was
+	// disabled" -- this feeds the same live marketplace-notification
+	// decision below (found by adversarial review of the marketplace-
+	// notify PR).
+	prevKnown := false
 	if prevRow, prevErr := sqlcgen.New(tx).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
 		Key: cr.FlagKey, Environment: cr.Environment, ProjectID: projectID,
 	}); prevErr == nil {
@@ -358,6 +374,10 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 			Enabled: prevRow.Enabled, RolloutPct: int(prevRow.RolloutPct), SafeDefault: prevRow.SafeDefault,
 			UpdatedAt: prevRow.UpdatedAt,
 		}
+		prevKnown = true
+	} else if !errors.Is(prevErr, sql.ErrNoRows) {
+		h.logger.Warn("could not read prior environment state before applying change request",
+			zap.String("flag", cr.FlagKey), zap.String("environment", cr.Environment), zap.Error(prevErr))
 	}
 
 	// updated_by is the approver whose action just executed this write, not
@@ -408,6 +428,21 @@ func (h *ChangeRequestHandler) ApproveChangeRequest(w http.ResponseWriter, r *ht
 	}
 	publishFlagEvent(r.Context(), h.rdb, h.logger, cr.Environment, applyEvent)
 	publishFlagEventToStream(r.Context(), h.rdb, h.logger, cr.Environment, applyEvent)
+
+	// See flags.go's UpdateEnvironment for why this only fires on a real
+	// enabled/disabled transition, gated on prevKnown -- the require_approval
+	// governance path is exactly where marketplace notifications matter
+	// most (found by adversarial review: this handler applies the same
+	// UpdateFlagEnvironment mutation UpdateEnvironment's own handler does,
+	// but had never been wired to notify marketplace at all).
+	if prevKnown && prev.Enabled != payload.Enabled {
+		eventType := marketplaceEventFlagDisabled
+		if payload.Enabled {
+			eventType = marketplaceEventFlagEnabled
+		}
+		notifyMarketplace(h.marketplaceURL, h.marketplaceHTTPClient, h.logger,
+			eventType, cr.FlagKey, cr.Environment, actor, map[string]any{"rollout_pct": payload.RolloutPct})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "status": "APPLIED", "approvals": len(newApprovedBy), "required_approvals": requiredApprovals,

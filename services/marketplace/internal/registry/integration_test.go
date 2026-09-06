@@ -303,6 +303,49 @@ func TestRegistry_InstalledWebhooks(t *testing.T) {
 	}
 }
 
+// TestEventFlagRecovery_IsDistinctFromEventFlagRollback closes a gap found
+// by adversarial review: every catalog integration that subscribes to
+// EventFlagRecovery already separately subscribes to EventFlagRollback
+// too, so a behavioral InstalledWebhooks-based test alone (as
+// TestRegistry_InstalledWebhooks_EventFlagRecovery below does) would still
+// pass even if EventFlagRecovery were accidentally aliased to
+// EventFlagRollback's exact value -- verified empirically: that exact
+// aliasing was introduced by hand and the InstalledWebhooks test still
+// passed. A direct value assertion is the only thing that actually proves
+// the const values are distinct.
+func TestEventFlagRecovery_IsDistinctFromEventFlagRollback(t *testing.T) {
+	if EventFlagRecovery == EventFlagRollback {
+		t.Fatal("EventFlagRecovery must not be aliased to EventFlagRollback -- they represent different real events")
+	}
+	if EventFlagRecovery != "flag.recovery" {
+		t.Errorf("EventFlagRecovery = %q, want %q", EventFlagRecovery, "flag.recovery")
+	}
+}
+
+// TestRegistry_InstalledWebhooks_EventFlagRecovery verifies the new
+// EventFlagRecovery event type (EVAL-4's HALF_OPEN recovery ladder, the
+// mirror image of EventFlagRollback) actually reaches slack once
+// installed -- a typo in the const value or a missed catalog entry would
+// compile fine but silently return zero results forever. Distinctness
+// from EventFlagRollback is checked separately above, since every
+// integration that lists EventFlagRecovery also lists EventFlagRollback,
+// which would mask an aliasing bug from this test alone.
+func TestRegistry_InstalledWebhooks_EventFlagRecovery(t *testing.T) {
+	reg := NewRegistry(nil, nil)
+	reg.Install("slack", "https://hooks.example.com/slack", nil)
+
+	hits := reg.InstalledWebhooks(EventFlagRecovery)
+	found := false
+	for _, i := range hits {
+		if i.ID == "slack" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("InstalledWebhooks(EventFlagRecovery) did not include 'slack' -- check slack's Events list and the EventFlagRecovery const value")
+	}
+}
+
 // TestRegistry_InstalledWebhooks_NoneInstalled verifies an empty slice is
 // returned when no integrations are installed for the requested event.
 func TestRegistry_InstalledWebhooks_NoneInstalled(t *testing.T) {

@@ -67,7 +67,7 @@ func TestRollbackStep(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 
 	readFlagEnv := func(t *testing.T, key string) (enabled bool, rolloutPct int) {
 		t.Helper()

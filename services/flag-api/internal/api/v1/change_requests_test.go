@@ -65,8 +65,8 @@ func TestChangeRequestProposeQuorumAndApply(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
-	crH := NewChangeRequestHandler(database, rdb, logger, auditW)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
+	crH := NewChangeRequestHandler(database, rdb, logger, auditW, "")
 
 	flag := createTestFlag(t, flagH, projectID, "sec3b-quorum-flag")
 
