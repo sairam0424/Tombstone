@@ -172,7 +172,7 @@ func main() {
 	prereqH := v1.NewPrerequisiteHandler(db, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
-	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter)
+	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter, marketplaceURL)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())

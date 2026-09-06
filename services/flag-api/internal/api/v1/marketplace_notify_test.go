@@ -198,6 +198,23 @@ func TestFlagLifecycleNotifiesMarketplace(t *testing.T) {
 			t.Fatalf("second UpdateEnvironment status = %d, body: %s", w2.Code, w2.Body.String())
 		}
 		assertNoMarketplaceEvent(t, events)
+
+		// A real disable transition must fire flag.disabled -- found by
+		// adversarial review that this direction was untested (only the
+		// enable transition and the rollout-pct-only no-op were covered),
+		// which is exactly the gap that let a prev-state-fetch-error bug
+		// silently drop real disable notifications.
+		req3 := newTenancyRequest(t, http.MethodPatch, "/api/v1/flags/"+flagKey+"/environments/production",
+			map[string]any{"enabled": false, "rollout_pct": 0}, projectID, map[string]string{"key": flagKey, "env": "production"})
+		w3 := httptest.NewRecorder()
+		flagH.UpdateEnvironment(w3, req3)
+		if w3.Code != http.StatusOK {
+			t.Fatalf("disabling UpdateEnvironment status = %d, body: %s", w3.Code, w3.Body.String())
+		}
+		e = awaitMarketplaceEvent(t, events)
+		if e.EventType != marketplaceEventFlagDisabled || e.FlagKey != flagKey {
+			t.Errorf("unexpected event: %+v", e)
+		}
 	})
 
 	t.Run("KillSwitch fires flag.kill_switch", func(t *testing.T) {
@@ -232,4 +249,69 @@ func TestFlagLifecycleNotifiesMarketplace(t *testing.T) {
 		// more archived events here.
 		assertNoMarketplaceEvent(t, events)
 	})
+}
+
+// TestApproveChangeRequestNotifiesMarketplace is the regression test for a
+// real gap found by adversarial review: ApproveChangeRequest applies an
+// approved flag-environment change via the exact same UpdateFlagEnvironment
+// mutation UpdateEnvironment's own handler uses, but ChangeRequestHandler
+// was never wired to notify marketplace at all -- so flag enable/disable
+// transitions applied through the require_approval governance workflow
+// (exactly the higher-governance projects that most want alerting) never
+// reached Slack/Datadog/PagerDuty/OpsGenie/OpenTelemetry.
+func TestApproveChangeRequestNotifiesMarketplace(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping DB-backed marketplace-notify test")
+	}
+
+	database, err := sql.Open("postgres", url)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if _, err := db.Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	projectID := createTestProject(ctx, t, database, "change-request-notify-test")
+
+	logger := zap.NewNop()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	auditKey, err := secrets.NewAuditKey("change-request-notify-test-key-000", "")
+	if err != nil {
+		t.Fatalf("audit key: %v", err)
+	}
+	auditW := audit.NewWriter(database, auditKey)
+
+	srv, events := newFakeMarketplace(t)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, srv.URL)
+	crH := NewChangeRequestHandler(database, rdb, logger, auditW, srv.URL)
+
+	flag := createTestFlag(t, flagH, projectID, "cr-notify-test-flag")
+	// createTestFlag's CreateFlag also notifies marketplace -- drain that
+	// unrelated flag.created event before asserting on the approval flow.
+	_ = awaitMarketplaceEvent(t, events)
+
+	cr := proposeTestChangeRequest(t, crH, projectID, "proposer-1", flag.Key, "production", true, 42)
+	resp := approveTestChangeRequest(t, crH, projectID, "approver-1", cr.ID)
+	if resp["status"] != "APPLIED" {
+		t.Fatalf("status = %v, want APPLIED", resp["status"])
+	}
+
+	e := awaitMarketplaceEvent(t, events)
+	if e.EventType != marketplaceEventFlagEnabled || e.FlagKey != flag.Key {
+		t.Errorf("unexpected event: %+v", e)
+	}
 }

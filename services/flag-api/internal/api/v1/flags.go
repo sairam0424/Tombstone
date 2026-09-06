@@ -80,12 +80,14 @@ const (
 // Slack-notify precedent for the identical class of best-effort, non-
 // critical third-party call) -- a slow/unreachable marketplace must never
 // add latency to, or fail, the actual flag mutation this is reporting on.
-// The goroutine dispatch lives HERE, inside the shared helper, rather than
-// being repeated at each of this file's 6 call sites, since (unlike the
-// Slack-notify precedent's single call site) that would mean duplicating
-// the same context-and-goroutine boilerplate 6 times.
-func (h *FlagHandler) notifyMarketplace(eventType, flagKey, environment, actor string, metadata map[string]any) {
-	if h.marketplaceURL == "" {
+//
+// Standalone, not a *FlagHandler method, so ChangeRequestHandler
+// (applying an approved change_payload is the same kind of mutation
+// UpdateEnvironment makes -- see publishFlagEvent/publishFlagEventToStream's
+// own identical doc comment for this exact precedent) can notify the same
+// channel without holding a reference to FlagHandler.
+func notifyMarketplace(marketplaceURL string, httpClient *http.Client, logger *zap.Logger, eventType, flagKey, environment, actor string, metadata map[string]any) {
+	if marketplaceURL == "" {
 		return
 	}
 	body := map[string]any{
@@ -100,30 +102,37 @@ func (h *FlagHandler) notifyMarketplace(eventType, flagKey, environment, actor s
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		h.logger.Warn("marketplace notify: marshal failed", zap.String("event_type", eventType), zap.Error(err))
+		logger.Warn("marketplace notify: marshal failed", zap.String("event_type", eventType), zap.Error(err))
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.marketplaceURL+"/api/v1/marketplace/events", bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, marketplaceURL+"/api/v1/marketplace/events", bytes.NewReader(payload))
 		if err != nil {
-			h.logger.Warn("marketplace notify: build request failed", zap.String("event_type", eventType), zap.Error(err))
+			logger.Warn("marketplace notify: build request failed", zap.String("event_type", eventType), zap.Error(err))
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := h.marketplaceHTTPClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
-			h.logger.Warn("marketplace notify: request failed",
+			logger.Warn("marketplace notify: request failed",
 				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Error(err))
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			h.logger.Warn("marketplace notify: non-2xx response",
+			logger.Warn("marketplace notify: non-2xx response",
 				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Int("status", resp.StatusCode))
 		}
 	}()
+}
+
+// notifyMarketplace is FlagHandler's thin wrapper around the standalone
+// notifyMarketplace function above -- mirrors publishEvent/publishToStream's
+// own identical wrapper pattern.
+func (h *FlagHandler) notifyMarketplace(eventType, flagKey, environment, actor string, metadata map[string]any) {
+	notifyMarketplace(h.marketplaceURL, h.marketplaceHTTPClient, h.logger, eventType, flagKey, environment, actor, metadata)
 }
 
 type Flag struct {
@@ -423,6 +432,15 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 
 	// Get current state for audit
 	var prev FlagEnvironmentState
+	// prevKnown tracks whether the SELECT below actually succeeded --
+	// swallowing any error here (not just sql.ErrNoRows) previously left
+	// prev at its zero value indistinguishable from "genuinely disabled",
+	// which was harmless while prev only fed the audit log's passive
+	// prev_state, but now ALSO gates a live decision below (whether to
+	// notify marketplace of an enabled/disabled transition): a transient
+	// read error here must not silently masquerade as a real prior state
+	// (found by adversarial review of the marketplace-notify PR).
+	prevKnown := false
 	if prevRow, prevErr := sqlcgen.New(tx).GetFlagEnvironmentPrevState(r.Context(), sqlcgen.GetFlagEnvironmentPrevStateParams{
 		Key: key, Environment: env, ProjectID: projectID,
 	}); prevErr == nil {
@@ -431,6 +449,10 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 			Enabled: prevRow.Enabled, RolloutPct: int(prevRow.RolloutPct), SafeDefault: prevRow.SafeDefault,
 			UpdatedAt: prevRow.UpdatedAt,
 		}
+		prevKnown = true
+	} else if !errors.Is(prevErr, sql.ErrNoRows) {
+		h.logger.Warn("could not read prior environment state before update",
+			zap.String("flag", key), zap.String("environment", env), zap.Error(prevErr))
 	}
 
 	n, err := sqlcgen.New(tx).UpdateFlagEnvironment(r.Context(), sqlcgen.UpdateFlagEnvironmentParams{
@@ -485,8 +507,9 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 	// corresponding EventType in marketplace's registry to map onto, and
 	// firing flag.enabled on every already-enabled flag's rollout-pct edit
 	// would misrepresent "the flag just turned on" for something that
-	// didn't happen.
-	if prev.Enabled != req.Enabled {
+	// didn't happen. Requires prevKnown: an unreadable prior state must not
+	// be guessed at, in either direction (see prevKnown's own doc comment).
+	if prevKnown && prev.Enabled != req.Enabled {
 		eventType := marketplaceEventFlagDisabled
 		if req.Enabled {
 			eventType = marketplaceEventFlagEnabled

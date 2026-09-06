@@ -75,7 +75,7 @@ func TestTenancyIsolation(t *testing.T) {
 	prereqH := NewPrerequisiteHandler(database, logger)
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
 	auditH := NewAuditHandler(database, logger, auditW)
-	crH := NewChangeRequestHandler(database, rdb, logger, auditW)
+	crH := NewChangeRequestHandler(database, rdb, logger, auditW, "")
 
 	const sharedKey = "ten1a-shared-key"
 
