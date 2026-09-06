@@ -61,7 +61,25 @@ public class TombstoneClient implements Closeable {
     public <T> EvaluationResult<T> evaluate(String flagKey, EvaluationContext context) {
         Optional<FlagEnvironmentState> state = cache.get(flagKey);
         T def = (T) defaults.getOrDefault(flagKey, Boolean.FALSE);
-        return engine.evaluate(state.orElse(null), context, def, flagKey);
+        // Passes a real flagLookup backed by this.cache, NOT the 4-arg
+        // convenience overload used before (which hardcodes flagLookup to
+        // `key -> null`, documented on that overload as being for "callers
+        // with no snapshot access"). This client DOES have snapshot access
+        // via cache -- before parseSnapshotResponse() populated real
+        // prerequisites (this same PR's other fix), Step 2 never actually
+        // ran against real data, so this null-returning lookup was dead
+        // code from this call path specifically. Once prerequisites are
+        // real, calling the 4-arg overload here would make ANY hard-gated
+        // prerequisite permanently PREREQUISITE_FAILED regardless of the
+        // real dependency's state (a null lookup result never equals a
+        // real requiredVariation string) -- swapping "prerequisites
+        // silently ignored" for "every gated flag permanently blocked",
+        // which is worse. Found by adversarial review of this PR.
+        return engine.evaluate(
+            state.orElse(null), context, def, flagKey,
+            key -> cache.get(key).orElse(null),
+            new HashMap<>(), new HashSet<>()
+        );
     }
 
     public boolean isEnabled(String flagKey, EvaluationContext context) {
@@ -71,6 +89,14 @@ public class TombstoneClient implements Closeable {
 
     public boolean isConnected() { return connected.get(); }
     public Set<String> flagKeys() { return cache.flagKeys(); }
+
+    // Package-private test seam: lets a same-package test populate the
+    // cache directly with hand-built FlagEnvironmentStates, so evaluate()'s
+    // real prerequisite-lookup wiring (cache::get, not a null-returning
+    // stub) can be exercised end to end without a mock HTTP server.
+    void loadSnapshotForTesting(List<FlagEnvironmentState> states) {
+        cache.loadSnapshot(states);
+    }
 
     // Package-private (not private) so the SSE-recovery unit test can override it
     // to observe refetch calls without touching the network. connect(), reconnect,
@@ -82,21 +108,66 @@ public class TombstoneClient implements Closeable {
             .get().build();
         try (Response resp = http.newCall(req).execute()) {
             if (!resp.isSuccessful() || resp.body() == null) return;
-            Map<?, ?> data = mapper.readValue(resp.body().string(), Map.class);
-            List<?> flags = (List<?>) data.get("flags");
-            if (flags == null) return;
-            List<FlagEnvironmentState> states = new ArrayList<>();
-            for (Object f : flags) {
-                Map<?, ?> fm = (Map<?, ?>) f;
-                states.add(FlagEnvironmentState.simple(
-                    str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
-                    Boolean.TRUE.equals(fm.get("enabled")),
-                    fm.get("rollout_pct") instanceof Number n ? n.intValue() : 0,
-                    str(fm, "safe_default"), 0L
-                ));
-            }
-            cache.loadSnapshot(states);
+            cache.loadSnapshot(parseSnapshotResponse(resp.body().string()));
         }
+    }
+
+    // Package-private so a test can exercise the real wire-parsing logic
+    // directly with a hand-built JSON string, without standing up a mock
+    // HTTP server -- mirrors fetchSnapshot()'s own package-private
+    // visibility, which exists for the identical reason (see its comment).
+    List<FlagEnvironmentState> parseSnapshotResponse(String rawJson) throws IOException {
+        Map<?, ?> data = mapper.readValue(rawJson, Map.class);
+        List<?> flags = (List<?>) data.get("flags");
+        if (flags == null) return List.of();
+        List<FlagEnvironmentState> states = new ArrayList<>();
+        for (Object f : flags) {
+            Map<?, ?> fm = (Map<?, ?>) f;
+            // FlagEnvironmentState.simple() hardcoded prerequisites/
+            // targetingRules/targetList to List.of() and hashVersion to 1
+            // regardless of what the wire actually sent -- the "simple"
+            // factory is for hand-built test fixtures, not a real
+            // snapshot response, but this was the ONLY place a real
+            // FlagEnvironmentState was ever constructed from wire data,
+            // so this client's own prerequisite gating never worked
+            // against a real backend at all (found while investigating
+            // SDK-4's prerequisites-streaming follow-up). flag-api's
+            // real snapshot response has no targeting_rules/target_list/
+            // hash_version fields today -- those stay empty/default 1,
+            // same as before -- only prerequisites and updated_at
+            // (also previously hardcoded to 0) are now read for real.
+            states.add(new FlagEnvironmentState(
+                str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
+                Boolean.TRUE.equals(fm.get("enabled")),
+                fm.get("rollout_pct") instanceof Number n ? n.intValue() : 0,
+                str(fm, "safe_default"),
+                fm.get("updated_at") instanceof Number n ? n.longValue() : 0L,
+                parsePrerequisites(fm.get("prerequisites")),
+                List.of(), List.of(), 1
+            ));
+        }
+        return states;
+    }
+
+    // flag-api's real wire shape (services/flag-api/internal/api/v1/
+    // environments.go's SnapshotPrerequisite): {"id", "flag_key",
+    // "required_variation", "gate", "priority"} -- "flag_key", NOT
+    // "prereq_flag_key" (that's only flag_prerequisites' own DB column
+    // name, matching proto's ParentCondition message). "gate" defaults to
+    // true (hard-blocking) when the wire omits it, matching flag-api's own
+    // AddPrerequisite default.
+    private static List<FlagPrerequisite> parsePrerequisites(Object raw) {
+        if (!(raw instanceof List<?> rawList)) return List.of();
+        List<FlagPrerequisite> result = new ArrayList<>(rawList.size());
+        for (Object p : rawList) {
+            if (!(p instanceof Map<?, ?> pm)) continue;
+            result.add(new FlagPrerequisite(
+                str(pm, "flag_key"),
+                str(pm, "required_variation"),
+                !Boolean.FALSE.equals(pm.get("gate"))
+            ));
+        }
+        return result;
     }
 
     private void startSseListener() {
