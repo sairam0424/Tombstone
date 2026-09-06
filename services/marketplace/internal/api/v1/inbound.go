@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -36,19 +37,53 @@ type datadogPayload struct {
 	TransitionedAt int64 `json:"transitioned_at"`
 }
 
-// blastRadiusResult is the subset of the evaluator blast-radius response we care about.
+// blastRadiusResult is the subset of the evaluator blast-radius response
+// (services/evaluator/internal/blast.BlastRadiusResponse) this handler
+// cares about. There is no numeric 0-100 "score" anywhere in the real
+// response -- blast.Calculator only ever produces the LOW/MEDIUM/HIGH/
+// BLOCKED tier string, so a fabricated Score field (present before this fix)
+// is dropped rather than mapped from something that doesn't exist.
 type blastRadiusResult struct {
 	FlagKey string `json:"flag_key"`
-	// Status is one of: LOW, MEDIUM, HIGH, BLOCKED.
+	// Status is one of blast.RiskScore's values: LOW, MEDIUM, HIGH, BLOCKED.
 	Status string `json:"status"`
-	// Score is 0-100.
-	Score int `json:"score"`
 }
 
-// flagItem is a minimal flag object returned by flag-api list endpoint.
+// evaluatorBlastRadiusResponse mirrors blast.BlastRadiusResponse's real,
+// nested JSON shape ({"flag_key": ..., "result": {"risk_score": ...}}) --
+// decoding straight into the old flat blastRadiusResult (as this handler
+// did before this fix) silently produced an all-zero-value result on every
+// call, since none of its field names matched anything in the real
+// response.
+type evaluatorBlastRadiusResponse struct {
+	FlagKey string `json:"flag_key"`
+	Result  struct {
+		RiskScore string `json:"risk_score"`
+	} `json:"result"`
+}
+
+// flagItem is the subset of flag-api's Flag object (see
+// services/flag-api/internal/api/v1/flags.go) this handler cares about.
+// OwnerID, not a nonexistent "tags" concept, is the real field: flags has
+// no tags column at all (confirmed against schema.sql), so the "tag"
+// query param fetchFlagsByService previously sent was silently ignored by
+// flag-api's ListFlags, which supports no filtering and always returns
+// every flag in the project regardless. owner_id is the same real-schema
+// proxy for "which service owns this flag" that blast.Calculator's own
+// AffectedServices field uses, for the identical reason: there is no
+// service-registry table.
 type flagItem struct {
-	Key  string   `json:"key"`
-	Tags []string `json:"tags"`
+	Key     string `json:"key"`
+	OwnerID string `json:"owner_id"`
+}
+
+// flagListResponse mirrors flag-api's real ListFlags response shape
+// ({"flags": [...], "total": N}) -- decoding straight into a bare
+// []flagItem (as this handler did before this fix) always failed with a
+// JSON type-mismatch error, since the real response is an object, not an
+// array, meaning this handler could never get past this step at all.
+type flagListResponse struct {
+	Flags []flagItem `json:"flags"`
 }
 
 // inboundSummary is the JSON body returned by HandleDatadogInbound.
@@ -146,7 +181,7 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// 5. Query flag-api for flags associated with the service.
-	flags, err := fetchFlagsByService(ctx, h.resilientHTTP, flagAPIBase, service)
+	flags, err := fetchFlagsByService(ctx, h.resilientHTTP, flagAPIBase, h.flagAPIToken, service)
 	if err != nil {
 		h.logger.Error("datadog inbound: failed to fetch flags",
 			zap.String("service", service),
@@ -211,19 +246,21 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, summary)
 }
 
-// fetchFlagsByService queries flag-api for flags tagged with the given service name.
-// Endpoint: GET /api/v1/flags?tag=service:<name>
-func fetchFlagsByService(ctx context.Context, resilientHTTP *httpclient.ResilientClient, flagAPIBase, service string) ([]flagItem, error) {
-	url := fmt.Sprintf("%s/api/v1/flags", flagAPIBase)
-	if service != "" {
-		url = fmt.Sprintf("%s?tag=service:%s", url, service)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// fetchFlagsByService queries flag-api for every flag in the caller's
+// project, then filters to those owned by service (see flagItem's doc
+// comment for why owner_id, not a query-param filter, does the filtering --
+// flag-api's ListFlags takes no filter params at all). Requires a bearer
+// token because /api/v1/flags sits behind flag-api's Authenticate
+// middleware; the previous unauthenticated request always got a 401 here,
+// before this handler could reach the blast-radius step at all.
+func fetchFlagsByService(ctx context.Context, resilientHTTP *httpclient.ResilientClient, flagAPIBase, flagAPIToken, service string) ([]flagItem, error) {
+	reqURL := fmt.Sprintf("%s/api/v1/flags", flagAPIBase)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+flagAPIToken)
 
 	resp, err := resilientHTTP.Do(ctx, req)
 	if err != nil {
@@ -235,18 +272,35 @@ func fetchFlagsByService(ctx context.Context, resilientHTTP *httpclient.Resilien
 		return nil, fmt.Errorf("flag-api returned %d", resp.StatusCode)
 	}
 
-	var items []flagItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+	var decoded flagListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode flags: %w", err)
 	}
-	return items, nil
+	if service == "" {
+		return decoded.Flags, nil
+	}
+	matched := make([]flagItem, 0, len(decoded.Flags))
+	for _, f := range decoded.Flags {
+		if f.OwnerID == service {
+			matched = append(matched, f)
+		}
+	}
+	return matched, nil
 }
 
-// fetchBlastRadius calls the evaluator blast-radius endpoint for a single flag.
-// Endpoint: GET /api/v1/blast-radius/{flag_key}
+// fetchBlastRadius calls the real evaluator blast-radius endpoint for a
+// single flag: GET /api/v1/blast-radius?flag_key=... (query parameters --
+// services/evaluator/internal/blast.HandleBlastRadius never registered a
+// /{flag_key} path-segment variant, so the previous URL 404'd on every
+// call). project_id and rollout_pct are deliberately omitted: evaluator's
+// own handler already defaults project_id to the same single-project-
+// deployment default blast.Calculator itself uses, and defaults
+// rollout_pct to 100 -- the right question during incident triage is "if
+// this flag were fully live, is it BLOCKED-risk", the more conservative
+// worst case, not merely its current (possibly partial) exposure.
 func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientClient, evaluatorBase, flagKey string) (blastRadiusResult, error) {
-	url := fmt.Sprintf("%s/api/v1/blast-radius/%s", evaluatorBase, flagKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqURL := fmt.Sprintf("%s/api/v1/blast-radius?flag_key=%s", evaluatorBase, url.QueryEscape(flagKey))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return blastRadiusResult{}, fmt.Errorf("build request: %w", err)
 	}
@@ -262,18 +316,21 @@ func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientCl
 		return blastRadiusResult{}, fmt.Errorf("evaluator returned %d", resp.StatusCode)
 	}
 
-	var result blastRadiusResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var decoded evaluatorBlastRadiusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return blastRadiusResult{}, fmt.Errorf("decode blast radius: %w", err)
 	}
-	result.FlagKey = flagKey
-	return result, nil
+	return blastRadiusResult{FlagKey: flagKey, Status: decoded.Result.RiskScore}, nil
 }
 
 // postKillSwitch sends a kill-switch command to flag-api for the given flag.
 // Endpoint: POST /api/v1/flags/{flag_key}/kill-switch
 // The Authorization Bearer header is set from h.flagAPIToken so flag-api does
-// not reject the request with HTTP 401.
+// not reject the request with HTTP 401. flagKey is query-escaped for the
+// same reason fetchBlastRadius escapes it: flags.key has no character
+// restriction at the DB layer (confirmed against flag-api's CreateFlag,
+// which validates only non-empty), so an unescaped flag key containing '/'
+// or other URL-special characters could otherwise corrupt this path.
 func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, alertID string) error {
 	body := map[string]string{
 		"reason": fmt.Sprintf("auto-kill: Datadog alert %s triggered blast-radius BLOCKED", alertID),
@@ -284,8 +341,8 @@ func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, aler
 		return fmt.Errorf("marshal kill-switch body: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/flags/%s/kill-switch", flagAPIBase, flagKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	reqURL := fmt.Sprintf("%s/api/v1/flags/%s/kill-switch", flagAPIBase, url.QueryEscape(flagKey))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
