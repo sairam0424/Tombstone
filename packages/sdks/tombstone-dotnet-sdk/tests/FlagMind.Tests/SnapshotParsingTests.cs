@@ -19,9 +19,36 @@ using Xunit;
 /// The first 5 tests exercise ParseSnapshotResponse(string) directly (an
 /// internal method, visible here via [assembly: InternalsVisibleTo(...)] in
 /// FlagMindClient.cs) with hand-built JSON shaped exactly like flag-api's
-/// real snapshot endpoint. The last 2 drive the real, public
-/// ConnectAsync/Evaluate entry points end to end against a stubbed
-/// HttpMessageHandler (matching LagRecoveryTests.cs's existing convention).
+/// real snapshot endpoint -- these independently prove fix 1 (parsing) is
+/// needed and correct. The last 2 drive the real, public ConnectAsync/
+/// Evaluate entry points end to end against a stubbed HttpMessageHandler
+/// (matching LagRecoveryTests.cs's existing convention).
+///
+/// IMPORTANT, found by adversarial review of this PR: neither end-to-end
+/// test can, by itself, prove BOTH fixes are simultaneously needed --
+/// Step 2's own guard (`if (flagState.Prerequisites.Count > 0)`) means fix
+/// 1's absence (Prerequisites always empty) makes fix 2 (the flagLookup
+/// wiring) irrelevant: the prerequisite check never runs at all, and both
+/// tests below would pass/fail based on fix 1 alone, masking whether fix 2
+/// is present. Concretely:
+/// - EvaluateResolvesARealSatisfiedHardGatedPrerequisiteFromItsOwnCache only
+///   fails in the narrower state where fix 1 IS applied but fix 2 is NOT
+///   (Prerequisites real, flagLookup still defaulting to null) -- it
+///   provides zero incremental signal over a full revert of both fixes,
+///   since tests 1-5 already catch that case independently (Prerequisites
+///   comes back empty, failing those assertions directly).
+/// - EvaluateBlocksOnAGenuinelyUnmetHardGatedPrerequisite provides NO signal
+///   on fix 2 at all, in any revert combination: a null-returning lookup
+///   and a real-but-mismatched lookup both hard-gate to PrerequisiteFailed
+///   identically (the same structural coincidence documented in PR #230's
+///   and #231's own equivalent follow-up fixes for the TS/Java SDKs) -- it
+///   only ever proves fix 1's gate-parsing.
+/// Test coverage for fix 2 specifically rests entirely on
+/// EvaluateResolvesARealSatisfiedHardGatedPrerequisiteFromItsOwnCache,
+/// exercised against the fix-1-only intermediate state -- there is no way
+/// to design an evaluate()-level test that independently proves fix 2 is
+/// needed without fix 1 already being present, since fix 2 is structurally
+/// unreachable until Prerequisites is non-empty.
 /// </summary>
 public class SnapshotParsingTests
 {
@@ -116,6 +143,9 @@ public class SnapshotParsingTests
         Assert.Empty(states[0].Prerequisites);
     }
 
+    // The one test in this file proving fix 2 (flagLookup wiring) -- see
+    // this file's own top-level doc comment for exactly what state this
+    // does and doesn't distinguish.
     [Fact]
     public async Task EvaluateResolvesARealSatisfiedHardGatedPrerequisiteFromItsOwnCache()
     {
@@ -136,6 +166,8 @@ public class SnapshotParsingTests
         Assert.NotEqual(EvaluationReason.PrerequisiteFailed, result.Reason);
     }
 
+    // Fix 1 only (gate-parsing) -- provides no signal on fix 2, per this
+    // file's own top-level doc comment.
     [Fact]
     public async Task EvaluateBlocksOnAGenuinelyUnmetHardGatedPrerequisite()
     {
