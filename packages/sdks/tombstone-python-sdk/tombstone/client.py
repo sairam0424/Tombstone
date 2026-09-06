@@ -246,16 +246,39 @@ class TombstoneClient:
             flag_key = event.get("flag_key")
             if not flag_key:
                 return
-            state = FlagEnvironmentState(
-                flag_key=flag_key,
-                enabled=event.get("enabled", False),
-                rollout_pct=float(event.get("rollout_pct", 0)),
-                safe_default=event.get("safe_default", False),
-                environment=event.get("environment", self._environment),
-                hash_version=event.get("hash_version", 1),
-                target_list=event.get("target_list", []),
-            )
+            # flag-api's real FlagEvent (services/flag-api/internal/api/v1/
+            # flags.go) carries exactly flag_key/enabled/rollout_pct/reason/
+            # ts/environment -- never safe_default/hash_version/target_list/
+            # targeting_rules/prerequisites (SDK-4 investigation). Before
+            # this fix, every field the event doesn't carry was overwritten
+            # with a hardcoded default (False/1/[]) instead of preserved,
+            # so ANY real SSE event for a flag -- a kill-switch, a rollback
+            # step, literally any enabled/rollout_pct change -- silently
+            # wiped that flag's cached prerequisites and targeting_rules to
+            # empty client-side, until the next full snapshot refetch
+            # restored them: a live correctness regression window, not
+            # merely "rules don't propagate live". Merging against the
+            # existing cached entry (mirroring @tombstone/core's cache.ts
+            # applyEvent, which already does this correctly) closes it.
             with self._lock:
+                existing = self._cache.get(flag_key)
+                state = FlagEnvironmentState(
+                    flag_key=flag_key,
+                    enabled=event.get("enabled", False),
+                    rollout_pct=float(event.get("rollout_pct", 0)),
+                    safe_default=event.get(
+                        "safe_default", existing.safe_default if existing else False
+                    ),
+                    environment=event.get("environment", self._environment),
+                    hash_version=event.get(
+                        "hash_version", existing.hash_version if existing else 1
+                    ),
+                    target_list=event.get(
+                        "target_list", existing.target_list if existing else []
+                    ),
+                    targeting_rules=existing.targeting_rules if existing else [],
+                    prerequisites=existing.prerequisites if existing else [],
+                )
                 new_cache = dict(self._cache)
                 new_cache[flag_key] = state
                 self._cache = new_cache
