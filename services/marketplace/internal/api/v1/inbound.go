@@ -326,7 +326,11 @@ func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientCl
 // postKillSwitch sends a kill-switch command to flag-api for the given flag.
 // Endpoint: POST /api/v1/flags/{flag_key}/kill-switch
 // The Authorization Bearer header is set from h.flagAPIToken so flag-api does
-// not reject the request with HTTP 401.
+// not reject the request with HTTP 401. flagKey is query-escaped for the
+// same reason fetchBlastRadius escapes it: flags.key has no character
+// restriction at the DB layer (confirmed against flag-api's CreateFlag,
+// which validates only non-empty), so an unescaped flag key containing '/'
+// or other URL-special characters could otherwise corrupt this path.
 func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, alertID string) error {
 	body := map[string]string{
 		"reason": fmt.Sprintf("auto-kill: Datadog alert %s triggered blast-radius BLOCKED", alertID),
@@ -337,8 +341,8 @@ func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, aler
 		return fmt.Errorf("marshal kill-switch body: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/flags/%s/kill-switch", flagAPIBase, flagKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	reqURL := fmt.Sprintf("%s/api/v1/flags/%s/kill-switch", flagAPIBase, url.QueryEscape(flagKey))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
