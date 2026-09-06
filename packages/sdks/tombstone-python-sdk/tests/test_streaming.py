@@ -100,7 +100,9 @@ def test_apply_event_preserves_prerequisites_and_targeting_rules():
         safe_default=False,
         environment="prod",
         targeting_rules=[seeded_rule],
-        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": True}],
+        prerequisites=[
+            {"flag_key": "parent", "required_variation": "true", "gate": True}
+        ],
     )
 
     # A real SSE event as flag-api actually publishes it -- no
@@ -183,4 +185,181 @@ def test_apply_event_field_omitted_and_explicit_null_both_fall_back():
     updated = client._cache["my-flag"]
     assert updated.hash_version == 3
     assert updated.target_list == ["user1"]
+    client.close()
+
+
+# ── Live prerequisites-streaming (services/flag-api's PrerequisitesEvent) ──
+
+
+def _prereq_frame(flag_key, environment, prerequisites, ts) -> list[str]:
+    data = json.dumps(
+        {
+            "flag_key": flag_key,
+            "environment": environment,
+            "prerequisites": prerequisites,
+            "ts": ts,
+        }
+    )
+    return ["event: prerequisites_updated", f"data: {data}", ""]
+
+
+def test_consume_sse_lines_routes_prerequisites_updated_to_its_own_handler():
+    """Regression test proving prerequisites_updated is NOT routed through
+    _apply_event -- that payload shape has no enabled/rollout_pct keys at
+    all, so _apply_event would silently zero them out (enabled=False,
+    rollout_pct=0.0) for a flag that was never actually disabled."""
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        prerequisites_updated_at=1_000,
+    )
+
+    client._consume_sse_lines(
+        iter(
+            _prereq_frame(
+                "my-flag",
+                "prod",
+                [{"flag_key": "parent", "required_variation": "true", "gate": True}],
+                2_000,
+            )
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.enabled is True, "prerequisites_updated must not touch enabled"
+    assert updated.rollout_pct == 100.0, (
+        "prerequisites_updated must not touch rollout_pct"
+    )
+    assert updated.prerequisites == [
+        {"flag_key": "parent", "required_variation": "true", "gate": True}
+    ]
+    assert updated.prerequisites_updated_at == 2_000
+    client.close()
+
+
+def test_apply_prerequisites_event_replaces_the_full_list():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        prerequisites=[
+            {"flag_key": "old-parent", "required_variation": "true", "gate": True}
+        ],
+        prerequisites_updated_at=1_000,
+    )
+
+    client._apply_prerequisites_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "prerequisites": [
+                    {
+                        "flag_key": "new-parent",
+                        "required_variation": "false",
+                        "gate": False,
+                    }
+                ],
+                "ts": 2_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == [
+        {"flag_key": "new-parent", "required_variation": "false", "gate": False}
+    ], "must be a full replacement, not a merge with the old list"
+    assert updated.prerequisites_updated_at == 2_000
+    client.close()
+
+
+def test_apply_prerequisites_event_for_an_unknown_flag_is_a_noop():
+    """No cached entry to merge a partial (prerequisites-only) update into
+    -- the next full snapshot refetch is what correctly picks up a flag
+    this client has never seen before, not a live prerequisites event."""
+    client = _client()
+
+    client._apply_prerequisites_event(
+        json.dumps(
+            {
+                "flag_key": "never-seen-flag",
+                "environment": "prod",
+                "prerequisites": [{"flag_key": "parent", "required_variation": "true"}],
+                "ts": 1_000,
+            }
+        )
+    )
+
+    assert "never-seen-flag" not in client._cache
+    client.close()
+
+
+def test_apply_prerequisites_event_rejects_a_stale_out_of_order_delivery():
+    """Regression test for the ordering hazard disclosed in flag-api's own
+    PrerequisitesEvent doc comment: concurrent AddPrerequisite/
+    DeletePrerequisite calls on the same flag can have their events arrive
+    out of real commit order under scheduling delays. An incoming event
+    whose ts is OLDER than what's already cached must be dropped, not
+    unconditionally applied just because it arrived later on the wire."""
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        prerequisites=[
+            {"flag_key": "current-parent", "required_variation": "true", "gate": True}
+        ],
+        prerequisites_updated_at=5_000,
+    )
+
+    # A stale event (ts=3_000, older than the cached 5_000) arrives late.
+    client._apply_prerequisites_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "prerequisites": [
+                    {"flag_key": "stale-parent", "required_variation": "true"}
+                ],
+                "ts": 3_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == [
+        {"flag_key": "current-parent", "required_variation": "true", "gate": True}
+    ], "a stale (older-ts) event must not overwrite the newer cached state"
+    assert updated.prerequisites_updated_at == 5_000
+    client.close()
+
+
+def test_snapshot_seeds_prerequisites_updated_at_from_the_snapshot_ts():
+    client = _client()
+    client._apply_snapshot(
+        {
+            "environment": "prod",
+            "ts": 9_000,
+            "flags": [
+                {
+                    "flag_key": "my-flag",
+                    "enabled": True,
+                    "rollout_pct": 100.0,
+                    "safe_default": False,
+                    "prerequisites": [],
+                }
+            ],
+        }
+    )
+
+    assert client._cache["my-flag"].prerequisites_updated_at == 9_000
     client.close()
