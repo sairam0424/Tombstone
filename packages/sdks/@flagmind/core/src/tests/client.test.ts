@@ -46,6 +46,22 @@ interface RawWireFlag {
     gate?: boolean;
     priority?: number;
   }>;
+  // flag-api's real snapshot response does not send these today (confirmed:
+  // FlagEnvironmentStateWithPrereqs in environments.go has no target_list/
+  // targeting_rules/hash_version fields) -- included here only to test
+  // parseFlagEnvironmentState's defensive parsing of them for forward
+  // compatibility, should a future backend change ever add them.
+  target_list?: string[];
+  targeting_rules?: Array<{
+    id?: string;
+    rule_type?: string;
+    attribute: string;
+    operator: string;
+    values?: unknown[];
+    variation?: string;
+    priority?: number;
+  }>;
+  hash_version?: 1 | 2;
 }
 
 type Listener = (e: { data?: string }) => void;
@@ -447,15 +463,34 @@ describe("TombstoneClient — EVAL-2 telemetry", () => {
 
 describe("TombstoneClient — real-wire snapshot parsing", () => {
   /**
-   * Regression suite for a bug found while investigating SDK-4's
-   * prerequisites-streaming follow-up: fetchSnapshot() used to do
-   * `(await resp.json()) as FlagSnapshot` -- a bare type assertion with no
-   * snake_case-to-camelCase translation -- against flag-api's real,
-   * snake_case snapshot response. Every test above this describe block used
-   * a fake fetch that returned an already-camelCase object directly, so none
-   * of them ever exercised a real JSON round-trip and the bug went
-   * undetected. These tests use RawWireFlag fixtures (snake_case, matching
-   * flag-api's actual JSON tags) specifically to close that gap.
+   * Regression suite for TWO bugs found while investigating SDK-4's
+   * prerequisites-streaming follow-up. Every test above this describe block
+   * used a fake fetch that returned an already-camelCase object directly, so
+   * none of them ever exercised a real JSON round-trip; these use
+   * RawWireFlag fixtures (snake_case, matching flag-api's actual JSON tags)
+   * specifically to close that gap.
+   *
+   * Fix 1 (parseSnapshot/parseFlagEnvironmentState): fetchSnapshot() used to
+   * do `(await resp.json()) as FlagSnapshot` -- a bare type assertion with no
+   * snake_case-to-camelCase translation.
+   *
+   * Fix 2 (evaluateWithDetail + this.cache instead of the legacy single-flag
+   * overload): evaluate()'s prerequisite checks could never resolve any flag
+   * OTHER than the one being evaluated.
+   *
+   * IMPORTANT, found by adversarial review of this PR: only the SATISFIED
+   * hard-gated prerequisite test below can actually distinguish Fix 2 from a
+   * reverted state. For an UNMET hard-gated prerequisite, both the broken
+   * legacy lookup (dependency not found -> `!prereqState && prereq.gate` ->
+   * PREREQUISITE_FAILED) and the fixed lookup (dependency found but its real
+   * value doesn't match required_variation -> PREREQUISITE_FAILED) converge
+   * on the identical outcome -- there is no "unmet" scenario that diverges
+   * between the two, since a missing dependency and a mismatched dependency
+   * both hard-block. The two "unmet"/"gate omitted" tests below remain valid,
+   * real regression tests for Fix 1's prerequisite-array/gate-default
+   * parsing (confirmed failing in isolation when Fix 1 alone is reverted:
+   * reason becomes ERROR instead of PREREQUISITE_FAILED) -- they just don't
+   * additionally cover Fix 2, and are commented accordingly below.
    */
   let fakeFetch: FakeFetch;
   let originalFetch: typeof globalThis.fetch;
@@ -530,7 +565,15 @@ describe("TombstoneClient — real-wire snapshot parsing", () => {
     const client = new TombstoneClient(baseConfig());
     await client.connect();
 
-    // A satisfied hard-gated prerequisite must not block evaluation.
+    // A satisfied hard-gated prerequisite must not block evaluation. THIS is
+    // the one test in this describe block that actually distinguishes Fix 2
+    // from a reverted state: under the old legacy single-flag cache lookup,
+    // "parent-flag" can never be resolved as a dependency (the lookup only
+    // ever knows about "child-flag"), so this would incorrectly return
+    // PREREQUISITE_FAILED even though parent-flag is real, enabled, and
+    // satisfies required_variation -- confirmed empirically by adversarial
+    // review of this PR (reverting only Fix 2 makes this test, and only this
+    // test among the 4 below, fail).
     const result = client.evaluate("child-flag", { userId: "u1" });
     assert.equal(result.value, true);
     assert.notEqual(result.reason, "PREREQUISITE_FAILED");
@@ -538,7 +581,7 @@ describe("TombstoneClient — real-wire snapshot parsing", () => {
     client.disconnect();
   });
 
-  it("an unmet hard-gated prerequisite from a real snapshot blocks evaluation", async () => {
+  it('an unmet hard-gated prerequisite from a real snapshot blocks evaluation (Fix 1 only -- see this describe block\'s own doc comment for why no "unmet" scenario can distinguish Fix 2)', async () => {
     fakeFetch.snapshotFlags = [
       {
         flag_id: "1",
@@ -577,7 +620,7 @@ describe("TombstoneClient — real-wire snapshot parsing", () => {
     client.disconnect();
   });
 
-  it("gate omitted on the wire defaults to true (hard-blocking), matching flag-api's own default", async () => {
+  it("gate omitted on the wire defaults to true (hard-blocking), matching flag-api's own default (Fix 1 only, same reasoning as the unmet-prerequisite test above)", async () => {
     fakeFetch.snapshotFlags = [
       {
         flag_id: "1",
@@ -606,6 +649,43 @@ describe("TombstoneClient — real-wire snapshot parsing", () => {
 
     const result = client.evaluate("child-flag", { userId: "u1" });
     assert.equal(result.reason, "PREREQUISITE_FAILED");
+
+    client.disconnect();
+  });
+
+  it("target_list/targeting_rules/hash_version parse correctly IF a future backend ever sends them (currently dead code -- flag-api's real snapshot response has none of these fields today)", async () => {
+    fakeFetch.snapshotFlags = [
+      {
+        flag_id: "1",
+        flag_key: "my-flag",
+        environment: "production",
+        enabled: true,
+        rollout_pct: 0, // fallthrough alone would be false
+        safe_default: "false",
+        updated_at: Math.floor(Date.now() / 1000),
+        target_list: ["u1"],
+        targeting_rules: [
+          {
+            id: "r1",
+            rule_type: "USER",
+            attribute: "country",
+            operator: "EQ",
+            values: ["US"],
+            variation: "special",
+            priority: 0,
+          },
+        ],
+        hash_version: 2,
+      },
+    ];
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    // Step 3 (individual targeting) matches before rules/rollout are
+    // consulted at all, proving target_list parsed into a real string[].
+    const result = client.evaluate("my-flag", { userId: "u1" });
+    assert.equal(result.reason, "TARGET_MATCH");
+    assert.equal(result.value, true);
 
     client.disconnect();
   });
