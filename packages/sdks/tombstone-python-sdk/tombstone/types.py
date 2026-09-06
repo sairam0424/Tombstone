@@ -21,10 +21,10 @@ class EvaluationResult:
 @dataclass
 class PropertyCondition:
     attribute: str
-    operator: str   # eq, neq, contains, startsWith, endsWith, semver_gt, semver_gte,
-                    # semver_lt, semver_lte, semver_eq, date_before, date_after,
-                    # gt, gte, lt, lte, in, nin
-    values: list    # always a list; single-value operators use values[0]
+    operator: str  # eq, neq, contains, startsWith, endsWith, semver_gt, semver_gte,
+    # semver_lt, semver_lte, semver_eq, date_before, date_after,
+    # gt, gte, lt, lte, in, nin
+    values: list  # always a list; single-value operators use values[0]
     negate: bool = False
 
 
@@ -46,7 +46,10 @@ class FlagEnvironmentState:
     environment: str
     targeting_rules: list[TargetingRule] = field(default_factory=list)
     prerequisites: list[dict] = field(default_factory=list)
-    # prerequisites schema: [{"flag_key": str, "required_value": bool, "gate": bool}]
+    # prerequisites schema: [{"flag_key": str, "required_variation": str, "gate": bool}]
+    # Matches proto's ParentCondition / flag-api's SnapshotPrerequisite wire shape
+    # exactly -- required_variation is always a string (e.g. "true"/"false"), not
+    # a bool, since it must also support future multivariate prerequisites.
     # "gate" defaults to True (hard-blocking) when omitted, preserving legacy behavior.
     # gate=False marks a soft prerequisite: an unmet dependency is skipped rather
     # than failing the whole evaluation.
