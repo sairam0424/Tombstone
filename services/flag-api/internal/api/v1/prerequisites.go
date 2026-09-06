@@ -1,12 +1,16 @@
 package v1
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/db/sqlcgen"
@@ -20,11 +24,110 @@ import (
 //	continue evaluating the next rule (i.e. fallthrough behaviour).
 type PrerequisiteHandler struct {
 	db     *sql.DB
+	rdb    *redis.Client
 	logger *zap.Logger
 }
 
-func NewPrerequisiteHandler(db *sql.DB, logger *zap.Logger) *PrerequisiteHandler {
-	return &PrerequisiteHandler{db: db, logger: logger}
+func NewPrerequisiteHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger) *PrerequisiteHandler {
+	return &PrerequisiteHandler{db: db, rdb: rdb, logger: logger}
+}
+
+// PrerequisitesEvent is published to the Redis Stream (tombstone:stream:
+// {environment}) whenever a flag's prerequisite set changes (AddPrerequisite/
+// DeletePrerequisite), carrying the flag's CURRENT FULL prerequisite list
+// post-mutation -- SDKs apply it as a full replacement, not a delta,
+// avoiding any add/remove-ordering ambiguity between concurrent mutations.
+//
+// Deliberately Streams-only, never dual-written to the legacy pub/sub
+// channel the way FlagEvent still is (see flags.go's "legacy pub/sub
+// removed in v2.1" convention note) -- this is new code with no backward-
+// compat obligation to a transport already scheduled for removal. That
+// also means it does NOT need gateway's eventDeduper at all (dedup only
+// exists to suppress a duplicate delivery via the OTHER transport), and it
+// is a wholly separate struct from FlagEvent so this never touches
+// FlagEvent's own wire shape or eventDeduper's map-key comparability
+// requirement (FlagEvent must stay a plain, comparable struct -- adding a
+// slice field to it directly would break `map[FlagEvent]time.Time`).
+type PrerequisitesEvent struct {
+	FlagKey       string         `json:"flag_key"`
+	Environment   string         `json:"environment"`
+	Prerequisites []Prerequisite `json:"prerequisites"`
+	Ts            int64          `json:"ts"`
+}
+
+// publishPrerequisitesUpdated fetches flagKey's current full prerequisite
+// list and fans out a PrerequisitesEvent to every environment the flag has
+// state in -- flag_prerequisites has no environment column of its own (a
+// prerequisite applies across all environments), so this mirrors
+// ArchiveFlag's own INT-4 per-environment loop (flags.go) rather than
+// guessing a single hardcoded environment. Fail-soft: a query or publish
+// failure is logged and swallowed, matching publishEvent/publishToStream's
+// own convention -- a broken live-update path must never fail the actual
+// mutation request that already committed.
+func (h *PrerequisiteHandler) publishPrerequisitesUpdated(ctx context.Context, key, projectID string) {
+	if h.rdb == nil {
+		return
+	}
+	q := sqlcgen.New(h.db)
+
+	rows, err := q.ListPrerequisitesForFlag(ctx, sqlcgen.ListPrerequisitesForFlagParams{Key: key, ProjectID: projectID})
+	if err != nil {
+		h.logger.Warn("publish prerequisites_updated: list query failed", zap.String("flag", key), zap.Error(err))
+		return
+	}
+	prereqs := make([]Prerequisite, 0, len(rows))
+	for _, r := range rows {
+		prereqs = append(prereqs, Prerequisite{
+			ID:                r.ID,
+			FlagID:            r.FlagID,
+			FlagKey:           r.PrereqFlagKey,
+			RequiredVariation: r.RequiredVariation,
+			Gate:              r.Gate,
+			Priority:          int(r.Priority),
+			CreatedAt:         r.CreatedAt,
+		})
+	}
+
+	envs, err := q.ListFlagEnvironmentsForKey(ctx, sqlcgen.ListFlagEnvironmentsForKeyParams{Key: key, ProjectID: projectID})
+	if err != nil {
+		h.logger.Warn("publish prerequisites_updated: environment list query failed", zap.String("flag", key), zap.Error(err))
+		return
+	}
+
+	ts := time.Now().Unix()
+	for _, env := range envs {
+		publishPrerequisitesEvent(ctx, h.rdb, h.logger, env, PrerequisitesEvent{
+			FlagKey: key, Environment: env, Prerequisites: prereqs, Ts: ts,
+		})
+	}
+}
+
+// publishPrerequisitesEvent XAdds a PrerequisitesEvent to the Streams-only
+// path. Discriminated from a regular FlagEvent purely via the XAdd Values
+// map's "event" field -- previously always set to event.Reason for flag-
+// toggle events, and (confirmed by reading gateway's own consumer code)
+// never actually read by the gateway at all before this change -- so
+// gateway's stream consumer can tell the two payload shapes apart BEFORE
+// attempting to unmarshal, without any change to FlagEvent itself.
+func publishPrerequisitesEvent(ctx context.Context, rdb *redis.Client, logger *zap.Logger, environment string, event PrerequisitesEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	streamKey := fmt.Sprintf("tombstone:stream:%s", environment)
+	if err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		MaxLen: 10000,
+		Approx: true,
+		Values: map[string]interface{}{
+			"event":       "prerequisites_updated",
+			"flag_key":    event.FlagKey,
+			"environment": environment,
+			"payload":     string(payload),
+		},
+	}).Err(); err != nil {
+		logger.Warn("redis xadd failed", zap.String("stream", streamKey), zap.Error(err))
+	}
 }
 
 // Prerequisite is the API-level representation of a flag_prerequisites row.
@@ -150,6 +253,7 @@ func (h *PrerequisiteHandler) AddPrerequisite(w http.ResponseWriter, r *http.Req
 		CreatedAt:         inserted.CreatedAt,
 	}
 
+	h.publishPrerequisitesUpdated(r.Context(), key, projectID)
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -206,6 +310,7 @@ func (h *PrerequisiteHandler) DeletePrerequisite(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusNotFound, "prerequisite not found")
 		return
 	}
+	h.publishPrerequisitesUpdated(r.Context(), key, projectID)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": prereqID})
 }
 

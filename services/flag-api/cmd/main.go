@@ -169,7 +169,7 @@ func main() {
 	auditH := v1.NewAuditHandler(db, logger, auditWriter)
 	retentionH := v1.NewRetentionHandler(logger, auditRetention, auditRetentionDays)
 	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)
-	prereqH := v1.NewPrerequisiteHandler(db, logger)
+	prereqH := v1.NewPrerequisiteHandler(db, rdb, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
 	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter, marketplaceURL)

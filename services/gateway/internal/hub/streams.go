@@ -195,6 +195,17 @@ func BuildReplayFrames(msgs []redis.XMessage) [][]byte {
 		if !ok {
 			continue
 		}
+
+		// Same "event" Values-map discriminator RunStreamConsumer's live
+		// path checks -- a reconnecting client's XRANGE catch-up must
+		// replay a prerequisites_updated entry the same way it would have
+		// been delivered live, not silently drop it by trying (and
+		// failing) to unmarshal it as a FlagEvent.
+		if kind, _ := msg.Values["event"].(string); kind == "prerequisites_updated" {
+			frames = append(frames, rawFrame(kind, []byte(payload), msg.ID))
+			continue
+		}
+
 		var event FlagEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
 			continue

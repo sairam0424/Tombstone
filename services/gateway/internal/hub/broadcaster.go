@@ -152,6 +152,22 @@ func (b *Broadcaster) RunStreamConsumer(ctx context.Context, environment string)
 				AckStreamMessage(ctx, b.rdb, streamKey, b.group, msg.ID)
 				continue
 			}
+
+			// prerequisites_updated is a Streams-only event kind (never
+			// dual-written to the legacy pub/sub path FlagEvent still uses),
+			// discriminated by this Values-map "event" field -- previously
+			// always set to the FlagEvent's own Reason and never read by
+			// this consumer at all. Relayed verbatim: unlike a FlagEvent,
+			// gateway never needs to inspect a prerequisites payload's
+			// fields (no eventTypeFor-style branching, no dedup -- see
+			// Hub.BroadcastRaw's own doc comment), so there is nothing to
+			// gain from a typed unmarshal/remarshal round-trip here.
+			if kind, _ := msg.Values["event"].(string); kind == "prerequisites_updated" {
+				b.hub.BroadcastRaw(environment, kind, []byte(payload), msg.ID)
+				AckStreamMessage(ctx, b.rdb, streamKey, b.group, msg.ID)
+				continue
+			}
+
 			var event FlagEvent
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
 				// Do NOT ack — leave the message pending. A poison payload

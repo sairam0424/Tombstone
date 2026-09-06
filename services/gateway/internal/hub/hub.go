@@ -235,6 +235,32 @@ func (h *Hub) Broadcast(environment string, event FlagEvent, streamMsgID string)
 	}
 }
 
+// BroadcastRaw fans out a pre-serialized JSON payload verbatim under the
+// given SSE event: name, for event kinds this Hub does not need to
+// typed-unmarshal or dedupe (currently only prerequisites_updated).
+// Deliberately does NOT run eventDeduper.claim -- dedup exists solely to
+// suppress a second delivery of the SAME logical event via the legacy
+// pub/sub transport, and prerequisites_updated is never dual-written there
+// (see RunStreamConsumer's own "event" Values-map discriminator check).
+func (h *Hub) BroadcastRaw(environment, eventType string, payload []byte, streamMsgID string) {
+	v, ok := h.envs.Load(environment)
+	if !ok {
+		return // no clients subscribed to this environment
+	}
+	eb := v.(*EnvironmentBroadcaster)
+
+	frame := rawFrame(eventType, payload, streamMsgID)
+
+	sent, dropped := eb.Broadcast(frame)
+	if dropped > 0 {
+		h.logger.Warn("backpressure: events dropped for slow clients",
+			zap.String("env", environment),
+			zap.String("event_type", eventType),
+			zap.Int("dropped", dropped),
+			zap.Int("sent", sent))
+	}
+}
+
 // AllStats returns per-environment metrics for the /gateway/metrics endpoint.
 func (h *Hub) AllStats() map[string]EnvStats {
 	result := make(map[string]EnvStats)
@@ -323,6 +349,18 @@ func sseFrame(eventType string, event FlagEvent, id string) []byte {
 // at the (already-trimmed) ID it reconnected with.
 func snapshotFrame(snapshot []byte, newestID string) []byte {
 	return []byte(fmt.Sprintf("%sevent: snapshot\ndata: %s\n\n", idLine(newestID), snapshot))
+}
+
+// rawFrame builds an SSE frame carrying a pre-serialized JSON payload
+// verbatim -- for event kinds the gateway relays without ever needing to
+// typed-unmarshal, inspect a field, or dedupe (currently only
+// prerequisites_updated, which is Streams-only with no legacy pub/sub
+// dual-write to dedupe against -- see Broadcaster.RunStreamConsumer's own
+// "event" Values-map discriminator check). Shares snapshotFrame's exact
+// shape, just with a caller-supplied event: name instead of a hardcoded
+// "snapshot".
+func rawFrame(eventType string, payload []byte, id string) []byte {
+	return []byte(fmt.Sprintf("%sevent: %s\ndata: %s\n\n", idLine(id), eventType, payload))
 }
 
 func idLine(id string) string {

@@ -62,7 +62,7 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 	defer func() { _ = rdb.Close() }()
 
 	flagH := NewFlagHandler(database, rdb, logger, nil, nil, nil, "")
-	prereqH := NewPrerequisiteHandler(database, logger)
+	prereqH := NewPrerequisiteHandler(database, rdb, logger)
 	snapH := NewSnapshotHandler(database, logger)
 
 	parent := createTestFlag(t, flagH, projectID, "prereq-db-parent")
@@ -185,6 +185,136 @@ func TestPrerequisitesAgainstPostgres(t *testing.T) {
 		}
 		if resp.Total != 0 {
 			t.Fatalf("total after delete = %d, want 0", resp.Total)
+		}
+	})
+}
+
+// TestPrerequisitesPublishLiveUpdateEvent proves AddPrerequisite/
+// DeletePrerequisite actually publish a live "prerequisites_updated" event
+// to the Redis Stream, carrying the flag's real, current, FULL prerequisite
+// list -- the live-streaming counterpart to SDK-4's earlier fix (PR #228-
+// #233), which made every SDK correctly parse a snapshot's prerequisites
+// but did nothing to propagate a CHANGE without a full snapshot refetch.
+// A separate top-level test (not a subtest of TestPrerequisitesAgainstPostgres)
+// specifically so its own flags/stream assertions don't entangle with that
+// test's existing sequential subtests and their shared mutable state.
+func TestPrerequisitesPublishLiveUpdateEvent(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping DB-backed prerequisites test")
+	}
+
+	database, err := sql.Open("postgres", url)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if _, err := db.Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	projectID := createTestProject(ctx, t, database, "prereq-live-event-tenant")
+
+	logger := zap.NewNop()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	flagH := NewFlagHandler(database, rdb, logger, nil, nil, nil, "")
+	prereqH := NewPrerequisiteHandler(database, rdb, logger)
+
+	parent := createTestFlag(t, flagH, projectID, "prereq-live-parent")
+	dep := createTestFlag(t, flagH, projectID, "prereq-live-dependency")
+
+	// CreateFlag seeds exactly these 3 default environment rows -- see
+	// flags.go's CreateFlag. flag_prerequisites has no environment column
+	// of its own, so a live update must reach every one of them, not just
+	// "production".
+	wantEnvs := []string{"development", "staging", "production"}
+
+	var created Prerequisite
+	t.Run("AddPrerequisite publishes to every environment with the real prerequisite list", func(t *testing.T) {
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+parent.Key+"/prerequisites", map[string]any{
+			"flag_key":           dep.Key,
+			"required_variation": "true",
+			"gate":               true,
+		}, projectID, map[string]string{"key": parent.Key})
+		rec := httptest.NewRecorder()
+		prereqH.AddPrerequisite(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body: %s", rec.Code, rec.Body.String())
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		for _, env := range wantEnvs {
+			msgs, err := rdb.XRange(ctx, "tombstone:stream:"+env, "-", "+").Result()
+			if err != nil {
+				t.Fatalf("XRange(%s): %v", env, err)
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("tombstone:stream:%s: got %d entries, want exactly 1", env, len(msgs))
+			}
+			fields := msgs[0].Values
+			if got := fields["event"]; got != "prerequisites_updated" {
+				t.Errorf("%s: event = %q, want %q", env, got, "prerequisites_updated")
+			}
+			if got := fields["flag_key"]; got != parent.Key {
+				t.Errorf("%s: flag_key = %q, want %q", env, got, parent.Key)
+			}
+			if got := fields["environment"]; got != env {
+				t.Errorf("%s: environment field = %q, want %q", env, got, env)
+			}
+
+			var evt PrerequisitesEvent
+			payload, _ := fields["payload"].(string)
+			if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+				t.Fatalf("%s: payload unmarshal: %v", env, err)
+			}
+			if evt.FlagKey != parent.Key || evt.Environment != env {
+				t.Errorf("%s: payload = %+v, want flag_key=%q environment=%q", env, evt, parent.Key, env)
+			}
+			if len(evt.Prerequisites) != 1 || evt.Prerequisites[0].FlagKey != dep.Key || !evt.Prerequisites[0].Gate {
+				t.Errorf("%s: payload.prerequisites = %+v, want exactly 1 entry matching the real inserted row", env, evt.Prerequisites)
+			}
+		}
+	})
+
+	t.Run("DeletePrerequisite publishes an updated (now empty) prerequisite list", func(t *testing.T) {
+		req := newTenancyRequest(t, http.MethodDelete, "/api/v1/flags/"+parent.Key+"/prerequisites/"+created.ID,
+			nil, projectID, map[string]string{"key": parent.Key, "id": created.ID})
+		rec := httptest.NewRecorder()
+		prereqH.DeletePrerequisite(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+
+		// The previous subtest already left 1 entry per stream; a second
+		// live update from this delete must append a SECOND entry, not
+		// replace or skip the first.
+		msgs, err := rdb.XRange(ctx, "tombstone:stream:production", "-", "+").Result()
+		if err != nil {
+			t.Fatalf("XRange: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("tombstone:stream:production: got %d entries, want exactly 2 (add + delete)", len(msgs))
+		}
+		var evt PrerequisitesEvent
+		payload, _ := msgs[1].Values["payload"].(string)
+		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+			t.Fatalf("payload unmarshal: %v", err)
+		}
+		if len(evt.Prerequisites) != 0 {
+			t.Errorf("payload.prerequisites after delete = %+v, want empty", evt.Prerequisites)
 		}
 	})
 }
