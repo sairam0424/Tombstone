@@ -303,6 +303,27 @@ func TestRegistry_InstalledWebhooks(t *testing.T) {
 	}
 }
 
+// TestRegistry_InstalledWebhooks_EventFlagRecovery verifies the new
+// EventFlagRecovery event type (EVAL-4's HALF_OPEN recovery ladder, the
+// mirror image of EventFlagRollback) actually reaches slack once
+// installed -- a typo in the const value or a missed catalog entry would
+// compile fine but silently return zero results forever.
+func TestRegistry_InstalledWebhooks_EventFlagRecovery(t *testing.T) {
+	reg := NewRegistry(nil, nil)
+	reg.Install("slack", "https://hooks.example.com/slack", nil)
+
+	hits := reg.InstalledWebhooks(EventFlagRecovery)
+	found := false
+	for _, i := range hits {
+		if i.ID == "slack" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("InstalledWebhooks(EventFlagRecovery) did not include 'slack' -- check slack's Events list and the EventFlagRecovery const value")
+	}
+}
+
 // TestRegistry_InstalledWebhooks_NoneInstalled verifies an empty slice is
 // returned when no integrations are installed for the requested event.
 func TestRegistry_InstalledWebhooks_NoneInstalled(t *testing.T) {

@@ -70,7 +70,7 @@ func TestTenancyIsolation(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 	snapH := NewSnapshotHandler(database, logger)
 	prereqH := NewPrerequisiteHandler(database, logger)
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
@@ -597,7 +597,7 @@ func TestArchiveFlagPublishesAnArchivedEventForAnomalyEviction(t *testing.T) {
 		t.Fatalf("audit key: %v", err)
 	}
 	auditW := audit.NewWriter(database, auditKey)
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 
 	const flagKey = "int4-archive-event-flag"
 	createTestFlag(t, flagH, projectID, flagKey)

@@ -25,11 +25,20 @@ const (
 type EventType string
 
 const (
-	EventFlagCreated       EventType = "flag.created"
-	EventFlagEnabled       EventType = "flag.enabled"
-	EventFlagDisabled      EventType = "flag.disabled"
-	EventFlagKillSwitch    EventType = "flag.kill_switch"
-	EventFlagRollback      EventType = "flag.rollback"
+	EventFlagCreated    EventType = "flag.created"
+	EventFlagEnabled    EventType = "flag.enabled"
+	EventFlagDisabled   EventType = "flag.disabled"
+	EventFlagKillSwitch EventType = "flag.kill_switch"
+	EventFlagRollback   EventType = "flag.rollback"
+	// EventFlagRecovery is the mirror image of EventFlagRollback: EVAL-4's
+	// circuit breaker climbing the HALF_OPEN recovery ladder
+	// (RecoveryStep, 10->25->50->100) rather than descending the rollback
+	// ladder (RollbackStep, 100->50->25->0). Kept as a distinct event
+	// rather than reusing EventFlagRollback for both directions -- "the
+	// circuit breaker is recovering" is meaningfully different news than
+	// "the circuit breaker is rolling back" for anything consuming this
+	// signal (e.g. Slack shouldn't necessarily alert the same way for both).
+	EventFlagRecovery      EventType = "flag.recovery"
 	EventFlagStaleDetected EventType = "flag.stale_detected"
 	EventFlagArchived      EventType = "flag.archived"
 )
@@ -62,18 +71,18 @@ var firstPartyIntegrations = []Integration{
 		Description:  "Interactive Slack app: Block Kit notifications, /tombstone slash commands, and kill switch buttons.",
 		Category:     "notifications",
 		IconURL:      "https://assets.tombstone.io/integrations/slack.svg",
-		Events:       []EventType{EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback},
+		Events:       []EventType{EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagRecovery},
 		Status:       StatusAvailable,
 		IsFirstParty: true,
 	},
 	{
-		ID:          "datadog",
-		Name:        "Datadog",
-		Description: "Annotate Datadog dashboards with flag change events and receive monitor alerts to auto-trigger blast radius checks and kill switches.",
-		Category:    "observability",
-		IconURL:     "https://assets.tombstone.io/integrations/datadog.svg",
-		Events:      []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagArchived},
-		Status:      StatusAvailable,
+		ID:              "datadog",
+		Name:            "Datadog",
+		Description:     "Annotate Datadog dashboards with flag change events and receive monitor alerts to auto-trigger blast radius checks and kill switches.",
+		Category:        "observability",
+		IconURL:         "https://assets.tombstone.io/integrations/datadog.svg",
+		Events:          []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagRecovery, EventFlagArchived},
+		Status:          StatusAvailable,
 		IsFirstParty:    true,
 		Bidirectional:   true,
 		InboundEndpoint: "/api/v1/marketplace/inbound/datadog",
@@ -84,7 +93,7 @@ var firstPartyIntegrations = []Integration{
 		Description:  "Trigger PagerDuty incidents on kill-switch or rollback events.",
 		Category:     "incident-management",
 		IconURL:      "https://assets.tombstone.io/integrations/pagerduty.svg",
-		Events:       []EventType{EventFlagKillSwitch, EventFlagRollback},
+		Events:       []EventType{EventFlagKillSwitch, EventFlagRollback, EventFlagRecovery},
 		Status:       StatusAvailable,
 		IsFirstParty: true,
 	},
@@ -94,7 +103,7 @@ var firstPartyIntegrations = []Integration{
 		Description:  "Create OpsGenie alerts when flags trigger blast-radius events.",
 		Category:     "incident-management",
 		IconURL:      "https://assets.tombstone.io/integrations/opsgenie.svg",
-		Events:       []EventType{EventFlagKillSwitch, EventFlagRollback, EventFlagStaleDetected},
+		Events:       []EventType{EventFlagKillSwitch, EventFlagRollback, EventFlagRecovery, EventFlagStaleDetected},
 		Status:       StatusAvailable,
 		IsFirstParty: true,
 	},
@@ -124,7 +133,7 @@ var firstPartyIntegrations = []Integration{
 		Description:  "Emit flag evaluation traces and metrics via OTLP.",
 		Category:     "observability",
 		IconURL:      "https://assets.tombstone.io/integrations/opentelemetry.svg",
-		Events:       []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagStaleDetected, EventFlagArchived},
+		Events:       []EventType{EventFlagCreated, EventFlagEnabled, EventFlagDisabled, EventFlagKillSwitch, EventFlagRollback, EventFlagRecovery, EventFlagStaleDetected, EventFlagArchived},
 		Status:       StatusAvailable,
 		IsFirstParty: true,
 	},
@@ -312,18 +321,18 @@ func (r *Registry) MarkBidirectional(id string, inboundEndpoints []string) bool 
 	}
 
 	updated := Integration{
-		ID:               existing.ID,
-		Name:             existing.Name,
-		Description:      existing.Description,
-		Category:         existing.Category,
-		IconURL:          existing.IconURL,
-		WebhookURL:       existing.WebhookURL,
-		Events:           existing.Events,
-		Status:           existing.Status,
-		Config:           existing.Config,
-		IsFirstParty:     existing.IsFirstParty,
-		Bidirectional:    true,
-		InboundEndpoint:  firstOf(inboundEndpoints),
+		ID:              existing.ID,
+		Name:            existing.Name,
+		Description:     existing.Description,
+		Category:        existing.Category,
+		IconURL:         existing.IconURL,
+		WebhookURL:      existing.WebhookURL,
+		Events:          existing.Events,
+		Status:          existing.Status,
+		Config:          existing.Config,
+		IsFirstParty:    existing.IsFirstParty,
+		Bidirectional:   true,
+		InboundEndpoint: firstOf(inboundEndpoints),
 	}
 	r.integrations[id] = updated
 	return true

@@ -158,7 +158,13 @@ func main() {
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
-	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher)
+	// MARKETPLACE_URL: base URL of services/marketplace, used to fire
+	// flag-lifecycle events at its webhook dispatcher (Slack/Datadog/
+	// PagerDuty/OpsGenie/Jira/Linear/OpenTelemetry). Optional and fail-open,
+	// matching REKOR_ENABLED/SLACK_WEBHOOK_URL's own opt-in convention --
+	// unset means notifyMarketplace is a permanent no-op, not an error.
+	marketplaceURL := os.Getenv("MARKETPLACE_URL")
+	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher, marketplaceURL)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger, auditWriter)
 	retentionH := v1.NewRetentionHandler(logger, auditRetention, auditRetentionDays)

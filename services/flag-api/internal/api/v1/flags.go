@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -33,10 +34,96 @@ type FlagHandler struct {
 	// require_approval gate (SEC-3b part 2) — the same hasher BreakGlassHandler
 	// uses, so a token created there validates here too.
 	hasher *secrets.TokenHasher
+	// marketplaceURL is services/marketplace's base URL, used by
+	// notifyMarketplace. Empty means the feature is disabled (fail-open,
+	// matching REKOR_ENABLED/SLACK_WEBHOOK_URL's own opt-in convention) --
+	// see notifyMarketplace's own doc comment.
+	marketplaceURL        string
+	marketplaceHTTPClient *http.Client
 }
 
-func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient, auditW *audit.Writer, hasher *secrets.TokenHasher) *FlagHandler {
-	return &FlagHandler{db: db, rdb: rdb, logger: logger, rekor: rekor, audit: auditW, hasher: hasher}
+func NewFlagHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, rekor *transparency.RekorClient, auditW *audit.Writer, hasher *secrets.TokenHasher, marketplaceURL string) *FlagHandler {
+	return &FlagHandler{
+		db: db, rdb: rdb, logger: logger, rekor: rekor, audit: auditW, hasher: hasher,
+		marketplaceURL:        marketplaceURL,
+		marketplaceHTTPClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// Marketplace flag-lifecycle event types dispatched via notifyMarketplace --
+// mirrors services/marketplace/internal/registry.EventType's values exactly
+// (flag-api and marketplace are separate Go modules, so these are
+// duplicated string constants, not a shared import).
+const (
+	marketplaceEventFlagCreated    = "flag.created"
+	marketplaceEventFlagEnabled    = "flag.enabled"
+	marketplaceEventFlagDisabled   = "flag.disabled"
+	marketplaceEventFlagKillSwitch = "flag.kill_switch"
+	marketplaceEventFlagRollback   = "flag.rollback"
+	marketplaceEventFlagRecovery   = "flag.recovery"
+	marketplaceEventFlagArchived   = "flag.archived"
+)
+
+// notifyMarketplace asynchronously POSTs a flag lifecycle event to
+// marketplace's TriggerEvent endpoint (services/marketplace/internal/api/
+// v1/handlers.go's POST /api/v1/marketplace/events), which fans it out to
+// every installed webhook integration subscribed to eventType (Slack,
+// Datadog, PagerDuty, OpsGenie, Jira, Linear, OpenTelemetry -- see
+// services/marketplace/internal/webhook/dispatcher.go). Before this,
+// flag-api never called this endpoint at all: the dispatcher/registry
+// machinery on the marketplace side was fully built and tested but had no
+// real trigger, so every configured integration silently never fired from
+// a real flag change.
+//
+// Dispatches on its own goroutine with a fresh, unbounded-by-the-request
+// context (matching writeAudit's async Rekor submission and evaluator's
+// Slack-notify precedent for the identical class of best-effort, non-
+// critical third-party call) -- a slow/unreachable marketplace must never
+// add latency to, or fail, the actual flag mutation this is reporting on.
+// The goroutine dispatch lives HERE, inside the shared helper, rather than
+// being repeated at each of this file's 6 call sites, since (unlike the
+// Slack-notify precedent's single call site) that would mean duplicating
+// the same context-and-goroutine boilerplate 6 times.
+func (h *FlagHandler) notifyMarketplace(eventType, flagKey, environment, actor string, metadata map[string]any) {
+	if h.marketplaceURL == "" {
+		return
+	}
+	body := map[string]any{
+		"event_type":  eventType,
+		"flag_key":    flagKey,
+		"environment": environment,
+		"actor":       actor,
+		"ts":          time.Now().UnixMilli(),
+	}
+	if metadata != nil {
+		body["metadata"] = metadata
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		h.logger.Warn("marketplace notify: marshal failed", zap.String("event_type", eventType), zap.Error(err))
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.marketplaceURL+"/api/v1/marketplace/events", bytes.NewReader(payload))
+		if err != nil {
+			h.logger.Warn("marketplace notify: build request failed", zap.String("event_type", eventType), zap.Error(err))
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := h.marketplaceHTTPClient.Do(req)
+		if err != nil {
+			h.logger.Warn("marketplace notify: request failed",
+				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Error(err))
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			h.logger.Warn("marketplace notify: non-2xx response",
+				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Int("status", resp.StatusCode))
+		}
+	}()
 }
 
 type Flag struct {
@@ -200,6 +287,7 @@ func (h *FlagHandler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, f.Key, "", actor, "flag_created", nil, &f, ipFromRequest(r))
+	h.notifyMarketplace(marketplaceEventFlagCreated, f.Key, "", actor, nil)
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -392,6 +480,20 @@ func (h *FlagHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 	h.publishEvent(r.Context(), env, event)
 	h.publishToStream(r.Context(), env, event)
 
+	// Only a real enabled/disabled TRANSITION is marketplace-notification-
+	// worthy -- req.Enabled unchanged (e.g. a pure rollout_pct tweak) has no
+	// corresponding EventType in marketplace's registry to map onto, and
+	// firing flag.enabled on every already-enabled flag's rollout-pct edit
+	// would misrepresent "the flag just turned on" for something that
+	// didn't happen.
+	if prev.Enabled != req.Enabled {
+		eventType := marketplaceEventFlagDisabled
+		if req.Enabled {
+			eventType = marketplaceEventFlagEnabled
+		}
+		h.notifyMarketplace(eventType, key, env, actor, map[string]any{"rollout_pct": req.RolloutPct})
+	}
+
 	writeJSON(w, http.StatusOK, curr)
 }
 
@@ -471,6 +573,7 @@ func (h *FlagHandler) KillSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	h.publishEvent(r.Context(), req.Environment, killEvent)
 	h.publishToStream(r.Context(), req.Environment, killEvent)
+	h.notifyMarketplace(marketplaceEventFlagKillSwitch, key, req.Environment, actor, map[string]any{"reason": req.Reason})
 
 	writeJSON(w, http.StatusOK, map[string]any{"killed": true, "flag_key": key, "environment": req.Environment})
 }
@@ -644,6 +747,8 @@ func (h *FlagHandler) RollbackStep(w http.ResponseWriter, r *http.Request) {
 	}
 	h.publishEvent(r.Context(), req.Environment, stepEvent)
 	h.publishToStream(r.Context(), req.Environment, stepEvent)
+	h.notifyMarketplace(marketplaceEventFlagRollback, key, req.Environment, actor,
+		map[string]any{"rollout_pct": targetExposure, "reason": req.Reason})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"flag_key": key, "environment": req.Environment,
@@ -799,6 +904,8 @@ func (h *FlagHandler) RecoveryStep(w http.ResponseWriter, r *http.Request) {
 	}
 	h.publishEvent(r.Context(), req.Environment, stepEvent)
 	h.publishToStream(r.Context(), req.Environment, stepEvent)
+	h.notifyMarketplace(marketplaceEventFlagRecovery, key, req.Environment, actor,
+		map[string]any{"rollout_pct": targetExposure, "reason": req.Reason})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"flag_key": key, "environment": req.Environment,
@@ -865,6 +972,14 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeAudit(r.Context(), projectID, key, "", actor, "flag_archived", nil, map[string]any{"tombstoned": true}, ipFromRequest(r))
+	// One notification per flag, not per environment (contrast the
+	// per-environment loop just below for intelligence's eviction, which
+	// intentionally repeats since its own state has no environment split):
+	// marketplace's registered integrations (Jira/Linear ticket creation,
+	// etc.) care that the flag was archived, not that it had N environment
+	// rows -- firing N identical archive events would create N duplicate
+	// tickets for one real event.
+	h.notifyMarketplace(marketplaceEventFlagArchived, key, "", actor, nil)
 
 	// INT-4: notify intelligence's anomaly detector to evict this flag's
 	// state (otherwise it leaks in-process forever, with no persistence or
