@@ -233,6 +233,30 @@ func (b *Broadcaster) reprocessClaimedMessage(ctx context.Context, streamKey, gr
 		return
 	}
 
+	// Same "kind" discriminator RunStreamConsumer's live path and
+	// BuildReplayFrames' reconnect-replay path both check -- found missing
+	// here by adversarial review of the prerequisites-streaming PR: without
+	// it, a prerequisites_updated entry that ever sits in the PEL past
+	// reclaimIdleThreshold (backpressure, a transient Redis hiccup, or a
+	// crash mid-processing) would silently unmarshal into a FlagEvent with
+	// every field at its zero value (enabled=false, rollout_pct=0,
+	// reason="") -- Go's json.Unmarshal ignores the payload's real
+	// "prerequisites" key and leaves FlagEvent's missing keys zeroed rather
+	// than erroring -- and get rebroadcast as a bogus "flag disabled,
+	// rollout 0%" event to every connected client.
+	if kind, _ := msg.Values["kind"].(string); kind == "prerequisites_updated" {
+		if isOwnGroup {
+			environment, _ := msg.Values["environment"].(string)
+			// No eventDeduper.claim here, matching RunStreamConsumer's own
+			// prerequisites_updated branch: this event kind is never
+			// dual-written to the legacy pub/sub path, so there is nothing
+			// to dedupe against.
+			b.hub.BroadcastRaw(environment, kind, []byte(payload), msg.ID)
+		}
+		AckStreamMessage(ctx, b.rdb, streamKey, group, msg.ID)
+		return
+	}
+
 	var event FlagEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		b.logger.Warn("dlq: reclaimed message still fails to unmarshal, leaving pending",

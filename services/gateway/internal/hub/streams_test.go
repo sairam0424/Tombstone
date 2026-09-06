@@ -204,3 +204,46 @@ func TestBuildReplayFrames_CarriesRealIDAndCorrectEventType(t *testing.T) {
 		t.Errorf("expected flag_key in replayed frame, got: %s", frame)
 	}
 }
+
+// TestBuildReplayFrames_RelaysPrerequisitesUpdatedVerbatim proves a
+// reconnecting client's XRANGE catch-up replays a prerequisites_updated
+// entry the same way RunStreamConsumer's live path does -- not silently
+// dropping it by trying (and failing, since it has no enabled/rollout_pct/
+// reason keys) to unmarshal it as a FlagEvent.
+func TestBuildReplayFrames_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
+	rdb := newTestRedis(t)
+	streamKey := StreamKey("production")
+	ctx := context.Background()
+
+	sentinelID := xaddEvent(t, rdb, streamKey, FlagEvent{FlagKey: "sentinel", Environment: "production"})
+
+	payload := `{"flag_key":"child-flag","environment":"production","prerequisites":[{"flag_key":"parent-flag","required_variation":"true","gate":true}],"ts":1700000000}`
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{
+			"kind":        "prerequisites_updated",
+			"event":       "prerequisites_updated",
+			"flag_key":    "child-flag",
+			"environment": "production",
+			"payload":     payload,
+		},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	msgs, ok, err := ReplaySince(ctx, rdb, streamKey, sentinelID)
+	if err != nil || !ok {
+		t.Fatalf("ReplaySince: ok=%v err=%v", ok, err)
+	}
+	frames := BuildReplayFrames(msgs)
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d", len(frames))
+	}
+	frame := string(frames[0])
+	if !strings.Contains(frame, "event: prerequisites_updated\n") {
+		t.Errorf("expected prerequisites_updated event type, got frame: %s", frame)
+	}
+	if !strings.Contains(frame, payload) {
+		t.Errorf("expected the raw payload verbatim, got frame: %s", frame)
+	}
+}
