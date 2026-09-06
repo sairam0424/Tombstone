@@ -61,6 +61,56 @@ public class ContractVectorsTest {
         return list.stream();
     }
 
+    /** target_list_vectors (Step 3 -- individual targeting) had zero
+     *  consumers in ANY SDK before this fix (Java/Ruby/.NET, TS core,
+     *  WASM, Edge) -- confirmed via a repo-wide grep for
+     *  target_list_vectors/TargetListVectors turning up no hits at all,
+     *  making it dead test data despite covering a real pipeline step
+     *  (docs/SDK_CONTRACT.md's Step 3). This is the first real consumer.
+     *
+     *  Asserts BOTH result.reason() and result.value() -- found by
+     *  adversarial review that checking reason alone leaves a real gap
+     *  for a bug that produces the right reason with the wrong value (or
+     *  vice versa) undetected.
+     *
+     *  Disclosed limitation (also found by adversarial review, not fully
+     *  fixable given vectors.json's own data shape): all 4 vectors use
+     *  rollout_pct=0, so the 3 "no match" cases fall through to Step 5's
+     *  identical FALLTHROUGH/false outcome whether Step 3's target-list
+     *  check runs correctly OR is deleted entirely -- a non-matching
+     *  user's expected outcome is indistinguishable from "Step 3 never
+     *  ran" by definition, no rollout_pct choice changes that. Only
+     *  "target-list-match" (the one expected_target_match=true vector)
+     *  can catch full deletion, since deleting Step 3 would make THIS
+     *  case incorrectly fall through instead of matching. The 3 "no
+     *  match" cases still have real value: they verify Step 3 does NOT
+     *  over-match (no false positives), a different, also-real property. */
+    @TestFactory
+    Stream<DynamicTest> targetListVectors() throws Exception {
+        var root = loadVectors();
+        var list = new ArrayList<DynamicTest>();
+        for (JsonNode v : root.get("target_list_vectors")) {
+            String id = v.get("id").asText();
+            List<String> targetList = new ArrayList<>();
+            v.get("target_list").forEach(t -> targetList.add(t.asText()));
+            String userId = v.get("user_id").asText();
+            boolean expectedMatch = v.get("expected_target_match").asBoolean();
+
+            list.add(DynamicTest.dynamicTest(id, () -> {
+                var flag = new FlagEnvironmentState(
+                    "id", "test-flag", "test", true, 0, "false", 0L,
+                    List.of(), List.of(), targetList, 1
+                );
+                var context = new EvaluationContext(userId, "", Map.of());
+                var result = ENGINE.evaluate(flag, context, false, "test-flag");
+                boolean matched = result.reason() == EvaluationReason.TARGET_MATCH;
+                assertEquals(expectedMatch, matched, "target-list vector mismatch (reason) for " + id);
+                assertEquals(expectedMatch, (Boolean) result.value(), "target-list vector mismatch (value) for " + id);
+            }));
+        }
+        return list.stream();
+    }
+
     @TestFactory
     Stream<DynamicTest> prerequisiteVectors() throws Exception {
         var root = loadVectors();
