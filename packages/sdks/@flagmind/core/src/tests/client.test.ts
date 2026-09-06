@@ -67,6 +67,7 @@ interface RawWireFlag {
 type Listener = (e: { data?: string }) => void;
 
 class FakeEventSource {
+  static instances: FakeEventSource[] = [];
   listeners: Record<string, Listener[]> = {};
   onerror: (() => void) | null = null;
   closed = false;
@@ -74,7 +75,9 @@ class FakeEventSource {
   constructor(
     public url: string,
     public opts?: unknown,
-  ) {}
+  ) {
+    FakeEventSource.instances.push(this);
+  }
 
   addEventListener(type: string, cb: Listener): void {
     (this.listeners[type] ??= []).push(cb);
@@ -82,6 +85,12 @@ class FakeEventSource {
 
   close(): void {
     this.closed = true;
+  }
+
+  // Test helper: dispatch a named SSE event to all registered listeners --
+  // mirrors streaming.test.ts's identical FakeEventSource.emit.
+  emit(type: string, data?: string): void {
+    for (const cb of this.listeners[type] ?? []) cb({ data });
   }
 }
 
@@ -111,6 +120,12 @@ interface RecordedCall {
 class FakeFetch {
   calls: RecordedCall[] = [];
   snapshotFlags: RawWireFlag[] = [];
+  // Overridable so tests can pin the snapshot's top-level ts to a known
+  // value -- needed to deterministically exercise cache.ts's
+  // applyPrerequisitesEvent staleness guard (ts comparisons against
+  // Date.now() would be flaky/unobservable otherwise). Defaults to Date.now()
+  // to match every pre-existing test in this file that doesn't care.
+  snapshotTs: number | undefined;
 
   fn = async (
     url: string,
@@ -134,7 +149,7 @@ class FakeFetch {
         environment: "production",
         flags: this.snapshotFlags,
         hash: "test-hash",
-        ts: Date.now(),
+        ts: this.snapshotTs ?? Date.now(),
       };
       return { ok: true, status: 200, json: async () => snapshot };
     }
@@ -686,6 +701,206 @@ describe("TombstoneClient — real-wire snapshot parsing", () => {
     const result = client.evaluate("my-flag", { userId: "u1" });
     assert.equal(result.reason, "TARGET_MATCH");
     assert.equal(result.value, true);
+
+    client.disconnect();
+  });
+});
+
+describe("TombstoneClient — live prerequisites_updated streaming (end-to-end)", () => {
+  /**
+   * End-to-end regression suite for the SDK-4 prerequisites-streaming
+   * follow-up: a live "prerequisites_updated" SSE frame (services/flag-api/
+   * internal/api/v1/prerequisites.go's PrerequisitesEvent, relayed verbatim
+   * by the gateway) must actually change what evaluate() returns for the
+   * affected flag, not just be parsed correctly in isolation (that's already
+   * covered by streaming.test.ts's own "SSEStreamClient — prerequisites_updated
+   * dispatch" suite, which stops at the callback boundary and never touches a
+   * real TombstoneClient/FlagCache).
+   *
+   * Also proactively closes the exact gap PR #235's adversarial review found
+   * in the Python SDK's equivalent test suite: a staleness test that only
+   * uses a "clearly older" ts cannot distinguish a correct `<` comparison
+   * (cache.ts's applyPrerequisitesEvent) from a buggy `<=` regression, since
+   * both reject that input identically. The "ts equal to the cached value"
+   * test below is the one that actually pins the `<` behavior down.
+   */
+  let fakeFetch: FakeFetch;
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    fakeFetch = new FakeFetch();
+    originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = fakeFetch.fn;
+    // Re-assert THIS file's own EventSource stub. mocha requires every test
+    // file before running any test, so whichever file loads LAST (e.g.
+    // streaming.test.ts, alphabetically after this one) wins the module-level
+    // `globalThis.EventSource = FakeEventSource` race for every test in every
+    // file, not just its own -- both stub classes are structurally identical
+    // (addEventListener/close/onerror/emit), so no prior test in this file
+    // noticed, but instances would otherwise land in the OTHER file's
+    // `FakeEventSource.instances` array, leaving this one permanently empty.
+    (globalThis as unknown as { EventSource: unknown }).EventSource =
+      FakeEventSource;
+    FakeEventSource.instances = [];
+  });
+
+  afterEach(() => {
+    (globalThis as unknown as { fetch: unknown }).fetch = originalFetch;
+  });
+
+  function snapshotWithParentAndChild(): void {
+    fakeFetch.snapshotFlags = [
+      {
+        flag_id: "1",
+        flag_key: "parent-flag",
+        environment: "production",
+        enabled: false, // disabled -> does NOT satisfy required_variation "true"
+        rollout_pct: 0,
+        safe_default: "false",
+        updated_at: 1,
+      },
+      {
+        flag_id: "2",
+        flag_key: "child-flag",
+        environment: "production",
+        enabled: true,
+        rollout_pct: 100,
+        safe_default: "false",
+        updated_at: 1,
+        // No prerequisites in the snapshot itself -- the live event is what
+        // introduces the gate, proving the update actually reaches the cache
+        // rather than the snapshot's own (absent) prerequisites happening to
+        // already produce the same outcome.
+      },
+    ];
+  }
+
+  it("a live prerequisites_updated event newer than the snapshot changes evaluate()'s outcome", async () => {
+    fakeFetch.snapshotTs = 1000;
+    snapshotWithParentAndChild();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    // Before the live event: child-flag has no prerequisites, so it evaluates
+    // by rollout alone.
+    const before = client.evaluate("child-flag", { userId: "u1" });
+    assert.equal(before.value, true);
+    assert.notEqual(before.reason, "PREREQUISITE_FAILED");
+
+    FakeEventSource.instances[0].emit(
+      "prerequisites_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        prerequisites: [
+          { flag_key: "parent-flag", required_variation: "true", gate: true },
+        ],
+        ts: 2000, // newer than the snapshot's ts=1000
+      }),
+    );
+
+    const after = client.evaluate("child-flag", { userId: "u1" });
+    assert.equal(
+      after.reason,
+      "PREREQUISITE_FAILED",
+      "the live event must actually be applied to the cache and change evaluate()'s outcome",
+    );
+    assert.equal(after.value, false);
+
+    client.disconnect();
+  });
+
+  it("an event OLDER than the currently-cached ts is rejected -- evaluate() stays unaffected", async () => {
+    fakeFetch.snapshotTs = 5000;
+    snapshotWithParentAndChild();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "prerequisites_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        prerequisites: [
+          { flag_key: "parent-flag", required_variation: "true", gate: true },
+        ],
+        ts: 3000, // OLDER than the snapshot's ts=5000 -- must be rejected
+      }),
+    );
+
+    const result = client.evaluate("child-flag", { userId: "u1" });
+    assert.notEqual(
+      result.reason,
+      "PREREQUISITE_FAILED",
+      "a stale out-of-order event must not overwrite the newer cached state",
+    );
+    assert.equal(result.value, true);
+
+    client.disconnect();
+  });
+
+  it("an event whose ts EQUALS the currently-cached ts IS applied -- pins down `<`, not `<=`", async () => {
+    /**
+     * The precise boundary case PR #235's review flagged as missing from the
+     * Python SDK's suite: cache.ts's applyPrerequisitesEvent rejects
+     * `ts < existing.prerequisitesUpdatedAt`, which means an event whose ts
+     * is EXACTLY EQUAL to the cached value must be treated as new-or-equal
+     * and applied. Using a "clearly older" ts alone (the test above) cannot
+     * distinguish this correct `<` from a buggy `<=` -- both reject a
+     * strictly-older event identically. Only an equal-ts input tells the two
+     * apart: `<=` would additionally (and wrongly) reject this one.
+     */
+    fakeFetch.snapshotTs = 5000;
+    snapshotWithParentAndChild();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "prerequisites_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        prerequisites: [
+          { flag_key: "parent-flag", required_variation: "true", gate: true },
+        ],
+        ts: 5000, // EQUAL to the snapshot's own ts=5000
+      }),
+    );
+
+    const result = client.evaluate("child-flag", { userId: "u1" });
+    assert.equal(
+      result.reason,
+      "PREREQUISITE_FAILED",
+      "an equal-ts event must be applied, not dropped as stale",
+    );
+    assert.equal(result.value, false);
+
+    client.disconnect();
+  });
+
+  it("an update for a flag the client has never seen is a no-op (nothing to merge into)", async () => {
+    fakeFetch.snapshotTs = 1000;
+    snapshotWithParentAndChild();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    assert.doesNotThrow(() =>
+      FakeEventSource.instances[0].emit(
+        "prerequisites_updated",
+        JSON.stringify({
+          flag_key: "never-configured-flag",
+          environment: "production",
+          prerequisites: [
+            { flag_key: "parent-flag", required_variation: "true" },
+          ],
+          ts: 9999,
+        }),
+      ),
+    );
+
+    // The unrelated, already-cached flag must be entirely unaffected.
+    const result = client.evaluate("child-flag", { userId: "u1" });
+    assert.notEqual(result.reason, "PREREQUISITE_FAILED");
 
     client.disconnect();
   });

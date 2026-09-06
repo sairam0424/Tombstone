@@ -57,6 +57,31 @@ export interface FlagEnvironmentState {
   targetingRules?: TargetingRule[];
   /** Prerequisite flags that must pass before this flag is served. */
   prerequisites?: FlagPrerequisite[];
+  /**
+   * Unix seconds these prerequisites were last known-good as of -- either
+   * the snapshot fetch that loaded them, or a live PrerequisitesUpdateEvent
+   * applied since. Lets an incoming live event be compared against what's
+   * already cached and rejected if it's older (see FlagCache.
+   * applyPrerequisitesEvent's own doc comment for why: services/flag-api/
+   * internal/api/v1/prerequisites.go's own PrerequisitesEvent doc comment
+   * discloses that concurrent AddPrerequisite/DeletePrerequisite calls on
+   * the same flag can have their events arrive out of real commit order
+   * under scheduling delays, and designed this Ts field specifically so
+   * SDKs could guard against it).
+   */
+  prerequisitesUpdatedAt?: number;
+}
+
+/**
+ * The payload of a live "prerequisites_updated" SSE event (services/
+ * flag-api/internal/api/v1/prerequisites.go's PrerequisitesEvent) --
+ * carries a flag's CURRENT FULL prerequisite list, not a delta.
+ */
+export interface PrerequisitesUpdateEvent {
+  flagKey: string;
+  environment: string;
+  prerequisites: FlagPrerequisite[];
+  ts: number;
 }
 
 export interface TargetingRule {
