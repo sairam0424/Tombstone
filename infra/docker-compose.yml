@@ -177,6 +177,11 @@ services:
       # it, matching what actually works.
       CONSUMER_BACKEND: redis
       TOMBSTONE_ENVIRONMENTS: production
+      # INT-6: dogfood case -- scans THIS repo for stale-flag code
+      # references via ast-rewriter's own /repo mount below, not a real
+      # multi-tenant customer-repo mechanism (not yet designed).
+      AST_REWRITER_URL: http://ast-rewriter:8085
+      AST_REWRITER_REPO_PATH: /repo
     ports:
       - "8083:8083"
     restart: unless-stopped
@@ -206,6 +211,12 @@ services:
     env_file: .env
     environment:
       PORT: "8085"
+    # INT-6: read-only mount of this repo's own root so scanner.
+    # ScanDirectory has something real to walk for the dogfood case --
+    # AST_REWRITER_REPO_PATH=/repo (intelligence's env, above) must match
+    # this mount point.
+    volumes:
+      - ../:/repo:ro
     ports:
       - "8085:8085"
     restart: unless-stopped
