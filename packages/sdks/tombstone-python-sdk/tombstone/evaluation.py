@@ -66,6 +66,46 @@ def _stringify_variation(value: object) -> str:
     return str(value)
 
 
+def _parse_safe_default(safe_default: object, fallback: object) -> object:
+    """Canonical OFF-path default: parse safe_default into the target type,
+    falling back to the CALLER's own default on any type mismatch. Matches
+    Java's EvaluationEngine.parseSafeDefault (documented there as "the
+    canonical model") and TypeScript's evaluation.ts parseSafeDefault exactly.
+
+    Before this fix, Step 1's OFF-path returned default_value unconditionally
+    and never consulted safe_default at all -- the only one of the 4 SDKs
+    that didn't. Dormant at the top level (every existing test's fixture
+    happened to set safe_default equal to its own default_value), but a real
+    divergence once _check_prerequisites' recursive evaluate() call means a
+    disabled DEPENDENCY's own configured safe_default -- not the caller's
+    hardcoded literal False -- determines whether a required_variation
+    comparison passes (found by adversarial review of this PR).
+
+    safe_default is typed as `object`, not `str`, throughout this codebase:
+    flag-api's real wire value is always a string (schema.sql: safe_default
+    TEXT NOT NULL DEFAULT 'false'), but this SDK's own dataclass defaults
+    and SSE event-merge fallbacks use a bare Python bool. Both are handled.
+    """
+    if isinstance(fallback, bool):
+        if isinstance(safe_default, bool):
+            return safe_default
+        if isinstance(safe_default, str):
+            return safe_default == "true"
+        return fallback
+    if isinstance(fallback, (int, float)):
+        if isinstance(safe_default, (int, float)):
+            return safe_default
+        if isinstance(safe_default, str):
+            try:
+                return float(safe_default)
+            except ValueError:
+                return fallback
+        return fallback
+    if isinstance(fallback, str):
+        return safe_default if isinstance(safe_default, str) else fallback
+    return fallback
+
+
 def _check_prerequisites(
     flag_state: FlagEnvironmentState,
     context: EvaluationContext,
@@ -205,7 +245,10 @@ def evaluate(
 
     if not flag_state.enabled:
         return EvaluationResult(
-            value=default_value, reason="OFF", from_cache=True, flag_key=flag_key
+            value=_parse_safe_default(flag_state.safe_default, default_value),
+            reason="OFF",
+            from_cache=True,
+            flag_key=flag_key,
         )
 
     # ── Step 2: Prerequisites ─────────────────────────────────────────────────

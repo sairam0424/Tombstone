@@ -291,11 +291,21 @@ def test_circular_prerequisite_does_not_recurse_infinitely():
     a = _flag("a", prerequisites=[{"flag_key": "b", "required_variation": "true"}])
     b = _flag("b", prerequisites=[{"flag_key": "a", "required_variation": "true"}])
     all_flags = {"a": a, "b": b}
-    # Should not raise RecursionError
+    # Traced precisely, not just "doesn't crash" (found by adversarial review
+    # of PR #229 -- the old `reason in (PREREQUISITE_FAILED, FALLTHROUGH,
+    # ERROR)` check accepts almost any non-crash outcome and would pass
+    # identically whether or not the wire-key fix this test file exists for
+    # is even applied, providing zero real regression coverage): evaluating
+    # b's prerequisite on a hits the seen_keys={"a","b"} cycle guard and is
+    # skipped (treated as satisfied) -- b's own prerequisites are otherwise
+    # empty of blockers, so b evaluates FALLTHROUGH=True at its 100% rollout;
+    # back in a's own check, that "true" matches a's required_variation, so a
+    # also proceeds to its own 100% rollout FALLTHROUGH=True.
     result = evaluate(
         a, EvaluationContext(user_id="u"), False, "a", all_flags=all_flags
     )
-    assert result.reason in ("PREREQUISITE_FAILED", "FALLTHROUGH", "ERROR")
+    assert result.reason == "FALLTHROUGH"
+    assert result.value is True
 
 
 # ── V-8: Soft prerequisite (gate=False) ─────────────────────────────────────
@@ -308,7 +318,9 @@ def test_soft_prerequisite_unmet_does_not_block_evaluation():
     child = _flag(
         "child",
         rollout_pct=100.0,
-        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": False}],
+        prerequisites=[
+            {"flag_key": "parent", "required_variation": "true", "gate": False}
+        ],
     )
     all_flags = {"parent": parent, "child": child}
     result = evaluate(
@@ -325,7 +337,9 @@ def test_hard_prerequisite_gate_true_unmet_blocks_evaluation():
     child = _flag(
         "child",
         rollout_pct=100.0,
-        prerequisites=[{"flag_key": "parent", "required_variation": "true", "gate": True}],
+        prerequisites=[
+            {"flag_key": "parent", "required_variation": "true", "gate": True}
+        ],
     )
     all_flags = {"parent": parent, "child": child}
     result = evaluate(
