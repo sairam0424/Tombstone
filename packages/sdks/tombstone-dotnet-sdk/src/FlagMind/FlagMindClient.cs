@@ -1,5 +1,12 @@
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+
+// Lets FlagMind.Tests exercise ParseSnapshotResponse/ParsePrerequisites
+// directly with hand-built JSON, without standing up a mock HTTP server --
+// mirrors the Java SDK's identical package-private-visibility rationale for
+// its own equivalent parseSnapshotResponse method.
+[assembly: InternalsVisibleTo("FlagMind.Tests")]
 
 namespace Tombstone;
 
@@ -51,7 +58,22 @@ public sealed class TombstoneClient : IDisposable
     {
         var state = _cache.Get(flagKey);
         var def = _defaults.TryGetValue(flagKey, out var d) && d is T t ? t : default!;
-        return _engine.Evaluate(state, context, def, flagKey);
+        // Passes a real flagLookup backed by _cache, NOT the omitted-param
+        // default used before -- EvaluationEngine.Evaluate defaults
+        // flagLookup to `_ => null` when omitted, documented there as being
+        // for "callers [who have] no snapshot access". This client DOES
+        // have snapshot access via _cache, but never threaded it through.
+        // Before FetchSnapshotAsync's own fix (populating real
+        // Prerequisites), Prerequisites was always empty and Step 2 never
+        // actually ran against real data, so a null-returning lookup was
+        // dead code from this call path specifically. Once Prerequisites
+        // are real, omitting flagLookup here would make ANY hard-gated
+        // prerequisite permanently PrerequisiteFailed regardless of the
+        // real dependency's state -- swapping "prerequisites silently
+        // ignored" for "every gated flag permanently blocked", which is
+        // worse. Found by adversarial review of the identical bug in the
+        // Java SDK's equivalent fix (PR #231), confirmed and fixed here too.
+        return _engine.Evaluate(state, context, def, flagKey, flagLookup: k => _cache.Get(k));
     }
 
     public bool IsEnabled(string flagKey, EvaluationContext context)
@@ -66,8 +88,25 @@ public sealed class TombstoneClient : IDisposable
         var resp = await _http.GetAsync(url, ct);
         if (!resp.IsSuccessStatusCode) return;
         var json = await resp.Content.ReadAsStringAsync(ct);
+        _cache.LoadSnapshot(ParseSnapshotResponse(json));
+    }
+
+    // Internal (not private) so a test in this assembly can exercise the
+    // real wire-parsing logic directly with a hand-built JSON string,
+    // without standing up a mock HTTP server.
+    //
+    // Before this fix, every FlagEnvironmentState built from a real
+    // snapshot never passed Prerequisites at all (defaulted to empty) and
+    // hardcoded UpdatedAt to 0L, regardless of what the wire actually
+    // sent -- this client's prerequisite gating never worked against a
+    // real backend at all (found while investigating SDK-4's
+    // prerequisites-streaming follow-up). flag-api's real snapshot
+    // response has no targeting_rules/target_list/hash_version fields
+    // today -- those stay empty/default 1, same as before.
+    internal static List<FlagEnvironmentState> ParseSnapshotResponse(string json)
+    {
         using var doc = JsonDocument.Parse(json);
-        var flags = doc.RootElement.GetProperty("flags").EnumerateArray()
+        return doc.RootElement.GetProperty("flags").EnumerateArray()
             .Select(f => new FlagEnvironmentState(
                 f.GetProperty("flag_id").GetString() ?? "",
                 f.GetProperty("flag_key").GetString() ?? "",
@@ -75,9 +114,29 @@ public sealed class TombstoneClient : IDisposable
                 f.GetProperty("enabled").GetBoolean(),
                 f.GetProperty("rollout_pct").GetInt32(),
                 f.GetProperty("safe_default").GetString() ?? "false",
-                0L
+                f.TryGetProperty("updated_at", out var ua) ? ua.GetInt64() : 0L,
+                Prerequisites: ParsePrerequisites(f)
             )).ToList();
-        _cache.LoadSnapshot(flags);
+    }
+
+    // flag-api's real wire shape (services/flag-api/internal/api/v1/
+    // environments.go's SnapshotPrerequisite): "flag_key" (NOT
+    // "prereq_flag_key" -- that's only flag_prerequisites' own DB column
+    // name, matching proto's ParentCondition message and every other SDK's
+    // own FlagPrerequisite type), plus "required_variation"/"gate". "gate"
+    // defaults to true (hard-blocking) when the wire omits it, matching
+    // flag-api's own AddPrerequisite default.
+    private static List<FlagPrerequisite> ParsePrerequisites(JsonElement flag)
+    {
+        if (!flag.TryGetProperty("prerequisites", out var raw) || raw.ValueKind != JsonValueKind.Array)
+            return new();
+        return raw.EnumerateArray()
+            .Select(p => new FlagPrerequisite(
+                p.TryGetProperty("flag_key", out var fk) ? fk.GetString() ?? "" : "",
+                p.TryGetProperty("required_variation", out var rv) ? rv.GetString() ?? "true" : "true",
+                !(p.TryGetProperty("gate", out var g) && g.ValueKind == JsonValueKind.False)
+            ))
+            .ToList();
     }
 
     private async Task RunSseListenerAsync(CancellationToken ct)
