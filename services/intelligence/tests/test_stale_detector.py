@@ -222,3 +222,34 @@ class TestRecentEvaluationCount:
         detector = _detector([_row(days_since_update=200.0)], redis_client=None)
         result = await detector.detect("project-a")
         assert result[0]["recent_evaluation_count"] == 0
+
+    def test_bucket_key_matches_go_query_escape_for_a_space(self):
+        """Regression test for a real bug found by adversarial review:
+        urllib.parse.quote(..., safe="") encodes a space as '%20', but Go's
+        url.QueryEscape (which circuit.EscapeKeyComponent wraps, and which
+        telemetry.Aggregator.persistTelemetryBucket actually uses to write
+        the real Redis key) encodes it as '+' -- a real, reachable
+        divergence since flags.key/environment have no character
+        restriction anywhere in flag-api. quote_plus matches exactly."""
+        key = _telemetry_bucket_key("checkout flag", "production", 12345)
+        assert key == "telemetry:checkout+flag:production:hour:12345"
+
+    @pytest.mark.asyncio
+    async def test_reads_real_traffic_for_a_flag_key_containing_a_space(self):
+        """End-to-end proof the fix works: a bucket written under the
+        SAME key format evaluator's Go code actually produces (space ->
+        '+') is correctly read back, for a flag key containing a space --
+        the exact scenario the encoding-mismatch bug silently broke."""
+        now_hour = int(__import__("time").time() // 3600)
+        buckets = {
+            "telemetry:checkout+flag:production:hour:%d" % now_hour: {
+                "total": 42,
+                "errors": 0,
+            },
+        }
+        detector = _detector(
+            [_row(key="checkout flag", days_since_update=200.0)],
+            redis_client=MockRedis(buckets),
+        )
+        result = await detector.detect("project-a")
+        assert result[0]["recent_evaluation_count"] == 42

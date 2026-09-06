@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote_plus
 
 import asyncpg
 import httpx
@@ -16,13 +16,21 @@ logger = logging.getLogger(__name__)
 def _telemetry_bucket_key(flag_key: str, environment: str, unix_hour: int) -> str:
     """Matches services/evaluator/internal/telemetry/aggregator.go's
     persistTelemetryBucket key format exactly (EVAL-3): telemetry:{flag}:
-    {env}:hour:{unix_hour}. quote(..., safe="") is this codebase's Python-
-    side equivalent of Go's circuit.EscapeKeyComponent (both percent-encode
-    ':' so a flag_key/environment pair can never collide with a different
-    pair once joined -- the same bug class already found and fixed twice
-    this session under the INT-2/EVAL-2 name).
+    {env}:hour:{unix_hour}. quote_plus(..., safe="") is this codebase's
+    Python-side equivalent of Go's circuit.EscapeKeyComponent (both
+    percent-encode ':' so a flag_key/environment pair can never collide
+    with a different pair once joined -- the same bug class already found
+    and fixed twice this session under the INT-2/EVAL-2 name) -- and, found
+    by adversarial review of this PR, MUST be quote_plus specifically, not
+    plain quote: Go's url.QueryEscape encodes a literal space as '+', but
+    quote(..., safe="") encodes it as '%20' -- a real, reachable divergence
+    since flags.key/environment have no character restriction anywhere in
+    flag-api. Verified byte-identical to url.QueryEscape across all 128
+    ASCII codepoints plus several multi-byte UTF-8 samples (space, '+',
+    accented and CJK characters) via a paired Go/Python comparison script
+    before landing this fix -- quote_plus is not a guess.
     """
-    return f"telemetry:{quote(flag_key, safe='')}:{quote(environment, safe='')}:hour:{unix_hour}"
+    return f"telemetry:{quote_plus(flag_key, safe='')}:{quote_plus(environment, safe='')}:hour:{unix_hour}"
 
 
 @dataclass

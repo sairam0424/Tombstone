@@ -20,14 +20,14 @@ type CallSite struct {
 
 // extToLanguage maps file extensions to language names.
 var extToLanguage = map[string]string{
-	".ts":  "typescript",
-	".tsx": "typescript",
-	".js":  "javascript",
-	".jsx": "javascript",
-	".py":  "python",
-	".go":  "go",
+	".ts":   "typescript",
+	".tsx":  "typescript",
+	".js":   "javascript",
+	".jsx":  "javascript",
+	".py":   "python",
+	".go":   "go",
 	".java": "java",
-	".rb":  "ruby",
+	".rb":   "ruby",
 }
 
 // dirsToSkip contains directory names that should never be walked.
@@ -80,7 +80,24 @@ var languagePatterns = map[string][]*regexp.Regexp{
 
 // ScanDirectory walks dir recursively, skips noisy dirs, and returns all call
 // sites that reference flagKey. If flagKey is empty, all flag calls are returned.
+//
+// Stats dir up front and errors if it's missing/inaccessible, mirroring
+// rewriter.GenerateDiffPreview's identical check -- without this,
+// filepath.WalkDir's own callback below (which returns nil on ANY error,
+// including the root-level error WalkDir passes when dir itself doesn't
+// exist) makes a missing/misconfigured dir indistinguishable from a real
+// empty-result scan: both return (nil sites, nil error). A caller relying
+// on "zero call sites" as a verified safety signal (INT-6's stale-flag
+// ARCHIVE gate) must never receive that misleading zero for a directory
+// that was never actually scanned (found by adversarial review of the
+// PR that added that first real caller).
 func ScanDirectory(dir, flagKey string) ([]CallSite, error) {
+	if info, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("repo path %q not accessible: %w", dir, err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("repo path %q is not a directory", dir)
+	}
+
 	var sites []CallSite
 
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
