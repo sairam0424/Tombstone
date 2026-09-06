@@ -4,6 +4,23 @@ import io.tombstone.types.FlagEnvironmentState;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
+// Disclosed, pre-existing, NOT introduced or fixed by the SDK-4
+// cache-wiping fix (confirmed via git diff -- this get/build/set skeleton
+// is byte-identical before and after): applyEvent and loadSnapshot both
+// do a non-atomic read-modify-write on `cache` (get() -> build a new map
+// from that snapshot -> set()) instead of a CAS loop. Two concurrent
+// mutations -- e.g. the SSE listener's applyEvent racing a lag-recovery
+// loadSnapshot -- can both read the same `current`, and whichever set()
+// lands second silently discards the OTHER's entire map, not just the
+// key it touched. Concretely: if a lag-triggered loadSnapshot recovers
+// several dropped flag updates but a concurrent applyEvent (reading the
+// stale pre-recovery snapshot) sets() after it, the whole recovered
+// snapshot is clobbered -- defeating the very lag-recovery mechanism
+// this exists for. Found by adversarial review of the SDK-4 cache-
+// wiping PR; left unfixed here since it's a separate, latent concurrency
+// bug, not something that PR's own change touches or makes newly
+// reachable -- a real fix needs a CAS loop (AtomicReference.updateAndGet
+// or compareAndSet) and is its own, independent piece of work.
 public class FlagCache {
     private final AtomicReference<Map<String, FlagEnvironmentState>> cache =
         new AtomicReference<>(Collections.emptyMap());

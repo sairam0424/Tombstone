@@ -136,3 +136,51 @@ def test_apply_event_for_a_never_before_seen_flag_defaults_to_empty():
     assert state.targeting_rules == []
     assert state.prerequisites == []
     client.close()
+
+
+def test_apply_event_field_omitted_and_explicit_null_both_fall_back():
+    """Regression test for a real gap found by adversarial review:
+    event.get(key, fallback) only falls back when a key is ABSENT -- a key
+    present with an explicit JSON null returns None itself, not the
+    fallback. For this merge, "the event doesn't tell us this field" and
+    "the event explicitly says null" must mean the same thing: fall back
+    to whatever's already cached, never overwrite a real cached value
+    with a bare None. flag-api never sends an explicit null for these
+    fields today (confirmed: every producer uses non-pointer Go types),
+    but the merge helper must not conflate "provided a real value" with
+    "produced None for any reason" once some future event schema does."""
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=50.0,
+        safe_default=False,
+        environment="prod",
+        hash_version=3,
+        target_list=["user1"],
+    )
+
+    # Key genuinely omitted -- falls back to the existing cached value.
+    client._apply_event(
+        json.dumps({"flag_key": "my-flag", "enabled": True, "rollout_pct": 75})
+    )
+    updated = client._cache["my-flag"]
+    assert updated.hash_version == 3
+    assert updated.target_list == ["user1"]
+
+    # Key explicitly present with null -- ALSO falls back, not a bare None.
+    client._apply_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "enabled": True,
+                "rollout_pct": 80,
+                "hash_version": None,
+                "target_list": None,
+            }
+        )
+    )
+    updated = client._cache["my-flag"]
+    assert updated.hash_version == 3
+    assert updated.target_list == ["user1"]
+    client.close()
