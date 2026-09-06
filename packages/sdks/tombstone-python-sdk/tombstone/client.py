@@ -170,6 +170,11 @@ class TombstoneClient:
                     prerequisites=raw.get("prerequisites", []),
                     hash_version=raw.get("hash_version", 1),
                     target_list=raw.get("target_list", []),
+                    # The snapshot's own ts is the correct "known-good as of"
+                    # timestamp for these prerequisites -- any live
+                    # prerequisites_updated event older than this snapshot
+                    # fetch is necessarily already stale/superseded.
+                    prerequisites_updated_at=payload.get("ts", 0),
                 )
             except Exception as exc:
                 logger.warning(
@@ -203,6 +208,11 @@ class TombstoneClient:
         directly to the cache. A "lag" frame is written by the gateway right
         before it DROPS a flag update for a client that fell behind, so it
         triggers a debounced full-snapshot refetch to recover the drop.
+        "prerequisites_updated" carries a flag's full, current prerequisite
+        list (services/flag-api/internal/api/v1/prerequisites.go) and is
+        applied separately from _apply_event, since its payload shape has
+        no enabled/rollout_pct/reason keys at all -- routing it through
+        _apply_event would silently zero those fields out.
         """
         event_type = "message"
         for line in lines:
@@ -213,6 +223,8 @@ class TombstoneClient:
                 if payload:
                     if event_type == "lag":
                         self._schedule_snapshot_refetch()
+                    elif event_type == "prerequisites_updated":
+                        self._apply_prerequisites_event(payload)
                     else:
                         self._apply_event(payload)
                 # Reset for the next frame — an event type applies only to the
@@ -297,9 +309,82 @@ class TombstoneClient:
                     ),
                     targeting_rules=existing.targeting_rules if existing else [],
                     prerequisites=existing.prerequisites if existing else [],
+                    prerequisites_updated_at=existing.prerequisites_updated_at
+                    if existing
+                    else 0,
                 )
                 new_cache = dict(self._cache)
                 new_cache[flag_key] = state
                 self._cache = new_cache
         except Exception as exc:
             logger.warning("Tombstone: failed to apply SSE event: %s", exc)
+
+    def _apply_prerequisites_event(self, raw_json: str) -> None:
+        """Apply a live "prerequisites_updated" SSE event (services/flag-api/
+        internal/api/v1/prerequisites.go's PrerequisitesEvent):
+        {"flag_key", "environment", "prerequisites", "ts"}.
+
+        Full replacement, not a delta -- matches PrerequisitesEvent's own
+        documented design (it always carries the flag's CURRENT FULL
+        prerequisite list, not an add/remove delta).
+
+        Guards against a disclosed, real ordering hazard (PrerequisitesEvent's
+        own doc comment): publishPrerequisitesUpdated's SELECT-then-XAdd has
+        no per-flag lock, so two concurrent AddPrerequisite/DeletePrerequisite
+        calls on the SAME flag can have their events arrive here in an order
+        that does not match their real DB-commit order, if an earlier
+        commit's own publish step is delayed past a later commit's. Rejecting
+        an incoming event whose ts is OLDER than what's already cached
+        (rather than unconditionally overwriting on arrival order) closes
+        that gap at the point where staleness actually matters -- the next
+        full snapshot refetch (reconnect, or a "lag" event) still eventually
+        corrects a rare, permanently-stuck case if this client's own cache
+        somehow never receives the true final event at all.
+        """
+        import json
+
+        try:
+            event = json.loads(raw_json)
+            flag_key = event.get("flag_key")
+            if not flag_key:
+                return
+            ts = int(event.get("ts", 0))
+
+            with self._lock:
+                existing = self._cache.get(flag_key)
+                if existing is None:
+                    # Nothing cached for this flag at all (e.g. it was
+                    # created after this client's last snapshot fetch) --
+                    # the next full snapshot refetch will pick it up
+                    # correctly; there's no existing entry to merge a
+                    # partial prerequisites-only update into.
+                    return
+                if ts < existing.prerequisites_updated_at:
+                    logger.debug(
+                        "Tombstone: dropping stale prerequisites_updated for '%s' "
+                        "(event ts=%s older than cached ts=%s)",
+                        flag_key,
+                        ts,
+                        existing.prerequisites_updated_at,
+                    )
+                    return
+
+                updated = FlagEnvironmentState(
+                    flag_key=existing.flag_key,
+                    enabled=existing.enabled,
+                    rollout_pct=existing.rollout_pct,
+                    safe_default=existing.safe_default,
+                    environment=existing.environment,
+                    targeting_rules=existing.targeting_rules,
+                    prerequisites=event.get("prerequisites", []),
+                    hash_version=existing.hash_version,
+                    target_list=existing.target_list,
+                    prerequisites_updated_at=ts,
+                )
+                new_cache = dict(self._cache)
+                new_cache[flag_key] = updated
+                self._cache = new_cache
+        except Exception as exc:
+            logger.warning(
+                "Tombstone: failed to apply prerequisites_updated event: %s", exc
+            )
