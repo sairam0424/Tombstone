@@ -262,4 +262,45 @@ public class FlagCachePrerequisitesTests
 
         Assert.Equal(222L, cache.Get("child-flag")!.UpdatedAt);
     }
+
+    [Fact]
+    public async Task ConcurrentLoadSnapshotAndApplyPrerequisitesEvent_DoNotCorruptOrLoseState()
+    {
+        // Regression test for the tear found by adversarial review of PR
+        // #243: with _cache and _prerequisitesFromLiveEvent as two SEPARATE
+        // volatile fields, a real thread interleaving between the two writes
+        // could let a concurrent reader observe them in a mutually
+        // inconsistent combination. Now that both are folded into one
+        // CacheState published via a single volatile write, any read of
+        // _state always sees an internally consistent triple.
+        //
+        // Deliberately does NOT assert a specific winning ts or specific
+        // winning source (live event vs. snapshot): the separate,
+        // pre-existing, disclosed "lost update" race (two concurrent writers
+        // both reading the same stale _state, whichever write lands last
+        // wins outright) is NOT fixed by this change, so under adversarial
+        // scheduling any racing write could legitimately be the final one.
+        // What must ALWAYS hold, regardless of scheduling, is that the final
+        // state is a single, internally-consistent update -- never a
+        // corrupted/torn mix of a partially-applied Cache write with a
+        // mismatched PrerequisitesFromLiveEvent write.
+        var cache = new FlagCache();
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("initial-parent") }) }, 1000);
+
+        var tasks = new List<Task>();
+        for (var i = 0; i < 20; i++)
+        {
+            var n = i;
+            tasks.Add(Task.Run(() => cache.LoadSnapshot(
+                new[] { Flag("child-flag", prerequisites: new() { Prereq($"snap-parent-{n}") }) }, 2000 + n)));
+            tasks.Add(Task.Run(() => cache.ApplyPrerequisitesEvent(
+                "child-flag", new() { Prereq($"live-parent-{n}") }, 3000 + n)));
+        }
+        await Task.WhenAll(tasks);
+
+        var finalState = cache.Get("child-flag");
+        Assert.NotNull(finalState);
+        Assert.NotNull(finalState!.Prerequisites);
+        Assert.Equal(1, finalState.Prerequisites.Count);
+    }
 }
