@@ -9,6 +9,20 @@ module Tombstone
       # snapshot ts (Time.now.to_i at response generation) will never be
       # this low, so the very first load_snapshot call always applies.
       @last_snapshot_ts = nil
+      # Tracks which flag keys' CURRENT prerequisites/prerequisites_updated_at
+      # came from a live prerequisites_updated event (true) rather than a
+      # snapshot load (false/absent). A tied ts alone cannot distinguish "a
+      # live event that must win a tie against a slower, still-in-flight
+      # snapshot" from "two DIFFERENT snapshots that happen to share
+      # flag-api's coarse 1-second-resolution ts, where the second (newer
+      # LOAD, regardless of ts) must still win" -- without this,
+      # load_snapshot's own >= tie-break would incorrectly freeze
+      # prerequisites on the FIRST of two same-ts snapshots forever. This
+      # protection is ONE-SHOT: load_snapshot always resets this to false
+      # after evaluating it (see load_snapshot's own comment for why
+      # re-propagating true would make the protection "sticky" and veto a
+      # later, independent snapshot too).
+      @prerequisites_from_live_event = {}
     end
 
     # flag-api's snapshot ts is simply the response-generation wall-clock
@@ -24,6 +38,7 @@ module Tombstone
       @lock.synchronize do
         return if @last_snapshot_ts && snapshot_ts < @last_snapshot_ts
 
+        next_from_live_event = {}
         new_cache = flags.each_with_object({}) do |f, h|
           existing = @cache[f.flag_key]
           # A live prerequisites_updated event may have already advanced
@@ -46,7 +61,16 @@ module Tombstone
           # so this preservation check must treat the SAME tie as "fresh
           # enough to keep", or the two guards disagree on who wins a tie
           # and this one silently loses.
-          if existing && existing.prerequisites_updated_at >= snapshot_ts
+          #
+          # Also requires @prerequisites_from_live_event to be true: without
+          # it, a SECOND snapshot sharing the exact same ts as a FIRST
+          # snapshot (no live event involved at all) would incorrectly take
+          # this same "preserve" branch and freeze prerequisites on the
+          # first snapshot's value forever.
+          keep_live = existing &&
+                      @prerequisites_from_live_event[f.flag_key] &&
+                      existing.prerequisites_updated_at >= snapshot_ts
+          if keep_live
             h[f.flag_key] = f.dup.tap do |s|
               s.prerequisites = existing.prerequisites
               s.prerequisites_updated_at = existing.prerequisites_updated_at
@@ -54,9 +78,21 @@ module Tombstone
           else
             h[f.flag_key] = f.dup.tap { |s| s.prerequisites_updated_at = snapshot_ts }.freeze
           end
+          # ONE-SHOT consumption, always false here (never keep_live): this
+          # load_snapshot call has now fully resolved the race between the
+          # live event and ITS OWN specific in-flight snapshot. Re-
+          # propagating true would make the protection "sticky", vetoing a
+          # later, independent snapshot that merely happens to tie the same
+          # coarse-resolution second too. Residual, accepted limitation: two
+          # snapshot fetches that were BOTH already in flight when the SAME
+          # live event fired will only have the first-arriving one
+          # correctly blocked; solving that fully would require a signal
+          # finer than flag-api's 1-second-resolution wall-clock ts.
+          next_from_live_event[f.flag_key] = false
         end.freeze
 
         @cache = new_cache
+        @prerequisites_from_live_event = next_from_live_event
         @last_snapshot_ts = snapshot_ts
       end
     end
@@ -101,6 +137,12 @@ module Tombstone
           s.prerequisites_updated_at = ts
         end.freeze
         @cache = @cache.merge(flag_key => updated).freeze
+        # Marks this flag's prerequisites as LIVE-sourced -- see
+        # @prerequisites_from_live_event's own comment for why load_snapshot
+        # needs this distinction, not just a ts comparison, to decide
+        # whether a tied-or-older incoming snapshot should be allowed to
+        # overwrite it.
+        @prerequisites_from_live_event = @prerequisites_from_live_event.merge(flag_key => true)
       end
     end
 
