@@ -123,7 +123,8 @@ public sealed class TombstoneClient : IDisposable
                 f.GetProperty("rollout_pct").GetInt32(),
                 f.GetProperty("safe_default").GetString() ?? "false",
                 f.TryGetProperty("updated_at", out var ua) ? ua.GetInt64() : 0L,
-                Prerequisites: ParsePrerequisites(f)
+                Prerequisites: ParsePrerequisites(f),
+                TargetingRules: ParseTargetingRules(f)
             )).ToList();
         return (flags, ts);
     }
@@ -140,13 +141,120 @@ public sealed class TombstoneClient : IDisposable
         if (!flag.TryGetProperty("prerequisites", out var raw) || raw.ValueKind != JsonValueKind.Array)
             return new();
         return raw.EnumerateArray()
+            .Where(p => p.ValueKind == JsonValueKind.Object)
             .Select(p => new FlagPrerequisite(
-                p.TryGetProperty("flag_key", out var fk) ? fk.GetString() ?? "" : "",
-                p.TryGetProperty("required_variation", out var rv) ? rv.GetString() ?? "true" : "true",
+                GetStringOrDefault(p, "flag_key", ""),
+                GetStringOrDefault(p, "required_variation", "true"),
                 !(p.TryGetProperty("gate", out var g) && g.ValueKind == JsonValueKind.False)
             ))
             .ToList();
     }
+
+    // JsonElement.GetString() throws InvalidOperationException for any
+    // ValueKind other than String/Null -- a wire row whose field is a
+    // different JSON type (e.g. a numeric "id") would otherwise crash the
+    // WHOLE snapshot parse. Unlike the live-event handlers (ApplyEvent/
+    // ApplyPrerequisitesEvent/ApplyTargetingRulesEvent), which already
+    // swallow any exception via a bare catch, this parsing runs from
+    // ParseSnapshotResponse -> FetchSnapshotAsync -> ConnectAsync with NO
+    // try/catch anywhere in that call chain -- one malformed field on the
+    // snapshot endpoint would otherwise propagate out of the public
+    // ConnectAsync API and prevent the client from ever connecting at all.
+    // Found by adversarial review of PR #249.
+    private static string GetStringOrDefault(JsonElement obj, string prop, string fallback) =>
+        obj.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? fallback
+            : fallback;
+
+    // Same reasoning as GetStringOrDefault -- JsonElement.GetInt32() throws
+    // for a non-Number ValueKind, and even a real Number can throw
+    // (FormatException) if it doesn't fit Int32 or has a fractional part.
+    // TryGetInt32 fails gracefully instead of throwing for either case.
+    private static int GetInt32OrDefault(JsonElement obj, string prop, int fallback) =>
+        obj.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)
+            ? i
+            : fallback;
+
+    // flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
+    // targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
+    // "variation"/"priority" -- ONE flat condition per rule row. This SDK's
+    // own TargetingRule model (mirroring Python/Java/Ruby's GrowthBook-style
+    // design: multiple AND-combined conditions per rule + per-rule rollout
+    // sub-bucketing) predates the real backend format and doesn't match it
+    // 1:1 -- adapted here into a single-element conditions list, with
+    // RolloutPct fixed at 100 (there is no per-rule rollout concept on the
+    // backend; 100 means "always apply once matched"), mirroring the Java/
+    // Ruby SDKs' identical ParseTargetingRules adapter (PRs #247/#248).
+    private static List<TargetingRule> ParseTargetingRules(JsonElement flag)
+    {
+        if (!flag.TryGetProperty("targeting_rules", out var raw) || raw.ValueKind != JsonValueKind.Array)
+            return new();
+        var result = new List<TargetingRule>();
+        foreach (var r in raw.EnumerateArray())
+        {
+            if (r.ValueKind != JsonValueKind.Object) continue;
+            var values = r.TryGetProperty("values", out var v) && v.ValueKind == JsonValueKind.Array
+                ? v.EnumerateArray().Select(StringifyWireValue).ToList()
+                : new List<string>();
+            var condition = new PropertyCondition(
+                GetStringOrDefault(r, "attribute", ""),
+                GetStringOrDefault(r, "operator", ""),
+                values
+            );
+            result.Add(new TargetingRule(
+                GetStringOrDefault(r, "id", ""),
+                new List<PropertyCondition> { condition },
+                100.0,
+                GetStringOrDefault(r, "variation", ""),
+                GetInt32OrDefault(r, "priority", 0)
+            ));
+        }
+        return result;
+    }
+
+    // A JSON number that happens to be a whole value (e.g. flag-api's JSONB
+    // "values" column round-tripping 21.0) must render as "21", not "21.0"
+    // -- RuleMatcher's Eq/In/Neq/Nin operators compare via plain string
+    // equality against EvaluationContext.Attrs, and a real caller's own
+    // attribute is far more likely to be a plain int (21) or a bare numeric
+    // string ("21") than "21.0", so "21.0" would silently fail to
+    // match/exclude a value it should. Numeric operators that go through
+    // double.TryParse (Gt/Gte/Lt/Lte) are unaffected either way. The
+    // identical .ToString() coercion gap was found by adversarial review of
+    // the Ruby SDK's own equivalent adapter (PR #248); fixed here
+    // proactively.
+    private static string StringifyWireValue(JsonElement v) => v.ValueKind switch
+    {
+        JsonValueKind.Null => "",
+        JsonValueKind.Number => StringifyNumber(v),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        JsonValueKind.String => v.GetString() ?? "",
+        _ => v.GetRawText(),
+    };
+
+    // Operates on the number's own RAW TEXT rather than round-tripping
+    // through double/long -- an EARLIER version of this method did
+    // `((long)(double)v)`, which (a) is an UNCHECKED C# numeric conversion
+    // that silently produces a platform-dependent garbage value (observed
+    // as long.MinValue) for any value outside Int64's ~9.2e18 range instead
+    // of throwing, and (b) loses precision for any whole number above 2^53
+    // (IEEE-754 double's mantissa limit) even when it DOES fit in Int64 --
+    // e.g. 9007199254740993 silently became 9007199254740992. Both found by
+    // adversarial review of PR #249. Operating on GetRawText() directly
+    // sidesteps both: a plain integer literal of any size renders verbatim
+    // (exact digits, no cast, no range limit), and a whole-number-valued
+    // float (e.g. wire "21.0") has its trailing zero fraction stripped via
+    // plain string slicing, never a double roundtrip.
+    private static string StringifyNumber(JsonElement v)
+    {
+        var raw = v.GetRawText();
+        var dot = raw.IndexOf('.');
+        if (dot < 0 || raw.IndexOfAny(ExponentChars) >= 0) return raw;
+        return raw.AsSpan(dot + 1).Trim('0').Length == 0 ? raw[..dot] : raw;
+    }
+
+    private static readonly char[] ExponentChars = { 'e', 'E' };
 
     private async Task RunSseListenerAsync(CancellationToken ct)
     {
@@ -196,6 +304,16 @@ public sealed class TombstoneClient : IDisposable
                             // a flag that was never actually disabled.
                             ApplyPrerequisitesEvent(line[5..].Trim());
                         }
+                        else if (eventType == "targeting_rules_updated")
+                        {
+                            // services/flag-api/internal/api/v1/targeting_rules.go's
+                            // TargetingRulesEvent -- mirrors
+                            // ApplyPrerequisitesEvent exactly, for the same
+                            // reason (a distinct payload shape from a real
+                            // flag event, so it gets its own handler rather
+                            // than being routed through ApplyEvent).
+                            ApplyTargetingRulesEvent(line[5..].Trim());
+                        }
                         else
                         {
                             ApplyEvent(line[5..].Trim());
@@ -234,6 +352,20 @@ public sealed class TombstoneClient : IDisposable
             if (string.IsNullOrEmpty(flagKey)) return;
             var ts = r.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
             _cache.ApplyPrerequisitesEvent(flagKey, ParsePrerequisites(r), ts);
+        }
+        catch { /* malformed event — ignore */ }
+    }
+
+    private void ApplyTargetingRulesEvent(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            var flagKey = r.TryGetProperty("flag_key", out var fk) ? fk.GetString() : null;
+            if (string.IsNullOrEmpty(flagKey)) return;
+            var ts = r.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
+            _cache.ApplyTargetingRulesEvent(flagKey, ParseTargetingRules(r), ts);
         }
         catch { /* malformed event — ignore */ }
     }

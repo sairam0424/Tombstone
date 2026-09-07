@@ -31,14 +31,37 @@ public static class RuleMatcher
                 $"Attribute '{condition.Attribute}' not present in evaluation context");
 
         var attrVal = raw.ToString() ?? "";
+        var rawOp = condition.Operator.ToLowerInvariant();
         var op = NormalizeOperator(condition.Operator);
         var values = condition.Values;
-        var isGeo = GeoAttributes.Contains(condition.Attribute);
+        // isGeo is true whenever EITHER the attribute is a recognized geo
+        // path OR the operator itself declares geo semantics (GEO_COUNTRY/
+        // GEO_REGION) -- checking the attribute name ALONE would mean a rule
+        // using a non-canonical attribute (e.g. "country" instead of
+        // "geo.country") with a real GEO_COUNTRY operator silently falls
+        // back to case-SENSITIVE matching, even though nothing (backend or
+        // SDK) validates that operator=GEO_COUNTRY implies
+        // attribute=="geo.country". Found and fixed identically in the
+        // Java/Ruby SDKs' own EvaluateCondition (PRs #247/#248); checked
+        // here proactively.
+        var isGeo = GeoAttributes.Contains(condition.Attribute) ||
+            rawOp is "geo_country" or "geo_region";
 
         bool result = op switch
         {
             "eq" or "in" => isGeo ? ContainsIgnoreCase(values, attrVal) : values.Contains(attrVal),
-            "neq" or "nin" => isGeo ? !ContainsIgnoreCase(values, attrVal) : !values.Contains(attrVal),
+            // An EMPTY values list must never match "neq"/"nin":
+            // !values.Contains(x) on an empty list is vacuously true (there
+            // is nothing to find, so "not found" is trivially true), which
+            // would make a rule with an empty/missing "values" list match
+            // EVERY context unconditionally -- the opposite of "no
+            // exclusions configured, so exclude nothing". Same bug class
+            // found and fixed in the TypeScript/Java/Ruby SDKs' own NOT_IN/
+            // "neq"/"nin" branches (PRs #246/#247/#248); fixed here
+            // proactively per those findings' own explicit note that the
+            // remaining SDKs likely share it.
+            "neq" or "nin" => values.Count > 0 &&
+                (isGeo ? !ContainsIgnoreCase(values, attrVal) : !values.Contains(attrVal)),
             "contains" => AnyContainsIgnoreCase(values, attrVal),
             "startswith" => AnyStartsWithIgnoreCase(values, attrVal),
             "endswith" => AnyEndsWithIgnoreCase(values, attrVal),
@@ -47,6 +70,18 @@ public static class RuleMatcher
                 => EvaluateSemver(op, attrVal, values, condition.Attribute),
             "date_before" or "date_after"
                 => EvaluateDate(op, attrVal, values, condition.Attribute),
+            // docs/SDK_CONTRACT.md:32 -- REGEX is declared (a real, distinct
+            // operator value in flag-api's targeting_rules.operator CHECK
+            // constraint) but deliberately NOT IMPLEMENTED in this release,
+            // across all 5 SDKs (parity matrix: "No" for every language) --
+            // matching TypeScript's own default:false behavior. Returning a
+            // definite false (not throwing) matters specifically for
+            // Negate=true: a thrown exception would skip the whole rule
+            // regardless of Negate, while the contract's literal
+            // "false, negated -> true" semantics require a definite result
+            // here. Does NOT implement real regex matching, which stays
+            // deliberately deferred ("Future work") for cross-SDK parity.
+            "regex" => false,
             _ => throw new InconclusiveMatchException($"Unknown operator: '{op}'"),
         };
 
@@ -61,6 +96,19 @@ public static class RuleMatcher
             "not_in" => "nin",
             "prefix" => "startswith",
             "suffix" => "endswith",
+            // flag-api's targeting_rules.operator CHECK constraint
+            // (schema.sql) has GEO_COUNTRY/GEO_REGION as real, distinct
+            // operator VALUES (not just an attribute-name convention) --
+            // without this mapping, a targeting rule using either would hit
+            // the switch's default branch and throw
+            // InconclusiveMatchException on every evaluation, silently
+            // never matching for any user. Mapped to "in" so it falls into
+            // the existing "eq"/"in" branch, whose isGeo case-insensitive
+            // comparison already implements the real geo-matching semantics
+            // correctly. Found while wiring the real backend wire format
+            // into this SDK for the first time -- the identical gap the
+            // Java/Ruby SDKs' own NormalizeOperator needed (PRs #247/#248).
+            "geo_country" or "geo_region" => "in",
             _ => op,
         };
     }
