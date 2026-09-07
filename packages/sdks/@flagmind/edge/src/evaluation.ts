@@ -2,7 +2,26 @@ import type {
   EvaluationContext,
   EvaluationResult,
   FlagEnvironmentState,
+  FlagPrerequisite,
 } from "./types.js";
+
+/**
+ * Lookup capability for resolving a prerequisite flag's own state during
+ * recursive prerequisite checking. `EdgeFlagClient` builds this from the
+ * same snapshot it's already loaded — there is no extra fetch per
+ * prerequisite. Optional on `evaluate()` itself: a direct low-level caller
+ * that passes no cache simply gets no prerequisite enforcement (permissive,
+ * matching this function's pre-prerequisites behavior exactly).
+ */
+export interface FlagLookup {
+  get(flagKey: string): FlagEnvironmentState | undefined;
+}
+
+// Mirrors @tombstone/core's EvaluationEngine.MAX_PREREQ_DEPTH — bounds a
+// cyclic or very deep prerequisite chain so evaluate() can never recurse
+// unboundedly. Once the cap is hit, prerequisite enforcement is simply
+// skipped for that flag (permissive fallthrough), not treated as a failure.
+const MAX_PREREQ_DEPTH = 5;
 
 // Inline MurmurHash3 x86 32-bit (seed=0, UTF-8 byte encoding) — vendored,
 // byte-for-byte identical port of @tombstone/eval's (packages/sdk-wasm)
@@ -153,11 +172,72 @@ function parseSafeDefault(safeDefault: string, fallback: unknown): unknown {
   }
 }
 
+/**
+ * Recursively checks `prereqs` against `cache`, mirroring
+ * @tombstone/core's EvaluationEngine.checkPrerequisites exactly:
+ * - A missing prerequisite flag state with `gate: true` fails closed
+ *   (PREREQUISITE_FAILED) — nothing to evaluate, so it cannot pass.
+ * - A missing prerequisite flag state with `gate: false` is skipped —
+ *   nothing to gate on, so evaluation continues.
+ * - A found prerequisite flag is evaluated through the FULL pipeline
+ *   (recursively, so ITS OWN prerequisites/rollout apply too), and its
+ *   stringified result is compared against `requiredVariation`. A mismatch
+ *   with `gate: true` fails closed; a mismatch with `gate: false` is
+ *   skipped.
+ * Returns null when every prerequisite passed (or was non-gating), meaning
+ * the caller should continue to its own rollout evaluation.
+ */
+function checkPrerequisites<T>(
+  prereqs: FlagPrerequisite[],
+  context: EvaluationContext,
+  defaultValue: T,
+  cache: FlagLookup,
+  parentKey: string,
+  depth: number,
+): EvaluationResult<T> | null {
+  for (const prereq of prereqs) {
+    const prereqState = cache.get(prereq.flagKey);
+    if (!prereqState) {
+      if (prereq.gate) {
+        return {
+          value: defaultValue,
+          reason: "PREREQUISITE_FAILED",
+          fromCache: true,
+          flagKey: parentKey,
+        };
+      }
+      continue;
+    }
+    const prereqResult = evaluate<string>(
+      prereqState,
+      context,
+      prereqState.safeDefault,
+      prereq.flagKey,
+      cache,
+      depth + 1,
+    );
+    if (
+      String(prereqResult.value) !== prereq.requiredVariation &&
+      prereq.gate
+    ) {
+      return {
+        value: defaultValue,
+        reason: "PREREQUISITE_FAILED",
+        fromCache: true,
+        flagKey: parentKey,
+      };
+    }
+  }
+  return null;
+}
+
 export function evaluate<T = boolean>(
   flagState: FlagEnvironmentState | undefined,
   context: EvaluationContext,
   defaultValue: T,
   flagKey: string,
+  cache?: FlagLookup,
+  depth = 0,
 ): EvaluationResult<T> {
   if (!flagState) {
     return { value: defaultValue, reason: "ERROR", fromCache: false, flagKey };
@@ -169,6 +249,18 @@ export function evaluate<T = boolean>(
       fromCache: true,
       flagKey,
     };
+  }
+  const prereqs = flagState.prerequisites ?? [];
+  if (prereqs.length > 0 && cache && depth < MAX_PREREQ_DEPTH) {
+    const blocked = checkPrerequisites<T>(
+      prereqs,
+      context,
+      defaultValue,
+      cache,
+      flagKey,
+      depth,
+    );
+    if (blocked !== null) return blocked;
   }
   if (flagState.rolloutPct >= 100) {
     return {

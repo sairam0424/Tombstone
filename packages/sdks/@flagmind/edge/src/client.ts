@@ -1,27 +1,54 @@
-import { evaluate } from './evaluation.js';
-import type { EvaluationContext, EvaluationResult, FlagEnvironmentState, FlagSnapshot } from './types.js';
+import { evaluate } from "./evaluation.js";
+import type { FlagLookup } from "./evaluation.js";
+import type {
+  EvaluationContext,
+  EvaluationResult,
+  FlagEnvironmentState,
+  FlagPrerequisite,
+  FlagSnapshot,
+} from "./types.js";
+
+/** Builds a FlagLookup from a snapshot's flat flags array — O(1) per prerequisite lookup, no extra fetch. */
+function buildLookup(flags: FlagEnvironmentState[]): FlagLookup {
+  const map = new Map(flags.map((f) => [f.flagKey, f]));
+  return { get: (flagKey: string) => map.get(flagKey) };
+}
 
 // Cloudflare KV namespace interface (matches @cloudflare/workers-types KVNamespace)
 interface KVNamespace {
-  get(key: string, type: 'json'): Promise<unknown>;
-  get(key: string, type?: 'text'): Promise<string | null>;
-  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  get(key: string, type: "json"): Promise<unknown>;
+  get(key: string, type?: "text"): Promise<string | null>;
+  put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number },
+  ): Promise<void>;
 }
 
 const KV_KEY = (env: string): string => `tombstone:snapshot:${env}`;
 
-async function loadFromKV(kv: KVNamespace, environment: string): Promise<FlagSnapshot | null> {
-  const cached = await kv.get(KV_KEY(environment), 'json');
+async function loadFromKV(
+  kv: KVNamespace,
+  environment: string,
+): Promise<FlagSnapshot | null> {
+  const cached = await kv.get(KV_KEY(environment), "json");
   if (!cached) return null;
   return normalizeSnapshot(cached);
 }
 
-async function loadFromOrigin(apiUrl: string, environment: string, token: string): Promise<FlagSnapshot> {
-  const resp = await fetch(`${apiUrl}/api/v1/environments/snapshot?environment=${environment}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+async function loadFromOrigin(
+  apiUrl: string,
+  environment: string,
+  token: string,
+): Promise<FlagSnapshot> {
+  const resp = await fetch(
+    `${apiUrl}/api/v1/environments/snapshot?environment=${environment}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!resp.ok) throw new Error(`snapshot fetch failed: ${resp.status}`);
-  return normalizeSnapshot(await resp.json() as unknown);
+  return normalizeSnapshot((await resp.json()) as unknown);
 }
 
 /**
@@ -106,15 +133,24 @@ export class EdgeFlagClient {
    * Evaluate a flag. Reads snapshot from KV (cached for cacheTtlMs).
    * Returns the default value if flag is not found or all sources are unavailable.
    */
-  async evaluate<T = boolean>(flagKey: string, context: EvaluationContext): Promise<EvaluationResult<T>> {
+  async evaluate<T = boolean>(
+    flagKey: string,
+    context: EvaluationContext,
+  ): Promise<EvaluationResult<T>> {
     const snapshot = await this.getSnapshot();
-    const flagState = snapshot?.flags.find(f => f.flagKey === flagKey);
+    const flagState = snapshot?.flags.find((f) => f.flagKey === flagKey);
     const defaultValue = (this.defaults[flagKey] ?? false) as T;
-    return evaluate<T>(flagState, context, defaultValue, flagKey);
+    // A lookup over the SAME snapshot already loaded, not an extra fetch —
+    // lets evaluate() resolve a prerequisite flag's own state recursively.
+    const cache = snapshot ? buildLookup(snapshot.flags) : undefined;
+    return evaluate<T>(flagState, context, defaultValue, flagKey, cache);
   }
 
   /** Convenience wrapper — returns the boolean value directly. */
-  async isEnabled(flagKey: string, context: EvaluationContext): Promise<boolean> {
+  async isEnabled(
+    flagKey: string,
+    context: EvaluationContext,
+  ): Promise<boolean> {
     const result = await this.evaluate<boolean>(flagKey, context);
     return result.value === true;
   }
@@ -129,7 +165,7 @@ export class EdgeFlagClient {
    */
   async getSnapshot(): Promise<FlagSnapshot | null> {
     const now = Date.now();
-    if (this.cachedSnapshot && (now - this.snapshotCachedAt) < this.cacheTtlMs) {
+    if (this.cachedSnapshot && now - this.snapshotCachedAt < this.cacheTtlMs) {
       return this.cachedSnapshot;
     }
 
@@ -150,7 +186,11 @@ export class EdgeFlagClient {
     // Step 2: KV miss or no KV binding — fetch from origin
     if (this.apiUrl && this.token) {
       try {
-        const fromOrigin = await loadFromOrigin(this.apiUrl, this.environment, this.token);
+        const fromOrigin = await loadFromOrigin(
+          this.apiUrl,
+          this.environment,
+          this.token,
+        );
         this.cachedSnapshot = fromOrigin;
         this.snapshotCachedAt = now;
 
@@ -210,7 +250,11 @@ export async function syncSnapshotToKV(env: {
   TOMBSTONE_KV: KVNamespace;
   TOMBSTONE_ENVIRONMENT: string;
 }): Promise<void> {
-  const snapshot = await loadFromOrigin(env.TOMBSTONE_API_URL, env.TOMBSTONE_ENVIRONMENT, env.TOMBSTONE_TOKEN);
+  const snapshot = await loadFromOrigin(
+    env.TOMBSTONE_API_URL,
+    env.TOMBSTONE_ENVIRONMENT,
+    env.TOMBSTONE_TOKEN,
+  );
   await env.TOMBSTONE_KV.put(
     KV_KEY(env.TOMBSTONE_ENVIRONMENT),
     JSON.stringify(snapshot),
@@ -218,22 +262,42 @@ export async function syncSnapshotToKV(env: {
   );
 }
 
+// flag-api's real snapshot response is snake_case (flag_key, rollout_pct,
+// safe_default, and per-prerequisite flag_key/required_variation/gate) —
+// see @tombstone/core's parseFlagEnvironmentState for the same convention.
+// gate defaults to true (matches flag-api's AddPrerequisite default)
+// unless explicitly false; requiredVariation defaults to "true" when absent.
+function normalizePrerequisites(raw: unknown): FlagPrerequisite[] {
+  const rawPrereqs = Array.isArray(raw) ? raw : [];
+  return rawPrereqs.map((p) => {
+    const pr = p as Record<string, unknown>;
+    return {
+      flagKey: String(pr["flag_key"] ?? pr["flagKey"] ?? ""),
+      requiredVariation: String(
+        pr["required_variation"] ?? pr["requiredVariation"] ?? "true",
+      ),
+      gate: pr["gate"] !== false,
+    } satisfies FlagPrerequisite;
+  });
+}
+
 function normalizeSnapshot(raw: unknown): FlagSnapshot {
   const r = raw as Record<string, unknown>;
-  const flags = ((r['flags'] as unknown[]) ?? []).map(f => {
+  const flags = ((r["flags"] as unknown[]) ?? []).map((f) => {
     const fl = f as Record<string, unknown>;
     return {
-      flagKey: (fl['flag_key'] ?? fl['flagKey'] ?? '') as string,
-      enabled: Boolean(fl['enabled']),
-      rolloutPct: Number(fl['rollout_pct'] ?? fl['rolloutPct'] ?? 0),
-      safeDefault: String(fl['safe_default'] ?? fl['safeDefault'] ?? 'false'),
-      environment: String(fl['environment'] ?? ''),
+      flagKey: (fl["flag_key"] ?? fl["flagKey"] ?? "") as string,
+      enabled: Boolean(fl["enabled"]),
+      rolloutPct: Number(fl["rollout_pct"] ?? fl["rolloutPct"] ?? 0),
+      safeDefault: String(fl["safe_default"] ?? fl["safeDefault"] ?? "false"),
+      environment: String(fl["environment"] ?? ""),
+      prerequisites: normalizePrerequisites(fl["prerequisites"]),
     } satisfies FlagEnvironmentState;
   });
   return {
-    environment: String(r['environment'] ?? ''),
+    environment: String(r["environment"] ?? ""),
     flags,
-    hash: String(r['hash'] ?? ''),
-    ts: Number(r['ts'] ?? 0),
+    hash: String(r["hash"] ?? ""),
+    ts: Number(r["ts"] ?? 0),
   };
 }
