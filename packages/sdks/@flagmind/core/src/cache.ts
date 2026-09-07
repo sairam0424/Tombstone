@@ -11,6 +11,21 @@ import type {
 export class FlagCache {
   private memory: Map<string, FlagEnvironmentState> = new Map();
   private snapshot: FlagSnapshot | null = null;
+  // Tracks which flag keys' CURRENT prerequisites/prerequisitesUpdatedAt
+  // came from a live prerequisites_updated event (true) rather than a
+  // snapshot load (false/absent). A tied ts alone cannot distinguish "a
+  // live event that must win a tie against a slower, still-in-flight
+  // snapshot" from "two DIFFERENT snapshots that happen to share flag-api's
+  // coarse 1-second-resolution ts, where the second (newer LOAD, regardless
+  // of ts) must still win" -- without this, loadSnapshot's own >= tie-break
+  // (added to fix the first case) would incorrectly freeze prerequisites on
+  // the FIRST of two same-ts snapshots forever, discarding the second
+  // snapshot's genuinely different data even though every other field on
+  // the same flag correctly takes it (found by adversarial review of this
+  // fix's own first draft). Rebuilt fresh on every loadSnapshot call,
+  // mirroring `memory`'s own freshness, so a flag dropped from a later
+  // snapshot can't leave a stale entry behind.
+  private prerequisitesFromLiveEvent: Map<string, boolean> = new Map();
 
   loadSnapshot(snapshot: FlagSnapshot): void {
     // flag-api's snapshot.ts is simply time.Now().Unix() at response
@@ -31,6 +46,7 @@ export class FlagCache {
     }
 
     const next = new Map<string, FlagEnvironmentState>();
+    const nextFromLiveEvent = new Map<string, boolean>();
     for (const flag of snapshot.flags) {
       const existing = this.memory.get(flag.flagKey);
       // A live prerequisites_updated event may have already advanced this
@@ -51,8 +67,16 @@ export class FlagCache {
       // tie as "fresh enough to keep", or the two guards disagree on who
       // wins a tie and this one silently loses (found by adversarial review
       // of the Ruby SDK's identical fix, PR #238).
+      //
+      // Also requires prerequisitesFromLiveEvent to be true: without it, a
+      // SECOND snapshot sharing the exact same ts as a FIRST snapshot (no
+      // live event involved at all) would incorrectly take this same
+      // "preserve" branch and freeze prerequisites on the first snapshot's
+      // value forever, discarding the second snapshot's genuinely different
+      // data (found by adversarial review of this fix's own first draft).
       const keepLivePrerequisites =
         existing?.prerequisitesUpdatedAt !== undefined &&
+        this.prerequisitesFromLiveEvent.get(flag.flagKey) === true &&
         existing.prerequisitesUpdatedAt >= snapshotTs;
       next.set(flag.flagKey, {
         ...flag,
@@ -66,8 +90,10 @@ export class FlagCache {
           ? existing.prerequisitesUpdatedAt
           : snapshotTs,
       });
+      nextFromLiveEvent.set(flag.flagKey, keepLivePrerequisites);
     }
     this.memory = next;
+    this.prerequisitesFromLiveEvent = nextFromLiveEvent;
     this.snapshot = { ...snapshot, ts: snapshotTs, flags: [...snapshot.flags] };
   }
 
@@ -133,6 +159,13 @@ export class FlagCache {
     const next = new Map(this.memory);
     next.set(flagKey, updated);
     this.memory = next;
+    // Marks this flag's prerequisites as LIVE-sourced -- see
+    // prerequisitesFromLiveEvent's own field comment for why loadSnapshot
+    // needs this distinction, not just a ts comparison, to decide whether a
+    // tied-or-older incoming snapshot should be allowed to overwrite it.
+    this.prerequisitesFromLiveEvent = new Map(
+      this.prerequisitesFromLiveEvent,
+    ).set(flagKey, true);
   }
 
   setTargetingRules(flagKey: string, rules: TargetingRule[]): void {

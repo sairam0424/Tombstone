@@ -236,6 +236,49 @@ describe("FlagCache — loadSnapshot preserves a fresher live prerequisites upda
     assert.equal(state?.prerequisitesUpdatedAt, 2000);
   });
 
+  it("a SECOND snapshot sharing the exact same ts as a FIRST snapshot (no live event at all) still applies its own data", () => {
+    /**
+     * Regression test for a real bug the >= tie-break above introduced in
+     * its own first draft (found by adversarial review of that fix): with
+     * only a ts comparison, this cache cannot tell "existing.
+     * prerequisitesUpdatedAt came from a live event that must win a tie"
+     * from "existing.prerequisitesUpdatedAt came from a PRIOR SNAPSHOT LOAD
+     * that merely happens to share flag-api's coarse 1-second-resolution ts
+     * with a SECOND, later snapshot". Without prerequisitesFromLiveEvent
+     * tracking, this second snapshot's genuinely different prerequisites
+     * would be silently discarded and the cache would stay frozen on the
+     * first snapshot's value forever (until a snapshot with a strictly
+     * later ts eventually arrives) -- even though every OTHER field on the
+     * same flag (enabled, updatedAt, etc.) correctly takes the second
+     * snapshot's value in the very same call.
+     */
+    const cache = new FlagCache();
+    cache.loadSnapshot(
+      snapshotWith(5000, [
+        { flagKey: "parent-a", requiredVariation: "true", gate: true },
+      ]),
+    );
+
+    // A second, completely independent snapshot fetch resolves with the
+    // EXACT SAME ts (flag-api's snapshot.ts is Time.now().Unix() at
+    // response generation -- two requests within the same wall-clock
+    // second get an identical value) but genuinely different data. No
+    // live prerequisites_updated event is involved anywhere in this test.
+    cache.loadSnapshot(
+      snapshotWith(5000, [
+        { flagKey: "parent-b", requiredVariation: "true", gate: true },
+      ]),
+    );
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.prerequisites,
+      [{ flagKey: "parent-b", requiredVariation: "true", gate: true }],
+      "a second snapshot's own prerequisites must apply even on a ts tie with the first snapshot, since no live event is involved",
+    );
+    assert.equal(state?.prerequisitesUpdatedAt, 5000);
+  });
+
   it("a snapshot NEWER than the live update's own ts is applied normally -- no stale preservation needed", () => {
     const cache = new FlagCache();
     cache.loadSnapshot(
