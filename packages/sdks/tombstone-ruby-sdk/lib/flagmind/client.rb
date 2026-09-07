@@ -87,7 +87,8 @@ module Tombstone
           rollout_pct: (f["rollout_pct"] || 0).to_i,
           safe_default: f["safe_default"] || "false",
           updated_at: (f["updated_at"] || 0).to_i,
-          prerequisites: parse_prerequisites(f["prerequisites"])
+          prerequisites: parse_prerequisites(f["prerequisites"]),
+          targeting_rules: parse_targeting_rules(f["targeting_rules"])
         )
       end
     end
@@ -115,6 +116,48 @@ module Tombstone
           gate: p["gate"] != false
         )
       end
+    end
+
+    # flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
+    # targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
+    # "variation"/"priority" -- ONE flat condition per rule row. This SDK's
+    # own TargetingRule model (mirroring Python/Java's GrowthBook-style
+    # design: multiple AND-combined conditions per rule + per-rule rollout
+    # sub-bucketing) predates the real backend format and doesn't match it
+    # 1:1 -- adapted here into a single-element conditions list, with
+    # rollout_pct fixed at 100 (there is no per-rule rollout concept on the
+    # backend; 100 means "always apply once matched"), mirroring the Java
+    # SDK's identical parseTargetingRules adapter (PR #247).
+    def parse_targeting_rules(raw)
+      return [] unless raw.is_a?(Array)
+      raw.filter_map do |r|
+        next unless r.is_a?(Hash)
+        values = r["values"].is_a?(Array) ? r["values"].map { |v| stringify_wire_value(v) } : []
+        condition = PropertyCondition.new(
+          attribute: r["attribute"] || "", operator: r["operator"] || "",
+          values: values, negate: false
+        )
+        TargetingRule.new(
+          id: r["id"] || "", conditions: [condition], rollout_pct: 100,
+          variation: r["variation"] || "", priority: (r["priority"] || 0).to_i
+        )
+      end
+    end
+
+    # A JSON float that happens to be a whole number (e.g. flag-api's JSONB
+    # "values" column round-tripping [21.0, 65.0]) must render as "21", not
+    # "21.0" -- RuleMatcher's eq/in/neq/nin operators compare via plain
+    # string equality against EvaluationContext.attrs, and a real caller's
+    # own attribute is far more likely to be a plain Integer (21) or a bare
+    # numeric string ("21") than "21.0", so "21.0" would silently fail to
+    # match/exclude a value it should. Numeric operators that go through
+    # Float() parsing (gt/gte/lt/lte) are unaffected either way. Found by
+    # adversarial review of PR #248 -- the identical .to_s coercion gap
+    # exists in the Java SDK's own parseTargetingRules, not fixed there.
+    def stringify_wire_value(v)
+      return "" if v.nil?
+      return (v == v.to_i ? v.to_i : v).to_s if v.is_a?(Float)
+      v.to_s
     end
 
     def start_sse_listener
@@ -150,6 +193,16 @@ module Tombstone
 
     def apply_event(json)
       data = JSON.parse(json)
+      # A syntactically valid JSON payload that isn't a Hash at the top
+      # level (e.g. "null", "42", "[1,2,3]") parses successfully, so
+      # `rescue JSON::ParserError` alone doesn't catch it -- data["flag_key"]
+      # below would then raise NoMethodError/TypeError, which propagates
+      # past this method entirely into start_sse_listener's outer rescue,
+      # tearing down and reconnecting the WHOLE SSE connection for one
+      # malformed event instead of just skipping it. Found by adversarial
+      # review of PR #248; identical pre-existing gap fixed here for all
+      # three SSE handlers, not just the new targeting_rules one.
+      return unless data.is_a?(Hash)
       @cache.apply_event(
         data["flag_key"], data["enabled"] == true,
         (data["rollout_pct"] || 0).to_i, (data["ts"] || 0).to_i
@@ -166,6 +219,7 @@ module Tombstone
     # flag that was never actually disabled.
     def apply_prerequisites_event(json)
       data = JSON.parse(json)
+      return unless data.is_a?(Hash)
       flag_key = data["flag_key"]
       return unless flag_key
       @cache.apply_prerequisites_event(
@@ -175,17 +229,35 @@ module Tombstone
       # malformed event — ignore
     end
 
+    # services/flag-api/internal/api/v1/targeting_rules.go's TargetingRulesEvent
+    # -- mirrors apply_prerequisites_event exactly, for the same reason (a
+    # distinct payload shape from a real flag event, so it gets its own
+    # handler rather than being routed through apply_event).
+    def apply_targeting_rules_event(json)
+      data = JSON.parse(json)
+      return unless data.is_a?(Hash)
+      flag_key = data["flag_key"]
+      return unless flag_key
+      @cache.apply_targeting_rules_event(
+        flag_key, parse_targeting_rules(data["targeting_rules"]), (data["ts"] || 0).to_i
+      )
+    rescue JSON::ParserError
+      # malformed event — ignore
+    end
+
     # Route a parsed SSE frame. A "lag" frame is the gateway warning us that our
     # buffer overflowed and it DROPPED the real flag-update event; recover the
     # dropped update by refetching the full snapshot. A "prerequisites_updated"
-    # frame gets its own handler (see apply_prerequisites_event's comment).
-    # Everything else is a normal flag-update event applied incrementally to
-    # the cache.
+    # or "targeting_rules_updated" frame gets its own handler (see each
+    # handler's own comment). Everything else is a normal flag-update event
+    # applied incrementally to the cache.
     def dispatch_sse_event(event_type, data)
       if event_type == "lag"
         schedule_snapshot_refetch
       elsif event_type == "prerequisites_updated"
         apply_prerequisites_event(data)
+      elsif event_type == "targeting_rules_updated"
+        apply_targeting_rules_event(data)
       else
         apply_event(data)
       end

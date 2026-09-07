@@ -23,6 +23,14 @@ module Tombstone
       # re-propagating true would make the protection "sticky" and veto a
       # later, independent snapshot too).
       @prerequisites_from_live_event = {}
+      # Identical purpose to @prerequisites_from_live_event above, tracked
+      # for targeting_rules independently -- see apply_targeting_rules_event
+      # and load_snapshot's own "keep_live_targeting_rules" comment. Kept as
+      # a genuinely separate hash (not merged into one "any live event"
+      # flag): a live PREREQUISITES event must never protect targetingRules
+      # from an unrelated tied snapshot, and vice versa -- each feature's
+      # tie-break is independent of the other's.
+      @targeting_rules_from_live_event = {}
     end
 
     # flag-api's snapshot ts is simply the response-generation wall-clock
@@ -39,6 +47,7 @@ module Tombstone
         return if @last_snapshot_ts && snapshot_ts < @last_snapshot_ts
 
         next_from_live_event = {}
+        next_targeting_rules_from_live_event = {}
         new_cache = flags.each_with_object({}) do |f, h|
           existing = @cache[f.flag_key]
           # A live prerequisites_updated event may have already advanced
@@ -70,29 +79,47 @@ module Tombstone
           keep_live = existing &&
                       @prerequisites_from_live_event[f.flag_key] &&
                       existing.prerequisites_updated_at >= snapshot_ts
-          if keep_live
-            h[f.flag_key] = f.dup.tap do |s|
+          # Identical reasoning to keep_live above, applied to targeting_rules
+          # against services/flag-api/internal/api/v1/targeting_rules.go's
+          # TargetingRulesEvent -- see apply_targeting_rules_event's own
+          # comment. Tracked via its OWN @targeting_rules_from_live_event
+          # hash so a live PREREQUISITES event never protects targetingRules
+          # (or vice versa) from an unrelated tied snapshot.
+          keep_live_targeting_rules = existing &&
+                                       @targeting_rules_from_live_event[f.flag_key] &&
+                                       existing.targeting_rules_updated_at >= snapshot_ts
+          h[f.flag_key] = f.dup.tap do |s|
+            if keep_live
               s.prerequisites = existing.prerequisites
               s.prerequisites_updated_at = existing.prerequisites_updated_at
-            end.freeze
-          else
-            h[f.flag_key] = f.dup.tap { |s| s.prerequisites_updated_at = snapshot_ts }.freeze
-          end
-          # ONE-SHOT consumption, always false here (never keep_live): this
-          # load_snapshot call has now fully resolved the race between the
-          # live event and ITS OWN specific in-flight snapshot. Re-
-          # propagating true would make the protection "sticky", vetoing a
-          # later, independent snapshot that merely happens to tie the same
-          # coarse-resolution second too. Residual, accepted limitation: two
-          # snapshot fetches that were BOTH already in flight when the SAME
-          # live event fired will only have the first-arriving one
-          # correctly blocked; solving that fully would require a signal
-          # finer than flag-api's 1-second-resolution wall-clock ts.
+            else
+              s.prerequisites_updated_at = snapshot_ts
+            end
+            if keep_live_targeting_rules
+              s.targeting_rules = existing.targeting_rules
+              s.targeting_rules_updated_at = existing.targeting_rules_updated_at
+            else
+              s.targeting_rules_updated_at = snapshot_ts
+            end
+          end.freeze
+          # ONE-SHOT consumption, always false here (never keep_live/
+          # keep_live_targeting_rules): this load_snapshot call has now
+          # fully resolved the race between the live event and ITS OWN
+          # specific in-flight snapshot. Re-propagating true would make the
+          # protection "sticky", vetoing a later, independent snapshot that
+          # merely happens to tie the same coarse-resolution second too.
+          # Residual, accepted limitation: two snapshot fetches that were
+          # BOTH already in flight when the SAME live event fired will only
+          # have the first-arriving one correctly blocked; solving that
+          # fully would require a signal finer than flag-api's
+          # 1-second-resolution wall-clock ts.
           next_from_live_event[f.flag_key] = false
+          next_targeting_rules_from_live_event[f.flag_key] = false
         end.freeze
 
         @cache = new_cache
         @prerequisites_from_live_event = next_from_live_event
+        @targeting_rules_from_live_event = next_targeting_rules_from_live_event
         @last_snapshot_ts = snapshot_ts
       end
     end
@@ -143,6 +170,30 @@ module Tombstone
         # whether a tied-or-older incoming snapshot should be allowed to
         # overwrite it.
         @prerequisites_from_live_event = @prerequisites_from_live_event.merge(flag_key => true)
+      end
+    end
+
+    # Applies a live "targeting_rules_updated" SSE event -- full replacement
+    # of a flag's targeting-rule list FOR THIS ENVIRONMENT, not a delta
+    # (matching TargetingRulesEvent's own documented design on the flag-api
+    # side -- services/flag-api/internal/api/v1/targeting_rules.go).
+    # No-ops for a flag with no existing cache entry, mirrors
+    # apply_prerequisites_event's own staleness guard exactly (strict "<",
+    # comparing against targeting_rules_updated_at).
+    def apply_targeting_rules_event(flag_key, targeting_rules, ts)
+      @lock.synchronize do
+        existing = @cache[flag_key]
+        return unless existing
+        return if ts < existing.targeting_rules_updated_at
+
+        updated = existing.dup.tap do |s|
+          s.targeting_rules = targeting_rules
+          s.targeting_rules_updated_at = ts
+        end.freeze
+        @cache = @cache.merge(flag_key => updated).freeze
+        # Marks this flag's targetingRules as LIVE-sourced -- see
+        # @targeting_rules_from_live_event's own comment (on initialize).
+        @targeting_rules_from_live_event = @targeting_rules_from_live_event.merge(flag_key => true)
       end
     end
 
