@@ -32,6 +32,20 @@ public class FlagCacheTargetingRulesTests
 
     private static FlagPrerequisite Prereq(string flagKey) => new(flagKey, "true", true);
 
+    // TargetingRule is a record whose Conditions property is a
+    // List<PropertyCondition> -- unlike Java's List.equals() or Ruby's
+    // Array#==, C#'s List<T> has NO structural equality (it falls back to
+    // reference equality), so a record's auto-generated Equals is silently
+    // broken for any property typed List<T>: two separately-constructed
+    // TargetingRule instances with byte-identical content compare as
+    // UNEQUAL. Comparing by Id (a plain string) sidesteps this entirely --
+    // mirrors how RuleMatcher's own tests already compare MatchRules'
+    // string return value, never a whole TargetingRule object. Found via
+    // this PR's own CI run: two tests that built the "expected" rule via a
+    // SEPARATE Rule(...) call (not reusing the same object reference)
+    // failed with visually-identical Expected/Actual output.
+    private static List<string> Ids(IEnumerable<TargetingRule> rules) => rules.Select(r => r.Id).ToList();
+
     [Fact]
     public void ApplyTargetingRulesEvent_RejectsAStaleOlderTsDelivery()
     {
@@ -42,7 +56,7 @@ public class FlagCacheTargetingRulesTests
         cache.ApplyTargetingRulesEvent("child-flag", new() { Rule("stale-rule") }, 3000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { current }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "parent-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(5000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -57,7 +71,7 @@ public class FlagCacheTargetingRulesTests
         cache.ApplyTargetingRulesEvent("child-flag", new() { incoming }, 5000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { incoming }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "new-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(5000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -82,7 +96,7 @@ public class FlagCacheTargetingRulesTests
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { oldRule }) }, 1500);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { newRule }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "new-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(2000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -100,7 +114,7 @@ public class FlagCacheTargetingRulesTests
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { evenNewerRule }) }, 3000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { evenNewerRule }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "even-newer-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(3000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -117,7 +131,7 @@ public class FlagCacheTargetingRulesTests
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { oldRule }) }, 2000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { newRule }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "new-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(2000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -129,7 +143,7 @@ public class FlagCacheTargetingRulesTests
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { Rule("rule-b") }) }, 5000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { Rule("rule-b") }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "rule-b" }, Ids(updated.TargetingRules));
         Assert.Equal(5000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -141,12 +155,12 @@ public class FlagCacheTargetingRulesTests
         cache.ApplyTargetingRulesEvent("child-flag", new() { Rule("live-rule") }, 2000);
 
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { Rule("snap-b-rule") }) }, 2000);
-        Assert.Equal(new List<TargetingRule> { Rule("live-rule") }, cache.Get("child-flag")!.TargetingRules);
+        Assert.Equal(new List<string> { "live-rule" }, Ids(cache.Get("child-flag")!.TargetingRules));
 
         cache.LoadSnapshot(new[] { Flag("child-flag", targetingRules: new() { Rule("snap-c-rule") }) }, 2000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { Rule("snap-c-rule") }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "snap-c-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(2000L, updated.TargetingRulesUpdatedAt);
     }
 
@@ -196,7 +210,7 @@ public class FlagCacheTargetingRulesTests
 
         var state = cache.Get("child-flag")!;
         Assert.Equal(new List<FlagPrerequisite> { newPrereq }, state.Prerequisites);
-        Assert.Equal(new List<TargetingRule> { genuinelyNewRule }, state.TargetingRules);
+        Assert.Equal(new List<string> { "genuinely-new-rule" }, Ids(state.TargetingRules));
     }
 
     [Fact]
@@ -214,7 +228,7 @@ public class FlagCacheTargetingRulesTests
         cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { genuinelyNewPrereq }, targetingRules: new() { oldRule }) }, 1000);
 
         var state = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { newRule }, state.TargetingRules);
+        Assert.Equal(new List<string> { "new-rule" }, Ids(state.TargetingRules));
         Assert.Equal(new List<FlagPrerequisite> { genuinelyNewPrereq }, state.Prerequisites);
     }
 
@@ -245,7 +259,7 @@ public class FlagCacheTargetingRulesTests
         cache.ApplyTargetingRulesEvent("child-flag", new() { newRule }, 2000);
 
         var updated = cache.Get("child-flag")!;
-        Assert.Equal(new List<TargetingRule> { newRule }, updated.TargetingRules);
+        Assert.Equal(new List<string> { "new-rule" }, Ids(updated.TargetingRules));
         Assert.Equal(2000L, updated.TargetingRulesUpdatedAt);
     }
 
