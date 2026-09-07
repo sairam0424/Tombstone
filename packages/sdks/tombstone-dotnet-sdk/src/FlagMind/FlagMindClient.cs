@@ -88,7 +88,8 @@ public sealed class TombstoneClient : IDisposable
         var resp = await _http.GetAsync(url, ct);
         if (!resp.IsSuccessStatusCode) return;
         var json = await resp.Content.ReadAsStringAsync(ct);
-        _cache.LoadSnapshot(ParseSnapshotResponse(json));
+        var parsed = ParseSnapshotResponse(json);
+        _cache.LoadSnapshot(parsed.Flags, parsed.Ts);
     }
 
     // Internal (not private) so a test in this assembly can exercise the
@@ -103,10 +104,17 @@ public sealed class TombstoneClient : IDisposable
     // prerequisites-streaming follow-up). flag-api's real snapshot
     // response has no targeting_rules/target_list/hash_version fields
     // today -- those stay empty/default 1, same as before.
-    internal static List<FlagEnvironmentState> ParseSnapshotResponse(string json)
+    //
+    // Returns the snapshot's own top-level ts alongside the parsed flags
+    // (flag-api's environments.go: Ts: time.Now().Unix()) -- FlagCache.
+    // LoadSnapshot needs it to compare against any live prerequisites_updated
+    // event that may have already advanced a flag's own PrerequisitesUpdatedAt
+    // further than this snapshot itself reflects.
+    internal static (List<FlagEnvironmentState> Flags, long Ts) ParseSnapshotResponse(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("flags").EnumerateArray()
+        var ts = doc.RootElement.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
+        var flags = doc.RootElement.GetProperty("flags").EnumerateArray()
             .Select(f => new FlagEnvironmentState(
                 f.GetProperty("flag_id").GetString() ?? "",
                 f.GetProperty("flag_key").GetString() ?? "",
@@ -117,6 +125,7 @@ public sealed class TombstoneClient : IDisposable
                 f.TryGetProperty("updated_at", out var ua) ? ua.GetInt64() : 0L,
                 Prerequisites: ParsePrerequisites(f)
             )).ToList();
+        return (flags, ts);
     }
 
     // flag-api's real wire shape (services/flag-api/internal/api/v1/
@@ -175,6 +184,18 @@ public sealed class TombstoneClient : IDisposable
                             // ConnectAsync uses, debounced so a burst collapses into one.
                             ScheduleLagRefetch(ct);
                         }
+                        else if (eventType == "prerequisites_updated")
+                        {
+                            // services/flag-api/internal/api/v1/prerequisites.go's
+                            // PrerequisitesEvent -- a distinct payload shape
+                            // (flag_key/environment/prerequisites/ts, no
+                            // enabled/rollout_pct/reason at all) from a real flag
+                            // event, so it gets its own handler rather than being
+                            // routed through ApplyEvent, which would otherwise
+                            // coerce those missing keys into false/0 defaults for
+                            // a flag that was never actually disabled.
+                            ApplyPrerequisitesEvent(line[5..].Trim());
+                        }
                         else
                         {
                             ApplyEvent(line[5..].Trim());
@@ -199,6 +220,20 @@ public sealed class TombstoneClient : IDisposable
                 r.GetProperty("rollout_pct").GetInt32(),
                 r.TryGetProperty("ts", out var ts) ? ts.GetInt64() : 0L
             );
+        }
+        catch { /* malformed event — ignore */ }
+    }
+
+    private void ApplyPrerequisitesEvent(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            var flagKey = r.TryGetProperty("flag_key", out var fk) ? fk.GetString() : null;
+            if (string.IsNullOrEmpty(flagKey)) return;
+            var ts = r.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
+            _cache.ApplyPrerequisitesEvent(flagKey, ParsePrerequisites(r), ts);
         }
         catch { /* malformed event — ignore */ }
     }

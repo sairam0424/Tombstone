@@ -62,7 +62,7 @@ public class SnapshotParsingTests
                "prerequisites":[]}
             ],"hash":"h","ts":1700000000}
             """;
-        var states = TombstoneClient.ParseSnapshotResponse(json);
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
         Assert.Single(states);
         var s = states[0];
         Assert.Equal("1", s.FlagId);
@@ -89,7 +89,7 @@ public class SnapshotParsingTests
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        var states = TombstoneClient.ParseSnapshotResponse(json);
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
         var prereqs = states[0].Prerequisites;
         Assert.Single(prereqs);
         Assert.Equal("parent-flag", prereqs[0].FlagKey);
@@ -109,7 +109,7 @@ public class SnapshotParsingTests
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        var states = TombstoneClient.ParseSnapshotResponse(json);
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
         Assert.True(states[0].Prerequisites[0].Gate,
             "gate must default to true (hard-blocking) when the wire omits it, matching flag-api's own AddPrerequisite default");
     }
@@ -126,7 +126,7 @@ public class SnapshotParsingTests
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        var states = TombstoneClient.ParseSnapshotResponse(json);
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
         Assert.False(states[0].Prerequisites[0].Gate);
     }
 
@@ -139,7 +139,7 @@ public class SnapshotParsingTests
                "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000}
             ],"hash":"h","ts":1700000000}
             """;
-        var states = TombstoneClient.ParseSnapshotResponse(json);
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
         Assert.Empty(states[0].Prerequisites);
     }
 
