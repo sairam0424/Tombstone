@@ -2,22 +2,56 @@ using System.Collections.Immutable;
 
 namespace Tombstone;
 
-// ApplyEvent's read-current/build/write-back shape (read _cache into a local,
-// derive a new ImmutableDictionary from it, then reassign _cache) is not a
-// CAS loop -- two concurrent mutations reading the same `current` can race,
-// and whichever writes _cache second wins outright, silently discarding the
-// other's update rather than merging it. Pre-existing, not introduced here.
-// LoadSnapshot's per-flag preservation check below now ALSO reads _cache
-// (previously it only ever overwrote unconditionally), extending the same
-// shape to a second method rather than introducing a new failure mode.
+// Disclosed, pre-existing, NOT introduced or fixed by the combined-state
+// refactor below (confirmed via diff -- this read/build/write skeleton is
+// behaviorally identical before and after, just widened to cover three
+// fields as one instead of two): LoadSnapshot/ApplyEvent/ApplyPrerequisitesEvent
+// all do a non-atomic read-modify-write on `_state` (read current -> build a
+// new CacheState from it -> write) instead of a CAS loop. Two concurrent
+// mutations -- e.g. the SSE listener's ApplyPrerequisitesEvent racing a
+// lag-recovery LoadSnapshot -- can both read the same `current`, and
+// whichever write lands second silently discards the OTHER's entire state,
+// not just the key it touched. A real fix needs a CAS loop (e.g.
+// Interlocked.CompareExchange in a retry loop) and is its own, independent
+// piece of work -- left unfixed here deliberately, same as the Java SDK's
+// equivalent AtomicReference<CacheState>.
 public class FlagCache
 {
-    private volatile ImmutableDictionary<string, FlagEnvironmentState> _cache
-        = ImmutableDictionary<string, FlagEnvironmentState>.Empty;
+    // Combines what used to be three separately-updated fields (_cache,
+    // _prerequisitesFromLiveEvent, _lastSnapshotTs) into one immutable record
+    // swapped via a single `volatile` reference write. A reference-typed
+    // field's reads/writes are atomic under the CLR memory model, and
+    // `volatile` adds the cross-thread visibility/ordering guarantee needed
+    // here -- together giving the same "any read always sees a mutually
+    // consistent triple" property Java's AtomicReference<CacheState> gives.
+    //
+    // Found by adversarial review of PRs #241/#242/#243: with the three
+    // pieces of state as separate fields, a genuinely concurrent thread
+    // (this class's own ApplyPrerequisitesEvent/LoadSnapshot are called from
+    // real concurrent tasks in production -- an SSE-listener task racing a
+    // lag-recovery task, per the top-of-file race disclosed above) could
+    // interleave between updating _cache and updating
+    // _prerequisitesFromLiveEvent, letting a concurrent reader observe them
+    // in a mutually INCONSISTENT combination -- silently defeating the
+    // tie-break protection those two fields exist to provide together.
+    // Ruby's equivalent fix needed no such change: its FlagCache wraps both
+    // field updates inside the same Monitor#synchronize critical section,
+    // which already provides the mutual exclusion this record+volatile
+    // design achieves lock-free.
+    private sealed record CacheState(
+        ImmutableDictionary<string, FlagEnvironmentState> Cache,
+        ImmutableDictionary<string, bool> PrerequisitesFromLiveEvent,
+        long LastSnapshotTs);
+
     // Sentinel meaning "no snapshot loaded yet" -- a real flag-api snapshot
     // ts (time.Now().Unix() at response generation) will never be this low,
     // so the very first LoadSnapshot call always applies.
-    private long _lastSnapshotTs = long.MinValue;
+    private const long NoSnapshotYet = long.MinValue;
+
+    private volatile CacheState _state = new(
+        ImmutableDictionary<string, FlagEnvironmentState>.Empty,
+        ImmutableDictionary<string, bool>.Empty,
+        NoSnapshotYet);
 
     // flag-api's snapshot ts is simply time.Now().Unix() at response
     // generation (services/flag-api/internal/api/v1/environments.go), not a
@@ -29,10 +63,18 @@ public class FlagCache
     // clobbering fresher state for every flag, not just prerequisites.
     public void LoadSnapshot(IEnumerable<FlagEnvironmentState> flags, long snapshotTs = 0)
     {
-        if (_lastSnapshotTs != long.MinValue && snapshotTs < _lastSnapshotTs) return;
+        var current = _state;
+        if (current.LastSnapshotTs != NoSnapshotYet && snapshotTs < current.LastSnapshotTs) return;
 
-        var current = _cache;
-        _cache = flags.ToImmutableDictionary(f => f.FlagKey, f =>
+        // Uses .Add(), not the indexer: flag-api's snapshot response is
+        // expected to contain each flag key at most once -- a duplicate
+        // key is a backend data-integrity bug, and .Add() fails loud
+        // (ArgumentException) instead of silently coalescing to
+        // last-write-wins, matching the original flags.ToImmutableDictionary(...)
+        // behavior this Builder-based loop replaced.
+        var next = ImmutableDictionary.CreateBuilder<string, FlagEnvironmentState>();
+        var nextFromLiveEvent = ImmutableDictionary.CreateBuilder<string, bool>();
+        foreach (var f in flags)
         {
             // A live prerequisites_updated event may have already advanced
             // this flag's PrerequisitesUpdatedAt to OR PAST this snapshot's
@@ -42,7 +84,7 @@ public class FlagCache
             // in time for THIS flag specifically, even though the snapshot
             // as a whole passed the monotonicity check above (which only
             // compares against the last snapshot's ts, not any per-flag
-            // live update). Uses >= , not >: flag-api's snapshot endpoint
+            // live update). Uses >=, not >: flag-api's snapshot endpoint
             // and its prerequisites-event publisher both derive ts from
             // time.Now().Unix() (1-second resolution), so a live event and a
             // racing snapshot fetch landing in the same wall-clock second
@@ -52,22 +94,42 @@ public class FlagCache
             // "fresh enough to apply", so this preservation check must treat
             // the SAME tie as "fresh enough to keep", or the two guards
             // disagree on who wins a tie and this one silently loses.
-            if (current.TryGetValue(f.FlagKey, out var existing) && existing.PrerequisitesUpdatedAt >= snapshotTs)
-            {
-                return f with { Prerequisites = existing.Prerequisites, PrerequisitesUpdatedAt = existing.PrerequisitesUpdatedAt };
-            }
-            return f with { PrerequisitesUpdatedAt = snapshotTs };
-        });
-        _lastSnapshotTs = snapshotTs;
+            //
+            // Also requires PrerequisitesFromLiveEvent to be true: without
+            // it, a SECOND snapshot sharing the exact same ts as a FIRST
+            // snapshot (no live event involved at all) would incorrectly
+            // take this same "preserve" branch and freeze prerequisites on
+            // the first snapshot's value forever.
+            var keepLivePrerequisites =
+                current.Cache.TryGetValue(f.FlagKey, out var existing) &&
+                current.PrerequisitesFromLiveEvent.TryGetValue(f.FlagKey, out var fromLive) && fromLive &&
+                existing.PrerequisitesUpdatedAt >= snapshotTs;
+            next.Add(f.FlagKey, keepLivePrerequisites
+                ? f with { Prerequisites = existing!.Prerequisites, PrerequisitesUpdatedAt = existing.PrerequisitesUpdatedAt }
+                : f with { PrerequisitesUpdatedAt = snapshotTs });
+            // ONE-SHOT consumption, always false here (never
+            // keepLivePrerequisites): this LoadSnapshot call has now fully
+            // resolved the race between the live event and ITS OWN specific
+            // in-flight snapshot. Re-propagating true would make the
+            // protection "sticky", vetoing a later, independent snapshot
+            // that merely happens to tie the same coarse-resolution second
+            // too. Residual, accepted limitation: two snapshot fetches that
+            // were BOTH already in flight when the SAME live event fired
+            // will only have the first-arriving one correctly blocked;
+            // solving that fully would require a signal finer than
+            // flag-api's 1-second-resolution wall-clock ts.
+            nextFromLiveEvent.Add(f.FlagKey, false);
+        }
+        _state = new CacheState(next.ToImmutable(), nextFromLiveEvent.ToImmutable(), snapshotTs);
     }
 
-    // Immutable update — creates new dictionary, never mutates existing
+    // Immutable update — creates a new CacheState, never mutates existing
     public void ApplyEvent(string flagKey, bool enabled, int rolloutPct, long ts)
     {
-        var current = _cache;
-        if (!current.TryGetValue(flagKey, out var existing)) return;
+        var current = _state;
+        if (!current.Cache.TryGetValue(flagKey, out var existing)) return;
         var updated = existing with { Enabled = enabled, RolloutPct = rolloutPct, UpdatedAt = ts };
-        _cache = current.SetItem(flagKey, updated);
+        _state = current with { Cache = current.Cache.SetItem(flagKey, updated) };
     }
 
     // Applies a live "prerequisites_updated" SSE event -- full replacement of
@@ -87,15 +149,23 @@ public class FlagCache
     // gap at the point where staleness actually matters.
     public void ApplyPrerequisitesEvent(string flagKey, List<FlagPrerequisite> prerequisites, long ts)
     {
-        var current = _cache;
-        if (!current.TryGetValue(flagKey, out var existing)) return;
+        var current = _state;
+        if (!current.Cache.TryGetValue(flagKey, out var existing)) return;
         if (ts < existing.PrerequisitesUpdatedAt) return;
         var updated = existing with { Prerequisites = prerequisites, PrerequisitesUpdatedAt = ts };
-        _cache = current.SetItem(flagKey, updated);
+        // Both the cache entry AND the live-event marker are folded into the
+        // SAME new CacheState and published via ONE write to _state -- see
+        // this class's own CacheState comment for why splitting these into
+        // two separate writes (the bug this replaced) is unsafe under real
+        // concurrency.
+        _state = new CacheState(
+            current.Cache.SetItem(flagKey, updated),
+            current.PrerequisitesFromLiveEvent.SetItem(flagKey, true),
+            current.LastSnapshotTs);
     }
 
     public FlagEnvironmentState? Get(string flagKey) =>
-        _cache.TryGetValue(flagKey, out var s) ? s : null;
+        _state.Cache.TryGetValue(flagKey, out var s) ? s : null;
 
-    public IEnumerable<string> FlagKeys() => _cache.Keys;
+    public IEnumerable<string> FlagKeys() => _state.Cache.Keys;
 }
