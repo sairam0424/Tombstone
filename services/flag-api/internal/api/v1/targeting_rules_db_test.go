@@ -188,6 +188,73 @@ func TestTargetingRulesAgainstPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("AddTargetingRule 404s for a nonexistent flag", func(t *testing.T) {
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/never-created-flag/environments/production/rules", map[string]any{
+			"rule_type": "USER", "attribute": "email", "operator": "EQ", "variation": "true",
+		}, projectID, map[string]string{"key": "never-created-flag", "env": "production"})
+		rec := httptest.NewRecorder()
+		ruleH.AddTargetingRule(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("AddTargetingRule 404s for a nonexistent/typo'd environment — regression for the orphaned-rule finding", func(t *testing.T) {
+		// Before the fix, this returned 201 and silently created a rule no
+		// SDK could ever reach (targeting_rules.environment has no FK to
+		// flag_environments, unlike flag_id's FK to flags).
+		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+flag.Key+"/environments/produciton/rules", map[string]any{
+			"rule_type": "USER", "attribute": "email", "operator": "EQ", "variation": "true",
+		}, projectID, map[string]string{"key": flag.Key, "env": "produciton"})
+		rec := httptest.NewRecorder()
+		ruleH.AddTargetingRule(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+
+		// Confirm no orphaned row was left behind by a partial insert.
+		listReq := newTenancyRequest(t, http.MethodGet, "/api/v1/flags/"+flag.Key+"/environments/produciton/rules", nil,
+			projectID, map[string]string{"key": flag.Key, "env": "produciton"})
+		listRec := httptest.NewRecorder()
+		ruleH.ListTargetingRules(listRec, listReq)
+		var resp struct {
+			Total int `json:"total"`
+		}
+		if err := json.NewDecoder(listRec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Total != 0 {
+			t.Fatalf("total for typo'd environment = %d, want 0 — the rejected request must not have inserted anything", resp.Total)
+		}
+	})
+
+	t.Run("DeleteTargetingRule 404s for a rule that exists but in the WRONG environment", func(t *testing.T) {
+		// `created` (from the AddTargetingRule subtest above) lives in
+		// "production" -- targeting it via "staging" must not match.
+		req := newTenancyRequest(t, http.MethodDelete, "/api/v1/flags/"+flag.Key+"/environments/staging/rules/"+created.ID,
+			nil, projectID, map[string]string{"key": flag.Key, "env": "staging", "id": created.ID})
+		rec := httptest.NewRecorder()
+		ruleH.DeleteTargetingRule(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+
+		// Confirm the row is still there in its real environment.
+		listReq := newTenancyRequest(t, http.MethodGet, "/api/v1/flags/"+flag.Key+"/environments/production/rules", nil,
+			projectID, map[string]string{"key": flag.Key, "env": "production"})
+		listRec := httptest.NewRecorder()
+		ruleH.ListTargetingRules(listRec, listReq)
+		var resp struct {
+			Total int `json:"total"`
+		}
+		if err := json.NewDecoder(listRec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Total != 1 {
+			t.Fatalf("total in production after the failed cross-environment delete = %d, want 1 — the row must survive", resp.Total)
+		}
+	})
+
 	t.Run("DeleteTargetingRule removes the real row", func(t *testing.T) {
 		req := newTenancyRequest(t, http.MethodDelete, "/api/v1/flags/"+flag.Key+"/environments/production/rules/"+created.ID,
 			nil, projectID, map[string]string{"key": flag.Key, "env": "production", "id": created.ID})

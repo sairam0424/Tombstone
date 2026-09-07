@@ -1,6 +1,9 @@
 package v1
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestAddTargetingRuleRequest_Validate exercises AddTargetingRuleRequest.validate
 // directly -- a pure function, so no database, HTTP request, or handler
@@ -20,6 +23,10 @@ func TestAddTargetingRuleRequest_Validate(t *testing.T) {
 		{"missing operator", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Operator = ""; return r }, true},
 		{"invalid operator", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Operator = "NOT_AN_OP"; return r }, true},
 		{"missing variation", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Variation = ""; return r }, true},
+		{"priority at int32 max is accepted", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Priority = math.MaxInt32; return r }, false},
+		{"priority at int32 min is accepted", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Priority = math.MinInt32; return r }, false},
+		{"priority one past int32 max is rejected", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Priority = math.MaxInt32 + 1; return r }, true},
+		{"priority one past int32 min is rejected", func(r AddTargetingRuleRequest) AddTargetingRuleRequest { r.Priority = math.MinInt32 - 1; return r }, true},
 	}
 
 	for _, tc := range cases {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -102,6 +103,15 @@ func (req AddTargetingRuleRequest) validate() string {
 	if req.Variation == "" {
 		return "variation is required"
 	}
+	// Priority is stored as int32 (InsertTargetingRuleParams.Priority); an
+	// out-of-range value silently wraps via Go's truncating conversion
+	// (int32(req.Priority) below) instead of erroring, which -- since rules
+	// are ORDER BY priority ASC (lower = evaluated first) -- can invert a
+	// rule's intended evaluation order without any error surfacing at all.
+	// Found by adversarial review of this PR.
+	if req.Priority < math.MinInt32 || req.Priority > math.MaxInt32 {
+		return "priority must fit in a signed 32-bit integer"
+	}
 	return ""
 }
 
@@ -137,6 +147,29 @@ func (h *TargetingRuleHandler) AddTargetingRule(w http.ResponseWriter, r *http.R
 	} else if err != nil {
 		h.logger.Error("resolve flag id", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// targeting_rules.environment has no foreign key to flag_environments
+	// (only flag_id references flags) -- without this check, a typo'd or
+	// otherwise nonexistent environment would still 201, silently creating
+	// a permanently orphaned rule no SDK could ever reach (GetSnapshot only
+	// ever looks up flags that HAVE a flag_environments row for the
+	// requested environment; a rule attached to one that doesn't exist is
+	// dropped by that lookup, forever). UpdateEnvironment (flags.go) cannot
+	// hit this because flag_environments rows are only ever created for a
+	// fixed set at flag-creation time -- reusing the SAME existence check
+	// change_requests.go already uses for the identical reason. Found by
+	// adversarial review of this PR, confirmed via a real Postgres repro.
+	if _, err := q.ChangeRequestTargetExists(r.Context(), sqlcgen.ChangeRequestTargetExistsParams{
+		Key: key, Environment: env, ProjectID: projectID,
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "flag or environment not found")
+			return
+		}
+		h.logger.Error("targeting rule environment existence check", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 
@@ -280,7 +313,8 @@ func (h *TargetingRuleHandler) publishTargetingRulesUpdated(ctx context.Context,
 		Key: key, Environment: environment, ProjectID: projectID,
 	})
 	if err != nil {
-		h.logger.Warn("publish targeting_rules_updated: list query failed", zap.String("flag", key), zap.Error(err))
+		h.logger.Warn("publish targeting_rules_updated: list query failed",
+			zap.String("flag", key), zap.String("environment", environment), zap.Error(err))
 		return
 	}
 	rules := make([]SnapshotTargetingRule, 0, len(rows))
