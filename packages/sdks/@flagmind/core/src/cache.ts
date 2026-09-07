@@ -34,16 +34,26 @@ export class FlagCache {
     for (const flag of snapshot.flags) {
       const existing = this.memory.get(flag.flagKey);
       // A live prerequisites_updated event may have already advanced this
-      // flag's prerequisitesUpdatedAt PAST this snapshot's own ts if the
-      // snapshot fetch was still in flight when the live event arrived and
-      // applied -- in that case the snapshot reflects an OLDER point in time
-      // for THIS flag specifically, even though the snapshot as a whole
-      // passed the monotonicity check above (which only compares against
-      // the last *snapshot's* ts, not any per-flag live update). Keep the
-      // already-fresher live data instead of silently regressing it.
+      // flag's prerequisitesUpdatedAt to OR PAST this snapshot's own ts if
+      // the snapshot fetch was still in flight when the live event arrived
+      // and applied -- in that case the snapshot reflects an OLDER (or, on
+      // an exact-tie second, no LATER) point in time for THIS flag
+      // specifically, even though the snapshot as a whole passed the
+      // monotonicity check above (which only compares against the last
+      // *snapshot's* ts, not any per-flag live update). Uses >=, not >:
+      // flag-api's snapshot endpoint and its prerequisites-event publisher
+      // both derive ts from time.Now().Unix() (1-second resolution), so a
+      // live event and a racing snapshot fetch landing in the same
+      // wall-clock second get an IDENTICAL ts even though the snapshot's DB
+      // read can predate the event's own commit -- applyPrerequisitesEvent's
+      // own staleness guard (strict "<") already treats a tie as "fresh
+      // enough to apply", so this preservation check must treat the SAME
+      // tie as "fresh enough to keep", or the two guards disagree on who
+      // wins a tie and this one silently loses (found by adversarial review
+      // of the Ruby SDK's identical fix, PR #238).
       const keepLivePrerequisites =
         existing?.prerequisitesUpdatedAt !== undefined &&
-        existing.prerequisitesUpdatedAt > snapshotTs;
+        existing.prerequisitesUpdatedAt >= snapshotTs;
       next.set(flag.flagKey, {
         ...flag,
         targetingRules: Array.isArray(flag.targetingRules)

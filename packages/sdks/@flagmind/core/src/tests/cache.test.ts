@@ -193,6 +193,49 @@ describe("FlagCache — loadSnapshot preserves a fresher live prerequisites upda
     assert.equal(state?.updatedAt, 1500);
   });
 
+  it("preserves the live update on an exact ts tie", () => {
+    /**
+     * flag-api's snapshot endpoint (environments.go: Ts: time.Now().Unix())
+     * and its prerequisites-event publisher (prerequisites.go: ts :=
+     * time.Now().Unix()) both use the SAME 1-second-resolution wall clock,
+     * so a live event and a racing/in-flight snapshot fetch that land in
+     * the same wall-clock second get an IDENTICAL ts.
+     * applyPrerequisitesEvent's own staleness guard uses strict "<",
+     * meaning it treats an equal ts as "fresh enough to apply" -- this
+     * preservation check must treat the SAME tie as "fresh enough to
+     * keep" (i.e. use ">=", not ">"), or the snapshot silently overwrites
+     * the just-applied live update purely because of a tie. Found by
+     * adversarial review of the Ruby SDK's identical bug, PR #238.
+     */
+    const cache = new FlagCache();
+    cache.loadSnapshot(
+      snapshotWith(1000, [
+        { flagKey: "old-parent", requiredVariation: "true", gate: true },
+      ]),
+    );
+    cache.applyPrerequisitesEvent(
+      "child-flag",
+      [{ flagKey: "new-parent", requiredVariation: "true", gate: true }],
+      2000,
+    );
+
+    // The in-flight snapshot resolves with the EXACT SAME ts as the live
+    // update that already applied.
+    cache.loadSnapshot(
+      snapshotWith(2000, [
+        { flagKey: "old-parent", requiredVariation: "true", gate: true },
+      ]),
+    );
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.prerequisites,
+      [{ flagKey: "new-parent", requiredVariation: "true", gate: true }],
+      "a tied ts must not let the snapshot silently overwrite the already-applied live update",
+    );
+    assert.equal(state?.prerequisitesUpdatedAt, 2000);
+  });
+
   it("a snapshot NEWER than the live update's own ts is applied normally -- no stale preservation needed", () => {
     const cache = new FlagCache();
     cache.loadSnapshot(
