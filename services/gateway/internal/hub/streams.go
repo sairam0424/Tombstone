@@ -196,14 +196,14 @@ func BuildReplayFrames(msgs []redis.XMessage) [][]byte {
 			continue
 		}
 
-		// Same dedicated "kind" Values-map discriminator RunStreamConsumer's
-		// live path checks (NOT "event" -- see that function's own doc
-		// comment for why: "event" can collide with an unvalidated,
-		// caller-supplied FlagEvent.Reason) -- a reconnecting client's
-		// XRANGE catch-up must replay a prerequisites_updated entry the
-		// same way it would have been delivered live, not silently drop it
-		// by trying (and failing) to unmarshal it as a FlagEvent.
-		if kind, _ := msg.Values["kind"].(string); kind == "prerequisites_updated" {
+		// Same dedicated "kind" Values-map discriminator (rawRelayEventKinds,
+		// hub.go) RunStreamConsumer's live path checks (NOT "event" -- see
+		// that function's own doc comment for why: "event" can collide with
+		// an unvalidated, caller-supplied FlagEvent.Reason) -- a reconnecting
+		// client's XRANGE catch-up must replay one of these entries the same
+		// way it would have been delivered live, not silently drop it by
+		// trying (and failing) to unmarshal it as a FlagEvent.
+		if kind, _ := msg.Values["kind"].(string); isRawRelayEventKind(kind) {
 			frames = append(frames, rawFrame(kind, []byte(payload), msg.ID))
 			continue
 		}

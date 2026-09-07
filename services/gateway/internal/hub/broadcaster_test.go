@@ -247,6 +247,66 @@ func TestRunStreamConsumer_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 	}
 }
 
+// TestRunStreamConsumer_RelaysTargetingRulesUpdatedVerbatim mirrors
+// TestRunStreamConsumer_RelaysPrerequisitesUpdatedVerbatim exactly, proving
+// isRawRelayEventKind's generalization (hub.go) actually covers the NEW
+// "targeting_rules_updated" kind flag-api's targeting_rules.go publishes --
+// not just the original "prerequisites_updated" it was written for.
+func TestRunStreamConsumer_RelaysTargetingRulesUpdatedVerbatim(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	const env = "production"
+	streamKey := StreamKey(env)
+
+	h := NewHub(zap.NewNop())
+	b := newTestBroadcaster(rdb, h, ReplicaGroupName("targeting-rules-replica"))
+	CreateConsumerGroups(context.Background(), rdb, []string{env}, b.Group(), zap.NewNop())
+
+	ch := h.Subscribe(env, "client")
+	defer h.Unsubscribe(env, "client", ch)
+
+	// Exactly flag-api's real TargetingRulesEvent JSON shape (services/
+	// flag-api/internal/api/v1/targeting_rules.go).
+	payload := `{"flag_key":"checkout-flow","environment":"production","targeting_rules":[{"id":"r1","rule_type":"USER","attribute":"email","operator":"CONTAINS","values":["@acme.com"],"variation":"true","priority":0}],"ts":1700000000}`
+
+	if _, err := rdb.XAdd(context.Background(), &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{
+			"kind":        "targeting_rules_updated",
+			"event":       "targeting_rules_updated",
+			"flag_key":    "checkout-flow",
+			"environment": env,
+			"payload":     payload,
+		},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.RunStreamConsumer(ctx, env)
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	frameStr := string(frame)
+
+	if !strings.Contains(frameStr, "event: targeting_rules_updated\n") {
+		t.Errorf("frame does not carry the real event: name: %s", frameStr)
+	}
+	if !strings.Contains(frameStr, payload) {
+		t.Errorf("frame does not carry the payload verbatim: %s", frameStr)
+	}
+	if strings.Contains(frameStr, "event: flag_updated") || strings.Contains(frameStr, "event: kill_switch") {
+		t.Errorf("frame was misrouted through the FlagEvent path: %s", frameStr)
+	}
+}
+
 // TestRunStreamConsumer_KillSwitchReasonCannotCollideWithPrerequisitesUpdated
 // is the direct regression proof for a HIGH-severity finding from
 // adversarial review of the prerequisites-streaming PR: an earlier version

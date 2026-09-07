@@ -23,6 +23,8 @@
 | 016-022 | _(see git log)_ | project_id scoping for `scheduled_changes`/`audit_log`/`change_requests` (TEN-1a), SEC-3b propose/quorum/apply + require_approval gate, break-glass hardening — this table fell behind; not backfilled retroactively, see the plan memory for the full history. |
 | 023 | `023_targeted_indexes.sql` | DATA-2: five indexes for existing hot-path query patterns that had no supporting index — `flag_environments(environment)`, `change_requests(status, created_at)`, `flags(project_id, state)`, `audit_log(project_id, created_at)`, `scim_users(email)`. Purely additive, no application code change. |
 | 024 | `024_user_token_watermarks.sql` | SEC-5: adds `user_token_watermarks(user_email PK, valid_after)` — lets `validateJWT` reject a token issued before the subject's most recent forced-logout timestamp, closing the gap where SCIM deprovisioning revoked `user_roles` but left an already-issued JWT valid until natural expiry. |
+| 025-026 | _(see git log)_ | Audit log retention (`025_audit_log_retention.sql`), circuit-breaker role (`026_circuit_breaker_role.sql`) — this table fell behind again; not backfilled retroactively, same as 016-022 above. |
+| 027 | `027_targeting_rules_hardening.sql` | `targeting_rules` has existed since the baseline schema as pure scaffolding (no query file, no REST endpoint, no snapshot wiring) — adds `created_at` (mirroring sibling `flag_prerequisites`, migration 006) and an `idx_targeting_rules_flag_env(flag_id, environment)` index before that surface is built. Purely additive, no application code change to any EXISTING code path. |
 
 ## Why 001 Is Skipped
 

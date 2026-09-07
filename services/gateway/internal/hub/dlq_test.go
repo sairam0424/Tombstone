@@ -463,3 +463,56 @@ func TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled(t *t
 		t.Errorf("reclaimed prerequisites_updated entry was misrouted through the FlagEvent path: %s", frameStr)
 	}
 }
+
+// TestReclaimStalePending_TargetingRulesUpdatedIsRelayedNotMisunmarshaled
+// mirrors TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled
+// exactly, proving isRawRelayEventKind's generalization (hub.go) covers the
+// reclaim-and-retry path for the NEW "targeting_rules_updated" kind too, not
+// just the original "prerequisites_updated" it was written for.
+func TestReclaimStalePending_TargetingRulesUpdatedIsRelayedNotMisunmarshaled(t *testing.T) {
+	mr, rdb, b, streamKey := setupDLQTest(t, "production")
+	defer mr.Close()
+	defer rdb.Close()
+
+	ctx := context.Background()
+	ch := b.hub.Subscribe("production", "client")
+	defer b.hub.Unsubscribe("production", "client", ch)
+
+	payload := `{"flag_key":"checkout-flow","environment":"production","targeting_rules":[{"id":"r1","rule_type":"USER","attribute":"email","operator":"CONTAINS","values":["@acme.com"],"variation":"true","priority":0}],"ts":1700000000}`
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{
+			"kind":        "targeting_rules_updated",
+			"event":       "targeting_rules_updated",
+			"flag_key":    "checkout-flow",
+			"environment": "production",
+			"payload":     payload,
+		},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: b.Group(), Consumer: replicaConsumerName, Streams: []string{streamKey, ">"}, Count: 1,
+	}).Result(); err != nil {
+		t.Fatalf("XReadGroup(own): %v", err)
+	}
+
+	mr.SetTime(time.Now().Add(reclaimIdleThreshold + time.Second))
+	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
+		t.Fatalf("ReclaimStalePending: %v", err)
+	}
+
+	frame := waitForFrame(t, ch, 5*time.Second)
+	frameStr := string(frame)
+
+	if !strings.Contains(frameStr, "event: targeting_rules_updated") {
+		t.Errorf("reclaimed targeting_rules_updated entry was not relayed under its real event name: %s", frameStr)
+	}
+	if !strings.Contains(frameStr, payload) {
+		t.Errorf("reclaimed entry did not carry the real payload verbatim: %s", frameStr)
+	}
+	if strings.Contains(frameStr, "event: flag_updated") || strings.Contains(frameStr, "event: kill_switch") {
+		t.Errorf("reclaimed targeting_rules_updated entry was misrouted through the FlagEvent path: %s", frameStr)
+	}
+}
