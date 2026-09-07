@@ -90,7 +90,24 @@ export class FlagCache {
           ? existing.prerequisitesUpdatedAt
           : snapshotTs,
       });
-      nextFromLiveEvent.set(flag.flagKey, keepLivePrerequisites);
+      // ONE-SHOT consumption, always false here (never keepLivePrerequisites):
+      // this loadSnapshot call has now fully resolved the race between the
+      // live event and ITS OWN specific in-flight snapshot, whether by
+      // preserving (this snapshot WAS the stale racer) or applying (this
+      // snapshot's own ts was genuinely too new to be that racer). Setting
+      // this to keepLivePrerequisites instead would make the protection
+      // "sticky": a SECOND, independent snapshot arriving later and tying
+      // the same ts would ALSO get vetoed even though no new live event
+      // raced it -- found by a second round of adversarial review of this
+      // same fix. Residual, accepted limitation: TWO snapshot fetches that
+      // were BOTH already in flight when the SAME live event fired (e.g. a
+      // lag-triggered refetch racing a reconnect-triggered one) will only
+      // have the FIRST-arriving one correctly blocked; the second will
+      // overwrite the live event's data with its own equally-stale
+      // pre-mutation snapshot. Solving this fully would require a signal
+      // finer than flag-api's 1-second-resolution wall-clock ts, which the
+      // wire protocol does not provide.
+      nextFromLiveEvent.set(flag.flagKey, false);
     }
     this.memory = next;
     this.prerequisitesFromLiveEvent = nextFromLiveEvent;
