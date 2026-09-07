@@ -6,7 +6,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from tombstone.client import TombstoneClient
+from tombstone.client import TombstoneClient, _parse_targeting_rules
 from tombstone.types import FlagEnvironmentState, TargetingRule, PropertyCondition
 
 
@@ -403,4 +403,595 @@ def test_snapshot_seeds_prerequisites_updated_at_from_the_snapshot_ts():
     )
 
     assert client._cache["my-flag"].prerequisites_updated_at == 9_000
+    client.close()
+
+
+# ── _apply_snapshot global monotonicity + live-event tie-break ─────────────
+# Found by adversarial review while adding targeting_rules_updated
+# consumption: this SDK's _apply_snapshot had NEITHER a global monotonicity
+# guard (rejecting a snapshot older than the last one actually applied) NOR
+# any per-flag tie-break protecting a fresher live update across a slower
+# snapshot -- a real, pre-existing gap in the ALREADY-SHIPPED prerequisites-
+# streaming implementation, not merely a targeting_rules gap. Retrofitted
+# for prerequisites here, proactively applied for targeting_rules from the
+# start.
+
+
+def _snapshot(ts, flag_key="my-flag", prerequisites=None, targeting_rules=None):
+    flag = {
+        "flag_key": flag_key,
+        "enabled": True,
+        "rollout_pct": 100.0,
+        "safe_default": False,
+    }
+    if prerequisites is not None:
+        flag["prerequisites"] = prerequisites
+    if targeting_rules is not None:
+        flag["targeting_rules"] = targeting_rules
+    return {"environment": "prod", "ts": ts, "flags": [flag]}
+
+
+def _rule_wire(
+    rule_id,
+    attribute="email",
+    operator="eq",
+    values=None,
+    variation="matched",
+    priority=0,
+):
+    return {
+        "id": rule_id,
+        "rule_type": "USER",
+        "attribute": attribute,
+        "operator": operator,
+        "values": values if values is not None else ["x@example.com"],
+        "variation": variation,
+        "priority": priority,
+    }
+
+
+def test_apply_snapshot_rejects_an_incoming_snapshot_older_than_the_last_one_applied():
+    client = _client()
+    client._apply_snapshot(_snapshot(5_000, prerequisites=[{"flag_key": "p1"}]))
+    client._apply_snapshot(
+        _snapshot(3_000, prerequisites=[{"flag_key": "p2"}])
+    )  # older -- rejected wholesale
+
+    assert client._cache["my-flag"].prerequisites == [{"flag_key": "p1"}]
+    client.close()
+
+
+def test_apply_snapshot_still_applies_a_genuinely_newer_snapshot_after_an_older_one_was_rejected():
+    client = _client()
+    client._apply_snapshot(_snapshot(5_000, prerequisites=[{"flag_key": "p1"}]))
+    client._apply_snapshot(
+        _snapshot(3_000, prerequisites=[{"flag_key": "p2"}])
+    )  # rejected
+    client._apply_snapshot(
+        _snapshot(7_000, prerequisites=[{"flag_key": "p3"}])
+    )  # genuinely newer
+
+    assert client._cache["my-flag"].prerequisites == [{"flag_key": "p3"}]
+    client.close()
+
+
+def test_apply_snapshot_preserves_a_fresher_live_prerequisites_update():
+    client = _client()
+    old_parent = [{"flag_key": "old-parent"}]
+    client._apply_snapshot(_snapshot(1_000, prerequisites=old_parent))
+
+    new_parent = [{"flag_key": "new-parent"}]
+    client._apply_prerequisites_event(
+        _prereq_frame("my-flag", "prod", new_parent, 2_000)[1][6:]
+    )
+
+    # The slower snapshot now resolves. Its ts=1_500 is newer than the
+    # cache's LAST SNAPSHOT ts (1_000), so it passes the whole-snapshot
+    # check -- but it still carries the OLD (pre-live-update) prerequisites.
+    client._apply_snapshot(_snapshot(1_500, prerequisites=old_parent))
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == new_parent
+    assert updated.prerequisites_updated_at == 2_000
+    client.close()
+
+
+def test_apply_snapshot_preserves_a_fresher_live_targeting_rules_update():
+    client = _client()
+    old_rule = [_rule_wire("old-rule")]
+    client._apply_snapshot(_snapshot(1_000, targeting_rules=old_rule))
+
+    new_rule = [_rule_wire("new-rule")]
+    client._apply_targeting_rules_event(
+        _rules_frame("my-flag", "prod", new_rule, 2_000)[1][6:]
+    )
+
+    client._apply_snapshot(_snapshot(1_500, targeting_rules=old_rule))
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "new-rule"
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+def test_apply_snapshot_preserves_the_live_prerequisites_update_on_an_exact_ts_tie():
+    client = _client()
+    old_parent = [{"flag_key": "old-parent"}]
+    client._apply_snapshot(_snapshot(1_000, prerequisites=old_parent))
+
+    new_parent = [{"flag_key": "new-parent"}]
+    client._apply_prerequisites_event(
+        _prereq_frame("my-flag", "prod", new_parent, 2_000)[1][6:]
+    )
+
+    client._apply_snapshot(_snapshot(2_000, prerequisites=old_parent))
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == new_parent
+    assert updated.prerequisites_updated_at == 2_000
+    client.close()
+
+
+def test_apply_snapshot_second_snapshot_sharing_the_exact_same_ts_no_live_event_still_applies_its_own_prerequisites():
+    client = _client()
+    client._apply_snapshot(_snapshot(5_000, prerequisites=[{"flag_key": "parent-a"}]))
+    client._apply_snapshot(_snapshot(5_000, prerequisites=[{"flag_key": "parent-b"}]))
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == [{"flag_key": "parent-b"}]
+    assert updated.prerequisites_updated_at == 5_000
+    client.close()
+
+
+def test_apply_snapshot_second_snapshot_sharing_the_exact_same_ts_no_live_event_still_applies_its_own_targeting_rules():
+    client = _client()
+    client._apply_snapshot(_snapshot(5_000, targeting_rules=[_rule_wire("rule-a")]))
+    client._apply_snapshot(_snapshot(5_000, targeting_rules=[_rule_wire("rule-b")]))
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "rule-b"
+    assert updated.targeting_rules_updated_at == 5_000
+    client.close()
+
+
+def test_apply_snapshot_third_snapshot_tying_a_live_events_ts_after_a_second_tied_snapshot_already_resolved_the_race():
+    client = _client()
+    client._apply_snapshot(_snapshot(1_000, prerequisites=[{"flag_key": "old-parent"}]))
+    client._apply_prerequisites_event(
+        _prereq_frame("my-flag", "prod", [{"flag_key": "live-parent"}], 2_000)[1][6:]
+    )
+
+    # First tied snapshot after the live event -- must preserve.
+    client._apply_snapshot(
+        _snapshot(2_000, prerequisites=[{"flag_key": "snap-b-parent"}])
+    )
+    assert client._cache["my-flag"].prerequisites == [{"flag_key": "live-parent"}]
+
+    # A SECOND, independent snapshot arrives, also tying ts=2_000. No new
+    # live event raced THIS one -- the protection was already consumed.
+    client._apply_snapshot(
+        _snapshot(2_000, prerequisites=[{"flag_key": "snap-c-parent"}])
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.prerequisites == [{"flag_key": "snap-c-parent"}]
+    assert updated.prerequisites_updated_at == 2_000
+    client.close()
+
+
+# Found missing (for the analogous TS SDK feature) by adversarial review of
+# PR #246, and only correctly ISOLATED after a second round of adversarial
+# review of the Java SDK's own first draft of this same test (PR #247): a
+# naive version where the untouched field's own ts is strictly OLDER than
+# the tying snapshot's ts lets the ts>=snapshot_ts half of the AND condition
+# alone force the correct outcome regardless of what the live-provenance
+# boolean is set to -- so it doesn't actually test anything. This version
+# ties BOTH the live event and the final snapshot at the SAME ts as the
+# very first load, so the boolean is the ONLY variable that can distinguish
+# a correct pass from a false one.
+
+
+def test_a_live_prerequisites_event_does_not_protect_targeting_rules():
+    client = _client()
+    old_prereq = [{"flag_key": "old-parent"}]
+    old_rule = [_rule_wire("old-rule")]
+    client._apply_snapshot(
+        _snapshot(1_000, prerequisites=old_prereq, targeting_rules=old_rule)
+    )
+
+    # Only a live PREREQUISITES event fires, tying the SAME ts=1_000 --
+    # targeting_rules gets no live event at all.
+    new_prereq = [{"flag_key": "new-parent"}]
+    client._apply_prerequisites_event(
+        _prereq_frame("my-flag", "prod", new_prereq, 1_000)[1][6:]
+    )
+
+    # A second snapshot ties the SAME ts=1_000 again. Both existing
+    # *_updated_at fields are now >= 1_000 -- carrying stale prerequisites
+    # (correctly preserved) but genuinely NEW targeting_rules (must NOT be
+    # blocked).
+    genuinely_new_rule = [_rule_wire("genuinely-new-rule")]
+    client._apply_snapshot(
+        _snapshot(1_000, prerequisites=old_prereq, targeting_rules=genuinely_new_rule)
+    )
+
+    state = client._cache["my-flag"]
+    assert state.prerequisites == new_prereq
+    assert state.targeting_rules[0].id == "genuinely-new-rule"
+    client.close()
+
+
+def test_a_live_targeting_rules_event_does_not_protect_prerequisites():
+    client = _client()
+    old_prereq = [{"flag_key": "old-parent"}]
+    old_rule = [_rule_wire("old-rule")]
+    client._apply_snapshot(
+        _snapshot(1_000, prerequisites=old_prereq, targeting_rules=old_rule)
+    )
+
+    new_rule = [_rule_wire("new-rule")]
+    client._apply_targeting_rules_event(
+        _rules_frame("my-flag", "prod", new_rule, 1_000)[1][6:]
+    )
+
+    genuinely_new_prereq = [{"flag_key": "genuinely-new-parent"}]
+    client._apply_snapshot(
+        _snapshot(1_000, prerequisites=genuinely_new_prereq, targeting_rules=old_rule)
+    )
+
+    state = client._cache["my-flag"]
+    assert state.targeting_rules[0].id == "new-rule"
+    assert state.prerequisites == genuinely_new_prereq
+    client.close()
+
+
+def test_apply_targeting_rules_event_compares_against_targeting_rules_updated_at_not_prerequisites_updated_at():
+    # Found by adversarial review of the Java/Ruby/.NET SDKs' own equivalent
+    # tests (PRs #247-249): every other test above only ever sets
+    # prerequisites_updated_at and targeting_rules_updated_at to the SAME
+    # value (both come from _apply_snapshot alone) -- so a copy-paste bug in
+    # _apply_targeting_rules_event's own staleness guard (comparing against
+    # existing.prerequisites_updated_at instead of
+    # existing.targeting_rules_updated_at) would go completely undetected.
+    # This test deliberately DIVERGES the two fields first.
+    client = _client()
+    client._apply_snapshot(_snapshot(1_000, targeting_rules=[_rule_wire("old-rule")]))
+    # Both *_updated_at fields are 1_000 here.
+
+    # A live PREREQUISITES event bumps ONLY prerequisites_updated_at to
+    # 5_000 -- targeting_rules_updated_at must stay at 1_000.
+    client._apply_prerequisites_event(
+        _prereq_frame("my-flag", "prod", [{"flag_key": "new-parent"}], 5_000)[1][6:]
+    )
+    assert client._cache["my-flag"].targeting_rules_updated_at == 1_000
+
+    # ts=2_000 is NEWER than targeting_rules_updated_at (1_000, the correct
+    # field) but OLDER than prerequisites_updated_at (5_000, the WRONG
+    # field a copy-paste bug might compare against instead).
+    new_rule = [_rule_wire("new-rule")]
+    client._apply_targeting_rules_event(
+        _rules_frame("my-flag", "prod", new_rule, 2_000)[1][6:]
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "new-rule"
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+# ── Live targeting_rules-streaming (services/flag-api's TargetingRulesEvent) ──
+
+
+def _rules_frame(flag_key, environment, targeting_rules, ts) -> list[str]:
+    data = json.dumps(
+        {
+            "flag_key": flag_key,
+            "environment": environment,
+            "targeting_rules": targeting_rules,
+            "ts": ts,
+        }
+    )
+    return ["event: targeting_rules_updated", f"data: {data}", ""]
+
+
+def test_consume_sse_lines_routes_targeting_rules_updated_to_its_own_handler():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules_updated_at=1_000,
+    )
+
+    client._consume_sse_lines(
+        iter(_rules_frame("my-flag", "prod", [_rule_wire("r1")], 2_000))
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.enabled is True, "targeting_rules_updated must not touch enabled"
+    assert updated.rollout_pct == 100.0, (
+        "targeting_rules_updated must not touch rollout_pct"
+    )
+    assert len(updated.targeting_rules) == 1
+    assert updated.targeting_rules[0].id == "r1"
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+def test_apply_targeting_rules_event_replaces_the_full_list():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules=_parse_targeting_rules([_rule_wire("old-rule")]),
+        targeting_rules_updated_at=1_000,
+    )
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "targeting_rules": [_rule_wire("new-rule")],
+                "ts": 2_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert len(updated.targeting_rules) == 1
+    assert updated.targeting_rules[0].id == "new-rule", (
+        "must be a full replacement, not a merge with the old list"
+    )
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+def test_apply_targeting_rules_event_for_an_unknown_flag_is_a_noop():
+    client = _client()
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "never-seen-flag",
+                "environment": "prod",
+                "targeting_rules": [_rule_wire("r1")],
+                "ts": 1_000,
+            }
+        )
+    )
+
+    assert "never-seen-flag" not in client._cache
+    client.close()
+
+
+def test_apply_targeting_rules_event_rejects_a_stale_out_of_order_delivery():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules=_parse_targeting_rules([_rule_wire("current-rule")]),
+        targeting_rules_updated_at=5_000,
+    )
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "targeting_rules": [_rule_wire("stale-rule")],
+                "ts": 3_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "current-rule", (
+        "a stale (older-ts) event must not overwrite the newer cached state"
+    )
+    assert updated.targeting_rules_updated_at == 5_000
+    client.close()
+
+
+def test_apply_targeting_rules_event_with_ts_equal_to_cached_is_applied():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules=_parse_targeting_rules([_rule_wire("current-rule")]),
+        targeting_rules_updated_at=5_000,
+    )
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "targeting_rules": [_rule_wire("new-rule")],
+                "ts": 5_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "new-rule", (
+        "an equal-ts event must be applied, not dropped as stale"
+    )
+    assert updated.targeting_rules_updated_at == 5_000
+    client.close()
+
+
+def test_apply_targeting_rules_event_with_an_empty_list_clears_existing_rules():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules=_parse_targeting_rules([_rule_wire("old-rule")]),
+        targeting_rules_updated_at=1_000,
+    )
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "targeting_rules": [],
+                "ts": 2_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules == []
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+def test_snapshot_seeds_targeting_rules_updated_at_from_the_snapshot_ts():
+    client = _client()
+    client._apply_snapshot(_snapshot(9_000, targeting_rules=[]))
+
+    assert client._cache["my-flag"].targeting_rules_updated_at == 9_000
+    client.close()
+
+
+# ── real flat wire-shape adapter (_parse_targeting_rules) ───────────────────
+# The EARLIER version of this parsing (both in _apply_snapshot and the
+# original draft of _apply_targeting_rules_event) assumed a NESTED
+# "conditions" key per rule, which does not exist anywhere on flag-api's
+# real wire format -- every real targeting rule parsed as an EMPTY
+# conditions list, making targeting_rules completely unreachable. Found
+# while wiring the real backend format into this SDK's live-event path for
+# the first time.
+
+
+def test_apply_snapshot_parses_the_real_flat_wire_shape_not_a_nested_conditions_key():
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire(
+                    "rule-1",
+                    attribute="email",
+                    operator="CONTAINS",
+                    values=["@acme.com"],
+                    priority=3,
+                )
+            ],
+        )
+    )
+
+    rule = client._cache["my-flag"].targeting_rules[0]
+    assert rule.id == "rule-1"
+    assert rule.priority == 3
+    assert rule.rollout_pct == 100.0
+    assert len(rule.conditions) == 1
+    assert rule.conditions[0].attribute == "email"
+    assert rule.conditions[0].operator == "CONTAINS"
+    assert rule.conditions[0].values == ["@acme.com"]
+    client.close()
+
+
+def test_targeting_rule_whole_number_json_float_values_round_trip_without_a_trailing_dot_zero():
+    # flag-api's JSONB "values" column can round-trip a whole-number value
+    # as a JSON float (e.g. 21.0) -- must render as "21", not "21.0", or an
+    # eq/in/neq/nin condition silently fails to match a context attribute
+    # supplied as a plain int or bare numeric string. Found by adversarial
+    # review of the Ruby/.NET SDKs' identical adapters (PRs #248/#249).
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire(
+                    "rule-1",
+                    attribute="age_bracket",
+                    operator="IN",
+                    values=[21.0, 65.0],
+                )
+            ],
+        )
+    )
+
+    condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
+    assert condition.values == ["21", "65"]
+    client.close()
+
+
+def test_targeting_rule_huge_integer_value_preserves_exact_precision():
+    # Python's json module parses a plain integer literal (no decimal
+    # point) into its native arbitrary-precision int -- exact at any size,
+    # unlike the other 4 SDKs' native numeric types, which needed their own
+    # fix for this. Confirmed here rather than assumed.
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire(
+                    "rule-1",
+                    attribute="big_id",
+                    operator="EQ",
+                    values=[9007199254740993],
+                )
+            ],
+        )
+    )
+
+    condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
+    assert condition.values == ["9007199254740993"]
+    client.close()
+
+
+def test_targeting_rule_non_whole_float_values_preserve_their_fractional_part():
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire("rule-1", attribute="score", operator="EQ", values=[21.5])
+            ],
+        )
+    )
+
+    condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
+    assert condition.values == ["21.5"]
+    client.close()
+
+
+def test_a_malformed_non_dict_entry_inside_targeting_rules_is_skipped_not_raised():
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(1_000, targeting_rules=[None, _rule_wire("rule-1")])
+    )
+
+    rules = client._cache["my-flag"].targeting_rules
+    assert len(rules) == 1
+    assert rules[0].id == "rule-1"
+    client.close()
+
+
+def test_a_targeting_rule_missing_the_values_key_entirely_parses_with_empty_values_not_an_error():
+    client = _client()
+    rule = _rule_wire("rule-1")
+    del rule["values"]
+    client._apply_snapshot(_snapshot(1_000, targeting_rules=[rule]))
+
+    condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
+    assert condition.values == []
     client.close()

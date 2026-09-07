@@ -66,6 +66,10 @@ class FlagEnvironmentState:
     # PrerequisitesEvent doc comment discloses this and designed Ts
     # specifically so SDKs could guard against it this way).
     prerequisites_updated_at: int = 0
+    # Identical purpose to prerequisites_updated_at above, tracked
+    # independently for targeting_rules -- see TombstoneClient.
+    # _apply_targeting_rules_event's own doc comment.
+    targeting_rules_updated_at: int = 0
 
 
 @dataclass
