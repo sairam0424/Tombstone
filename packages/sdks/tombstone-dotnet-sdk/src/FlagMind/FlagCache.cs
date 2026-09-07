@@ -18,6 +18,20 @@ public class FlagCache
     // ts (time.Now().Unix() at response generation) will never be this low,
     // so the very first LoadSnapshot call always applies.
     private long _lastSnapshotTs = long.MinValue;
+    // Tracks which flag keys' CURRENT prerequisites/PrerequisitesUpdatedAt
+    // came from a live prerequisites_updated event (true) rather than a
+    // snapshot load (false/absent). A tied ts alone cannot distinguish "a
+    // live event that must win a tie against a slower, still-in-flight
+    // snapshot" from "two DIFFERENT snapshots that happen to share flag-api's
+    // coarse 1-second-resolution ts, where the second (newer LOAD, regardless
+    // of ts) must still win" -- without this, LoadSnapshot's own >= tie-break
+    // would incorrectly freeze prerequisites on the FIRST of two same-ts
+    // snapshots forever. This protection is ONE-SHOT: LoadSnapshot always
+    // resets this to false after evaluating it (see LoadSnapshot's own
+    // comment for why re-propagating true would make the protection
+    // "sticky" and veto a later, independent snapshot too).
+    private volatile ImmutableDictionary<string, bool> _prerequisitesFromLiveEvent
+        = ImmutableDictionary<string, bool>.Empty;
 
     // flag-api's snapshot ts is simply time.Now().Unix() at response
     // generation (services/flag-api/internal/api/v1/environments.go), not a
@@ -32,7 +46,10 @@ public class FlagCache
         if (_lastSnapshotTs != long.MinValue && snapshotTs < _lastSnapshotTs) return;
 
         var current = _cache;
-        _cache = flags.ToImmutableDictionary(f => f.FlagKey, f =>
+        var currentFromLiveEvent = _prerequisitesFromLiveEvent;
+        var next = ImmutableDictionary.CreateBuilder<string, FlagEnvironmentState>();
+        var nextFromLiveEvent = ImmutableDictionary.CreateBuilder<string, bool>();
+        foreach (var f in flags)
         {
             // A live prerequisites_updated event may have already advanced
             // this flag's PrerequisitesUpdatedAt to OR PAST this snapshot's
@@ -52,12 +69,34 @@ public class FlagCache
             // "fresh enough to apply", so this preservation check must treat
             // the SAME tie as "fresh enough to keep", or the two guards
             // disagree on who wins a tie and this one silently loses.
-            if (current.TryGetValue(f.FlagKey, out var existing) && existing.PrerequisitesUpdatedAt >= snapshotTs)
-            {
-                return f with { Prerequisites = existing.Prerequisites, PrerequisitesUpdatedAt = existing.PrerequisitesUpdatedAt };
-            }
-            return f with { PrerequisitesUpdatedAt = snapshotTs };
-        });
+            //
+            // Also requires _prerequisitesFromLiveEvent to be true: without
+            // it, a SECOND snapshot sharing the exact same ts as a FIRST
+            // snapshot (no live event involved at all) would incorrectly
+            // take this same "preserve" branch and freeze prerequisites on
+            // the first snapshot's value forever.
+            var keepLivePrerequisites =
+                current.TryGetValue(f.FlagKey, out var existing) &&
+                currentFromLiveEvent.TryGetValue(f.FlagKey, out var fromLive) && fromLive &&
+                existing.PrerequisitesUpdatedAt >= snapshotTs;
+            next[f.FlagKey] = keepLivePrerequisites
+                ? f with { Prerequisites = existing!.Prerequisites, PrerequisitesUpdatedAt = existing.PrerequisitesUpdatedAt }
+                : f with { PrerequisitesUpdatedAt = snapshotTs };
+            // ONE-SHOT consumption, always false here (never
+            // keepLivePrerequisites): this LoadSnapshot call has now fully
+            // resolved the race between the live event and ITS OWN specific
+            // in-flight snapshot. Re-propagating true would make the
+            // protection "sticky", vetoing a later, independent snapshot
+            // that merely happens to tie the same coarse-resolution second
+            // too. Residual, accepted limitation: two snapshot fetches that
+            // were BOTH already in flight when the SAME live event fired
+            // will only have the first-arriving one correctly blocked;
+            // solving that fully would require a signal finer than
+            // flag-api's 1-second-resolution wall-clock ts.
+            nextFromLiveEvent[f.FlagKey] = false;
+        }
+        _cache = next.ToImmutable();
+        _prerequisitesFromLiveEvent = nextFromLiveEvent.ToImmutable();
         _lastSnapshotTs = snapshotTs;
     }
 
@@ -92,6 +131,12 @@ public class FlagCache
         if (ts < existing.PrerequisitesUpdatedAt) return;
         var updated = existing with { Prerequisites = prerequisites, PrerequisitesUpdatedAt = ts };
         _cache = current.SetItem(flagKey, updated);
+        // Marks this flag's prerequisites as LIVE-sourced -- see
+        // _prerequisitesFromLiveEvent's own field comment for why
+        // LoadSnapshot needs this distinction, not just a ts comparison, to
+        // decide whether a tied-or-older incoming snapshot should be
+        // allowed to overwrite it.
+        _prerequisitesFromLiveEvent = _prerequisitesFromLiveEvent.SetItem(flagKey, true);
     }
 
     public FlagEnvironmentState? Get(string flagKey) =>

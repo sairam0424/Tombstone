@@ -181,6 +181,58 @@ public class FlagCachePrerequisitesTests
     }
 
     [Fact]
+    public void LoadSnapshot_SecondSnapshotSharingTheExactSameTsAsFirst_NoLiveEvent_StillAppliesItsOwnData()
+    {
+        // Regression test for a real bug the >= tie-break above introduced
+        // in its own first draft: with only a ts comparison, this cache
+        // cannot tell "existing.PrerequisitesUpdatedAt came from a live
+        // event that must win a tie" from "existing.PrerequisitesUpdatedAt
+        // came from a PRIOR SNAPSHOT LOAD that merely happens to share
+        // flag-api's coarse 1-second-resolution ts with a SECOND, later
+        // snapshot". Without _prerequisitesFromLiveEvent tracking, this
+        // second snapshot's genuinely different prerequisites would be
+        // silently discarded.
+        var cache = new FlagCache();
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("parent-a") }) }, 5000);
+
+        // A second, completely independent snapshot fetch resolves with the
+        // EXACT SAME ts but genuinely different data. No live event at all.
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("parent-b") }) }, 5000);
+
+        var updated = cache.Get("child-flag")!;
+        Assert.Equal(new List<FlagPrerequisite> { Prereq("parent-b") }, updated.Prerequisites);
+        Assert.Equal(5000L, updated.PrerequisitesUpdatedAt);
+    }
+
+    [Fact]
+    public void LoadSnapshot_ThirdSnapshotTyingALiveEventsTs_AfterASecondTiedSnapshotAlreadyResolvedTheRace_StillAppliesItsOwnData()
+    {
+        // Regression test found by a SECOND round of adversarial review of
+        // this fix's own first draft: _prerequisitesFromLiveEvent was being
+        // re-set to true every time it was used to preserve a live event
+        // across a tied snapshot, making the protection "sticky" -- EVERY
+        // subsequent snapshot at or before that ts would ALSO get vetoed,
+        // not just the one snapshot that legitimately raced the live event.
+        // The protection must be ONE-SHOT.
+        var cache = new FlagCache();
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("old-parent") }) }, 1000);
+        cache.ApplyPrerequisitesEvent("child-flag", new() { Prereq("live-parent") }, 2000);
+
+        // First tied snapshot after the live event -- the ONE specific race
+        // the live event's own protection exists to close. Must preserve.
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("snap-b-parent") }) }, 2000);
+        Assert.Equal(new List<FlagPrerequisite> { Prereq("live-parent") }, cache.Get("child-flag")!.Prerequisites);
+
+        // A SECOND, independent snapshot arrives, also tying ts=2000. No new
+        // live event raced THIS one -- the protection was already consumed.
+        cache.LoadSnapshot(new[] { Flag("child-flag", prerequisites: new() { Prereq("snap-c-parent") }) }, 2000);
+
+        var updated = cache.Get("child-flag")!;
+        Assert.Equal(new List<FlagPrerequisite> { Prereq("snap-c-parent") }, updated.Prerequisites);
+        Assert.Equal(2000L, updated.PrerequisitesUpdatedAt);
+    }
+
+    [Fact]
     public void ApplyPrerequisitesEvent_WithAnEmptyList_ClearsExistingPrerequisites()
     {
         // ApplyPrerequisitesEvent is documented as a full replacement, not a
