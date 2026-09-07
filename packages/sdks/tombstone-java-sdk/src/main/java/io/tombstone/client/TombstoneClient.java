@@ -153,14 +153,15 @@ public class TombstoneClient implements Closeable {
             // FlagEnvironmentState was ever constructed from wire data,
             // so this client's own prerequisite gating never worked
             // against a real backend at all (found while investigating
-            // SDK-4's prerequisites-streaming follow-up). flag-api's
-            // real snapshot response has no targeting_rules/target_list/
-            // hash_version fields today -- those stay empty/default 1,
-            // same as before -- only prerequisites and updated_at
-            // (also previously hardcoded to 0) are now read for real.
-            // prerequisitesUpdatedAt is set to a placeholder here (0L) --
-            // FlagCache.loadSnapshot is the authoritative place that fills
-            // in the real value (either this snapshot's own ts, or a
+            // SDK-4's prerequisites-streaming follow-up). targeting_rules
+            // is now sent by the real snapshot endpoint (services/flag-api/
+            // internal/api/v1/environments.go's FlagEnvironmentStateWithPrereqs.
+            // TargetingRules, added by PR #245) and parsed below via
+            // parseTargetingRules; target_list/hash_version are still not
+            // sent, so those stay empty/default 1. prerequisitesUpdatedAt
+            // and targetingRulesUpdatedAt are both set to a placeholder here
+            // (0L) -- FlagCache.loadSnapshot is the authoritative place that
+            // fills in the real value (either this snapshot's own ts, or a
             // preserved fresher live-updated value), mirroring the
             // TypeScript SDK's identical parser/cache split of concerns.
             states.add(new FlagEnvironmentState(
@@ -170,7 +171,8 @@ public class TombstoneClient implements Closeable {
                 str(fm, "safe_default"),
                 fm.get("updated_at") instanceof Number n ? n.longValue() : 0L,
                 parsePrerequisites(fm.get("prerequisites")),
-                List.of(), List.of(), 1, 0L
+                parseTargetingRules(fm.get("targeting_rules")),
+                List.of(), 1, 0L, 0L
             ));
         }
         return new ParsedSnapshot(states, snapshotTs);
@@ -197,6 +199,40 @@ public class TombstoneClient implements Closeable {
                 str(pm, "flag_key"),
                 str(pm, "required_variation"),
                 !Boolean.FALSE.equals(pm.get("gate"))
+            ));
+        }
+        return result;
+    }
+
+    // flag-api's real wire shape (services/flag-api/internal/api/v1/
+    // targeting_rules.go's SnapshotTargetingRule/TargetingRule structs):
+    // {"id", "rule_type", "attribute", "operator", "values", "variation",
+    // "priority"} -- ONE condition per rule row, unlike this SDK's own
+    // TargetingRule type (a List<PropertyCondition> plus a per-rule
+    // rolloutPct, a richer GrowthBook-style model that predates the real
+    // backend wire format existing at all). Adapts the flat wire shape into
+    // that richer model with a single-element conditions list and
+    // rolloutPct=100 -- the backend has no per-rule rollout concept, so 100
+    // means "always apply once matched", which is exactly what the flat
+    // wire model intends (flag-level rollout is a SEPARATE, later step in
+    // RuleMatcher.matchRules/EvaluationEngine, not per-rule).
+    private static List<TargetingRule> parseTargetingRules(Object raw) {
+        if (!(raw instanceof List<?> rawList)) return List.of();
+        List<TargetingRule> result = new ArrayList<>(rawList.size());
+        for (Object r : rawList) {
+            if (!(r instanceof Map<?, ?> rm)) continue;
+            List<Object> rawValues = rm.get("values") instanceof List<?> vl ? new ArrayList<>(vl) : List.of();
+            List<String> values = new ArrayList<>(rawValues.size());
+            for (Object v : rawValues) values.add(v != null ? v.toString() : "");
+            PropertyCondition condition = new PropertyCondition(
+                str(rm, "attribute"), str(rm, "operator"), values, false
+            );
+            result.add(new TargetingRule(
+                str(rm, "id"),
+                List.of(condition),
+                100.0,
+                str(rm, "variation"),
+                rm.get("priority") instanceof Number n ? n.intValue() : 0
             ));
         }
         return result;
@@ -260,6 +296,13 @@ public class TombstoneClient implements Closeable {
                     // otherwise coerce those missing keys into false/0 defaults
                     // for a flag that was never actually disabled.
                     applyPrerequisitesEvent(json);
+                } else if ("targeting_rules_updated".equals(eventType)) {
+                    // services/flag-api/internal/api/v1/targeting_rules.go's
+                    // TargetingRulesEvent -- same reasoning as
+                    // prerequisites_updated above: a distinct payload shape
+                    // (flag_key/environment/targeting_rules/ts), so it gets
+                    // its own handler.
+                    applyTargetingRulesEvent(json);
                 } else {
                     applyEvent(json);
                 }
@@ -290,6 +333,20 @@ public class TombstoneClient implements Closeable {
             if (flagKey == null) return;
             long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
             cache.applyPrerequisitesEvent(flagKey, parsePrerequisites(m.get("prerequisites")), ts);
+        } catch (Exception ignored) {}
+    }
+
+    // Package-private (not private) so a test can exercise the real
+    // targeting_rules_updated JSON-parsing/dispatch path directly with a
+    // hand-built wire string, mirroring applyPrerequisitesEvent(String)'s
+    // own package-private visibility, for the identical reason.
+    void applyTargetingRulesEvent(String json) {
+        try {
+            Map<?, ?> m = mapper.readValue(json, Map.class);
+            String flagKey = (String) m.get("flag_key");
+            if (flagKey == null) return;
+            long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
+            cache.applyTargetingRulesEvent(flagKey, parseTargetingRules(m.get("targeting_rules")), ts);
         } catch (Exception ignored) {}
     }
 

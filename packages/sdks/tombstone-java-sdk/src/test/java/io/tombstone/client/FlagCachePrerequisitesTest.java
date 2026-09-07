@@ -30,7 +30,7 @@ public class FlagCachePrerequisitesTest {
     private static FlagEnvironmentState flag(String key, long updatedAt, FlagPrerequisite... prereqs) {
         return new FlagEnvironmentState(
             "id", key, "test", true, 100, "false", updatedAt,
-            List.of(prereqs), List.of(), List.of(), 1, 0L
+            List.of(prereqs), List.of(), List.of(), 1, 0L, 0L
         );
     }
 
