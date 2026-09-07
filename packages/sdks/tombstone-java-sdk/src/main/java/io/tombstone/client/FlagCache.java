@@ -8,30 +8,60 @@ import java.util.concurrent.atomic.AtomicReference;
 // Disclosed, pre-existing, NOT introduced or fixed by the SDK-4
 // cache-wiping fix (confirmed via git diff -- this get/build/set skeleton
 // is byte-identical before and after): applyEvent and loadSnapshot both
-// do a non-atomic read-modify-write on `cache` (get() -> build a new map
-// from that snapshot -> set()) instead of a CAS loop. Two concurrent
-// mutations -- e.g. the SSE listener's applyEvent racing a lag-recovery
-// loadSnapshot -- can both read the same `current`, and whichever set()
-// lands second silently discards the OTHER's entire map, not just the
-// key it touched. Concretely: if a lag-triggered loadSnapshot recovers
-// several dropped flag updates but a concurrent applyEvent (reading the
-// stale pre-recovery snapshot) sets() after it, the whole recovered
-// snapshot is clobbered -- defeating the very lag-recovery mechanism
-// this exists for. Found by adversarial review of the SDK-4 cache-
-// wiping PR; left unfixed here since it's a separate, latent concurrency
-// bug, not something that PR's own change touches or makes newly
-// reachable -- a real fix needs a CAS loop (AtomicReference.updateAndGet
-// or compareAndSet) and is its own, independent piece of work. lastSnapshotTs
-// (added for prerequisites-streaming) and applyPrerequisitesEvent inherit
-// the exact same non-atomic-read-modify-write shape and are left consistent
-// with the rest of this class rather than singled out for a CAS fix.
+// do a non-atomic read-modify-write on `state` (get() -> build a new
+// CacheState from that snapshot -> set()) instead of a CAS loop. Two
+// concurrent mutations -- e.g. the SSE listener's applyEvent racing a
+// lag-recovery loadSnapshot -- can both read the same `current`, and
+// whichever set() lands second silently discards the OTHER's entire
+// state, not just the key it touched. Concretely: if a lag-triggered
+// loadSnapshot recovers several dropped flag updates but a concurrent
+// applyEvent (reading the stale pre-recovery snapshot) sets() after it,
+// the whole recovered snapshot is clobbered -- defeating the very
+// lag-recovery mechanism this exists for. Found by adversarial review of
+// the SDK-4 cache-wiping PR; left unfixed here since it's a separate,
+// latent concurrency bug, not something that PR's own change touches or
+// makes newly reachable -- a real fix needs a CAS loop
+// (AtomicReference.updateAndGet or compareAndSet) and is its own,
+// independent piece of work.
 public class FlagCache {
-    private final AtomicReference<Map<String, FlagEnvironmentState>> cache =
-        new AtomicReference<>(Collections.emptyMap());
+    // Combines the flag map, the prerequisites-live-event-provenance map,
+    // and the last-applied-snapshot ts into ONE object swapped via a
+    // single AtomicReference -- see the field's own comment for why this
+    // combination is load-bearing, not just a style preference.
+    private record CacheState(
+        Map<String, FlagEnvironmentState> flags,
+        Map<String, Boolean> prerequisitesFromLiveEvent,
+        long lastSnapshotTs
+    ) {}
+
     // Sentinel meaning "no snapshot has been loaded yet" -- a real flag-api
     // snapshot ts (time.Now().Unix()) will never be this low, so any real
     // incoming ts trivially passes the very first loadSnapshot call.
-    private volatile long lastSnapshotTs = Long.MIN_VALUE;
+    private static final long NO_SNAPSHOT_YET = Long.MIN_VALUE;
+
+    // flags and prerequisitesFromLiveEvent used to be two SEPARATE fields
+    // (a Map<String, FlagEnvironmentState> cache and a
+    // Map<String, Boolean> prerequisitesFromLiveEvent), each updated by
+    // its own independent statement. Found by a second round of
+    // adversarial review of the prerequisites-live-event tie-breaking fix:
+    // a real JVM thread (e.g. the SSE listener calling applyPrerequisitesEvent
+    // concurrently with the lag-recovery scheduler calling loadSnapshot --
+    // exactly the scenario this class's own top-of-file comment already
+    // names) can observe the two fields in an INCONSISTENT combination --
+    // e.g. `flags` already reflects a live-updated prerequisite, but
+    // `prerequisitesFromLiveEvent` hasn't yet been marked true for that
+    // flag -- which silently defeats the tie-break protection itself, not
+    // just the pre-existing "lose an update" risk the class already
+    // discloses above. Combining both into one CacheState, swapped via a
+    // SINGLE AtomicReference, guarantees any read always sees a mutually
+    // consistent pair -- the same lock-free atomic-swap pattern this class
+    // already used for `cache` alone, just widened to cover the second
+    // field too. This does NOT fix the pre-existing, disclosed "lost
+    // update" race above (two concurrent writers both reading the same old
+    // CacheState, whichever set() lands second wins outright) -- that
+    // remains exactly as accepted/deferred as before.
+    private final AtomicReference<CacheState> state =
+        new AtomicReference<>(new CacheState(Collections.emptyMap(), Collections.emptyMap(), NO_SNAPSHOT_YET));
 
     /** Convenience overload for tests that don't care about prerequisites-streaming timing semantics. */
     public void loadSnapshot(List<FlagEnvironmentState> flags) {
@@ -47,11 +77,14 @@ public class FlagCache {
     // last one actually applied prevents that older response from silently
     // clobbering fresher state for every flag, not just prerequisites.
     public void loadSnapshot(List<FlagEnvironmentState> flags, long snapshotTs) {
-        if (lastSnapshotTs != Long.MIN_VALUE && snapshotTs < lastSnapshotTs) {
+        CacheState currentState = state.get();
+        if (currentState.lastSnapshotTs() != NO_SNAPSHOT_YET && snapshotTs < currentState.lastSnapshotTs()) {
             return;
         }
-        Map<String, FlagEnvironmentState> current = cache.get();
+        Map<String, FlagEnvironmentState> current = currentState.flags();
+        Map<String, Boolean> currentFromLiveEvent = currentState.prerequisitesFromLiveEvent();
         Map<String, FlagEnvironmentState> m = new HashMap<>();
+        Map<String, Boolean> nextFromLiveEvent = new HashMap<>();
         for (FlagEnvironmentState f : flags) {
             FlagEnvironmentState existing = current.get(f.flagKey());
             // A live prerequisites_updated event may have already advanced
@@ -74,8 +107,17 @@ public class FlagCache {
             // to keep", or the two guards disagree on who wins a tie and
             // this one silently loses (found by adversarial review of the
             // Ruby SDK's identical fix, PR #238).
+            //
+            // Also requires prerequisitesFromLiveEvent to be true: without
+            // it, a SECOND snapshot sharing the exact same ts as a FIRST
+            // snapshot (no live event involved at all) would incorrectly
+            // take this same "preserve" branch and freeze prerequisites on
+            // the first snapshot's value forever (found by adversarial
+            // review of this fix's own first draft).
             boolean keepLivePrerequisites =
-                existing != null && existing.prerequisitesUpdatedAt() >= snapshotTs;
+                existing != null &&
+                Boolean.TRUE.equals(currentFromLiveEvent.get(f.flagKey())) &&
+                existing.prerequisitesUpdatedAt() >= snapshotTs;
             m.put(f.flagKey(), new FlagEnvironmentState(
                 f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
                 f.safeDefault(), f.updatedAt(),
@@ -83,9 +125,25 @@ public class FlagCache {
                 f.targetingRules(), f.targetList(), f.hashVersion(),
                 keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs
             ));
+            // ONE-SHOT consumption, always false here (never
+            // keepLivePrerequisites): this loadSnapshot call has now fully
+            // resolved the race between the live event and ITS OWN specific
+            // in-flight snapshot. Re-propagating true would make the
+            // protection "sticky", vetoing a later, independent snapshot
+            // that merely happens to tie the same coarse-resolution second
+            // too (found by a second round of adversarial review of this
+            // same fix). Residual, accepted limitation: two snapshot
+            // fetches that were BOTH already in flight when the SAME live
+            // event fired will only have the first-arriving one correctly
+            // blocked; solving that fully would require a signal finer than
+            // flag-api's 1-second-resolution wall-clock ts.
+            nextFromLiveEvent.put(f.flagKey(), false);
         }
-        cache.set(Collections.unmodifiableMap(m));
-        lastSnapshotTs = snapshotTs;
+        state.set(new CacheState(
+            Collections.unmodifiableMap(m),
+            Collections.unmodifiableMap(nextFromLiveEvent),
+            snapshotTs
+        ));
     }
 
     // Immutable update — never mutates existing map. Threads existing's
@@ -99,7 +157,8 @@ public class FlagCache {
     // the next full snapshot refetch restored them (the same bug class
     // found and fixed in the Python SDK's client.py _apply_event).
     public void applyEvent(String flagKey, boolean enabled, int rolloutPct, long ts) {
-        Map<String, FlagEnvironmentState> current = cache.get();
+        CacheState currentState = state.get();
+        Map<String, FlagEnvironmentState> current = currentState.flags();
         FlagEnvironmentState existing = current.get(flagKey);
         if (existing == null) return;
         FlagEnvironmentState updated = new FlagEnvironmentState(
@@ -110,7 +169,11 @@ public class FlagCache {
         );
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);
-        cache.set(Collections.unmodifiableMap(next));
+        state.set(new CacheState(
+            Collections.unmodifiableMap(next),
+            currentState.prerequisitesFromLiveEvent(),
+            currentState.lastSnapshotTs()
+        ));
     }
 
     /**
@@ -131,7 +194,8 @@ public class FlagCache {
      * gap at the point where staleness actually matters.
      */
     public void applyPrerequisitesEvent(String flagKey, List<FlagPrerequisite> prerequisites, long ts) {
-        Map<String, FlagEnvironmentState> current = cache.get();
+        CacheState currentState = state.get();
+        Map<String, FlagEnvironmentState> current = currentState.flags();
         FlagEnvironmentState existing = current.get(flagKey);
         if (existing == null) return;
         if (ts < existing.prerequisitesUpdatedAt()) return;
@@ -143,18 +207,31 @@ public class FlagCache {
         );
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);
-        cache.set(Collections.unmodifiableMap(next));
+        // Marks this flag's prerequisites as LIVE-sourced -- see
+        // prerequisitesFromLiveEvent's own field comment (on CacheState's
+        // declaration above) for why loadSnapshot needs this distinction,
+        // not just a ts comparison, to decide whether a tied-or-older
+        // incoming snapshot should be allowed to overwrite it. Committed to
+        // `state` in the SAME set() call as the cache update, so a
+        // concurrent reader can never observe one without the other.
+        Map<String, Boolean> nextFromLiveEvent = new HashMap<>(currentState.prerequisitesFromLiveEvent());
+        nextFromLiveEvent.put(flagKey, true);
+        state.set(new CacheState(
+            Collections.unmodifiableMap(next),
+            Collections.unmodifiableMap(nextFromLiveEvent),
+            currentState.lastSnapshotTs()
+        ));
     }
 
     public Optional<FlagEnvironmentState> get(String flagKey) {
-        return Optional.ofNullable(cache.get().get(flagKey));
+        return Optional.ofNullable(state.get().flags().get(flagKey));
     }
 
     public Set<String> flagKeys() {
-        return cache.get().keySet();
+        return state.get().flags().keySet();
     }
 
     public int size() {
-        return cache.get().size();
+        return state.get().flags().size();
     }
 }
