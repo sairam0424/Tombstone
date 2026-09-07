@@ -301,7 +301,14 @@ export class TombstoneClient {
         operator: rule["operator"] as TargetingRule["operator"],
         values: Array.isArray(rule["values"]) ? rule["values"] : [],
         variation: String(rule["variation"] ?? ""),
-        priority: Number(rule["priority"] ?? 0),
+        // Mirrors streaming.ts's handleTargetingRulesRawEvent's identical
+        // guard exactly (see that call site's own comment) -- this
+        // snapshot-loading path can carry the SAME malformed priority a
+        // live event can, and evaluation.ts's sort comparator is equally
+        // undefined-order-sensitive to a NaN from either source.
+        priority: Number.isFinite(Number(rule["priority"]))
+          ? Number(rule["priority"])
+          : 0,
       };
     });
     return {

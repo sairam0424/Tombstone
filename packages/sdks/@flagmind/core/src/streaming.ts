@@ -202,7 +202,19 @@ export class SSEStreamClient {
             operator: rule["operator"] as TargetingRule["operator"],
             values: Array.isArray(rule["values"]) ? rule["values"] : [],
             variation: String(rule["variation"] ?? ""),
-            priority: Number(rule["priority"] ?? 0),
+            // A non-numeric wire priority (e.g. "abc") would otherwise
+            // coerce to NaN and feed directly into evaluation.ts's sort
+            // comparator (a.priority - b.priority), whose result is NaN
+            // whenever either operand is -- making this rule's relative
+            // order among same-flag rules engine/version-dependent instead
+            // of the deterministic, priority-ascending order this feature
+            // promises. Mirrors the SAME NaN-rejection reasoning this PR's
+            // own applyTargetingRulesEvent/applyPrerequisitesEvent already
+            // apply to the EVENT-level ts field. Found by adversarial
+            // review of PR #246.
+            priority: Number.isFinite(Number(rule["priority"]))
+              ? Number(rule["priority"])
+              : 0,
           };
         }),
       };

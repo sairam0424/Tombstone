@@ -628,4 +628,105 @@ describe("FlagCache — loadSnapshot preserves a fresher live targetingRules upd
       "targetingRules must NOT be blocked by an unrelated live PREREQUISITES event tying the same ts",
     );
   });
+
+  it("the mirror image: a live TARGETING_RULES event tying a snapshot's ts does not protect an unrelated live PREREQUISITES field", () => {
+    // The reverse direction of the cross-feature independence test above --
+    // found missing by adversarial review of PR #246. The prior test only
+    // proved a live prerequisites event doesn't accidentally protect
+    // targetingRules; this proves the OTHER direction: a live
+    // targetingRules event must not accidentally protect prerequisites via
+    // a copy-paste swap of which provenance map/*UpdatedAt field gates
+    // which branch in loadSnapshot's two symmetric halves.
+    const cache = new FlagCache();
+    cache.loadSnapshot({
+      environment: "production",
+      hash: "h",
+      ts: 1000,
+      flags: [
+        {
+          flagId: "1",
+          flagKey: "child-flag",
+          environment: "production",
+          enabled: true,
+          rolloutPct: 100,
+          safeDefault: "false",
+          updatedAt: 1000,
+          prerequisites: [
+            { flagKey: "old-parent", requiredVariation: "true", gate: true },
+          ],
+          targetingRules: [rule("old-rule")],
+        },
+      ],
+    });
+
+    // Only a live TARGETING_RULES event fires -- prerequisites gets no
+    // live event at all.
+    cache.applyTargetingRulesEvent("child-flag", [rule("new-rule")], 2000);
+
+    // A snapshot ties the live targetingRules event's ts, carrying stale
+    // targetingRules (correctly preserved) but genuinely NEW prerequisites
+    // (must NOT be blocked -- no live prerequisites event ever fired for
+    // this flag).
+    cache.loadSnapshot({
+      environment: "production",
+      hash: "h",
+      ts: 2000,
+      flags: [
+        {
+          flagId: "1",
+          flagKey: "child-flag",
+          environment: "production",
+          enabled: true,
+          rolloutPct: 100,
+          safeDefault: "false",
+          updatedAt: 2000,
+          prerequisites: [
+            {
+              flagKey: "genuinely-new-parent",
+              requiredVariation: "true",
+              gate: true,
+            },
+          ],
+          targetingRules: [rule("old-rule")],
+        },
+      ],
+    });
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("new-rule")],
+      "the live targetingRules update must still be preserved across the tie",
+    );
+    assert.deepEqual(
+      state?.prerequisites,
+      [
+        {
+          flagKey: "genuinely-new-parent",
+          requiredVariation: "true",
+          gate: true,
+        },
+      ],
+      "prerequisites must NOT be blocked by an unrelated live TARGETINGRULES event tying the same ts",
+    );
+  });
+
+  it("applyTargetingRulesEvent with an EMPTY list clears existing targetingRules -- mirrors the Ruby/Java SDKs' equivalent prerequisites test", () => {
+    // applyTargetingRulesEvent is documented as a full replacement, not a
+    // delta -- an empty incoming list must actually clear a flag's
+    // existing (non-empty) rules, not be mistaken for "nothing to apply".
+    // Already-correct behavior; added by adversarial review of PR #246,
+    // which found this exact test present for the analogous prerequisites
+    // feature in two other SDKs (Ruby's flag_cache_prerequisites_spec.rb,
+    // Java's TombstoneClientPrerequisitesEventTest.java) but absent here
+    // for either prerequisites OR targetingRules.
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(1000, [rule("old-rule")]));
+
+    cache.applyTargetingRulesEvent("child-flag", [], 2000);
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(state?.targetingRules, []);
+    assert.equal(state?.targetingRulesUpdatedAt, 2000);
+  });
 });
