@@ -68,7 +68,7 @@ public class EvaluationEngineTest {
         var prereq = new io.tombstone.types.FlagPrerequisite("base-flag", "true", true);
         var parentFlag = new FlagEnvironmentState(
             "id-1", "parent-flag", "test", true, 100, "false", 0L,
-            java.util.List.of(prereq), java.util.List.of(), java.util.List.of(), 1
+            java.util.List.of(prereq), java.util.List.of(), java.util.List.of(), 1, 0L
         );
         java.util.function.Function<String, FlagEnvironmentState> lookup =
             key -> "base-flag".equals(key) ? baseFlag : null;
@@ -82,7 +82,7 @@ public class EvaluationEngineTest {
     @Test void testTargetListMatchReturnsTrue() {
         var flag = new FlagEnvironmentState(
             "id-1", "test-flag", "test", true, 0, "false", 0L,
-            java.util.List.of(), java.util.List.of(), java.util.List.of("user-abc-123"), 1
+            java.util.List.of(), java.util.List.of(), java.util.List.of("user-abc-123"), 1, 0L
         );
 
         var result = engine.evaluate(flag, ctx, false, "test-flag");
@@ -96,7 +96,7 @@ public class EvaluationEngineTest {
         var rule = new io.tombstone.types.TargetingRule("r1", java.util.List.of(condition), 100.0, "matched-variation", 0);
         var flag = new FlagEnvironmentState(
             "id-1", "test-flag", "test", true, 0, "false", 0L,
-            java.util.List.of(), java.util.List.of(rule), java.util.List.of(), 1
+            java.util.List.of(), java.util.List.of(rule), java.util.List.of(), 1, 0L
         );
         var proContext = new EvaluationContext("u1", "", java.util.Map.of("plan", "pro"));
 
@@ -111,7 +111,7 @@ public class EvaluationEngineTest {
         // rollout_pct=30 -> bucket 0.343 >= 0.30 -> NOT in cohort -> default returned.
         var flag = new FlagEnvironmentState(
             "id-1", "checkout-v2", "test", true, 30, "false", 0L,
-            java.util.List.of(), java.util.List.of(), java.util.List.of(), 2
+            java.util.List.of(), java.util.List.of(), java.util.List.of(), 2, 0L
         );
         var context = new EvaluationContext("user-abc-123", "", java.util.Map.of());
 

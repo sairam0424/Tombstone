@@ -34,7 +34,7 @@ public class FlagCacheTest {
         var prereq = new FlagPrerequisite("parent-flag", "true", true);
         var seeded = new FlagEnvironmentState(
             "flag-id", "my-flag", "prod", true, 50, "false", 0L,
-            List.of(prereq), List.of(rule), List.of("vip-user"), 2
+            List.of(prereq), List.of(rule), List.of("vip-user"), 2, 0L
         );
         cache.loadSnapshot(List.of(seeded));
 
