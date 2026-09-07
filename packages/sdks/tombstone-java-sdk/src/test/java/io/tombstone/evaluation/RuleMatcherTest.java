@@ -80,6 +80,24 @@ public class RuleMatcherTest {
         assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.region", "CA-QC"))));
     }
 
+    // Found by adversarial review of PR #247: isGeo was originally decided
+    // PURELY by attribute name (GEO_ATTRIBUTES.contains(attribute)), so a
+    // GEO_COUNTRY rule using a non-canonical attribute name (nothing
+    // validates that operator=GEO_COUNTRY implies attribute=="geo.country")
+    // silently fell back to case-SENSITIVE matching instead of the
+    // case-insensitive semantics the operator itself declares.
+    @Test void testEvaluateConditionGeoCountryOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("country", "GEO_COUNTRY", List.of("US"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("country", "us"))),
+            "the GEO_COUNTRY operator must match case-insensitively regardless of the attribute's own name");
+    }
+
+    @Test void testEvaluateConditionGeoRegionOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("region", "GEO_REGION", List.of("CA-ON"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("region", "ca-on"))),
+            "the GEO_REGION operator must match case-insensitively regardless of the attribute's own name");
+    }
+
     // An EMPTY values list must never match "neq"/"nin": !values.contains(x)
     // on an empty list is vacuously true, which would make a rule with an
     // empty/missing "values" list match EVERY context unconditionally --

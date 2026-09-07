@@ -37,9 +37,22 @@ public class RuleMatcher {
                 "Attribute '" + condition.attribute() + "' not present in evaluation context");
         }
         String attrVal = String.valueOf(raw);
+        String rawOp = condition.operator().toLowerCase(Locale.ROOT);
         String op = normalizeOperator(condition.operator());
         List<String> values = condition.values();
-        boolean isGeo = GEO_ATTRIBUTES.contains(condition.attribute());
+        // isGeo is true whenever EITHER the attribute is a recognized geo
+        // path OR the operator itself declares geo semantics (GEO_COUNTRY/
+        // GEO_REGION) -- checking the attribute name ALONE meant a rule
+        // using a non-canonical attribute (e.g. "country" instead of
+        // "geo.country") with a real GEO_COUNTRY operator silently fell
+        // back to case-SENSITIVE matching, even though nothing (backend
+        // or SDK) validates that operator=GEO_COUNTRY implies
+        // attribute=="geo.country" -- flag-api's AddTargetingRuleRequest.
+        // validate() checks operator validity and non-empty attribute but
+        // never checks the two are paired correctly. Found by adversarial
+        // review of PR #247.
+        boolean isGeo = GEO_ATTRIBUTES.contains(condition.attribute())
+            || "geo_country".equals(rawOp) || "geo_region".equals(rawOp);
 
         boolean result;
         switch (op) {

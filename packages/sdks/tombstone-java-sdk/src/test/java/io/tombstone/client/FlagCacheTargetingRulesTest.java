@@ -195,64 +195,128 @@ public class FlagCacheTargetingRulesTest {
         // review of PR #246: a live PREREQUISITES event must never mark
         // targetingRules as live-sourced, or an unrelated snapshot tie
         // would incorrectly veto targetingRules' OWN genuinely new data.
+        //
+        // CRITICAL construction detail, found by a SECOND round of
+        // adversarial review (of THIS test's own first draft, PR #247):
+        // both the live event AND the final tying snapshot use the SAME
+        // ts (1000) as the very first loadSnapshot -- so existing.
+        // targetingRulesUpdatedAt() [1000] is ALREADY >= the tying
+        // snapshot's ts [1000], regardless of the provenance boolean's
+        // value. This means the ts-comparison half of keepLiveTargetingRules
+        // is true either way, so ONLY the boolean actually distinguishes
+        // "block" from "apply" here -- a copy-paste bug that wrongly
+        // propagated prerequisitesFromLiveEvent's true value into
+        // targetingRulesFromLiveEvent would be caught. The ORIGINAL version
+        // of this test used a strictly-older untouched-field ts, which made
+        // the ts term alone force the correct outcome regardless of the
+        // boolean -- passing identically whether or not that exact
+        // regression existed.
         var cache = new FlagCache();
-        var prereq = new FlagPrerequisite("old-parent", "true", true);
+        var oldPrereq = new FlagPrerequisite("old-parent", "true", true);
+        var oldRule = rule("old-rule");
         cache.loadSnapshot(List.of(new FlagEnvironmentState(
             "id", "child-flag", "test", true, 100, "false", 1000L,
-            List.of(prereq), List.of(rule("old-rule")), List.of(), 1, 0L, 0L
+            List.of(oldPrereq), List.of(oldRule), List.of(), 1, 0L, 0L
         )), 1000);
 
-        // Only a live PREREQUISITES event fires -- targetingRules gets no
-        // live event at all.
+        // Only a live PREREQUISITES event fires, tying the SAME ts=1000
+        // (not strictly older than the just-loaded snapshot's own ts, so
+        // applyPrerequisitesEvent's own "<" guard accepts it) --
+        // targetingRules gets no live event at all.
         var newPrereq = new FlagPrerequisite("new-parent", "true", true);
-        cache.applyPrerequisitesEvent("child-flag", List.of(newPrereq), 2000);
+        cache.applyPrerequisitesEvent("child-flag", List.of(newPrereq), 1000);
 
-        // A snapshot ties the live prerequisites event's ts, carrying stale
-        // prerequisites (correctly preserved) but genuinely NEW
-        // targetingRules (must NOT be blocked).
+        // A second snapshot ties the SAME ts=1000 again. Both existing
+        // *UpdatedAt fields are now >= 1000 -- carrying stale prerequisites
+        // (correctly preserved, since prerequisitesFromLiveEvent IS true)
+        // but genuinely NEW targetingRules (must NOT be blocked, since
+        // targetingRulesFromLiveEvent must still be false).
         var genuinelyNewRule = rule("genuinely-new-rule");
         cache.loadSnapshot(List.of(new FlagEnvironmentState(
-            "id", "child-flag", "test", true, 100, "false", 2000L,
-            List.of(prereq), List.of(genuinelyNewRule), List.of(), 1, 0L, 0L
-        )), 2000);
+            "id", "child-flag", "test", true, 100, "false", 1000L,
+            List.of(oldPrereq), List.of(genuinelyNewRule), List.of(), 1, 0L, 0L
+        )), 1000);
 
         var state = cache.get("child-flag").orElseThrow();
         assertEquals(List.of(newPrereq), state.prerequisites(),
             "the live prerequisites update must still be preserved across the tie");
         assertEquals(List.of(genuinelyNewRule), state.targetingRules(),
-            "targetingRules must NOT be blocked by an unrelated live PREREQUISITES event tying the same ts");
+            "targetingRules must NOT be blocked by an unrelated live PREREQUISITES event tying the same ts -- "
+                + "this specifically catches a bug that wrongly propagates one feature's live-provenance flag to the other");
     }
 
     @Test
     void prerequisitesAndTargetingRulesTieBreakingOperateIndependently_LiveTargetingRulesDoesNotProtectPrerequisites() {
         // The mirror image of the test above -- a live TARGETINGRULES event
-        // must never mark prerequisites as live-sourced either.
+        // must never mark prerequisites as live-sourced either. Same
+        // "everything ties at the SAME ts" construction, for the identical
+        // isolation reason (see that test's own doc comment).
         var cache = new FlagCache();
+        var oldPrereq = new FlagPrerequisite("old-parent", "true", true);
         var oldRule = rule("old-rule");
         cache.loadSnapshot(List.of(new FlagEnvironmentState(
             "id", "child-flag", "test", true, 100, "false", 1000L,
-            List.of(new FlagPrerequisite("old-parent", "true", true)), List.of(oldRule), List.of(), 1, 0L, 0L
+            List.of(oldPrereq), List.of(oldRule), List.of(), 1, 0L, 0L
         )), 1000);
 
-        // Only a live TARGETINGRULES event fires -- prerequisites gets no
-        // live event at all.
+        // Only a live TARGETINGRULES event fires, tying the SAME ts=1000 --
+        // prerequisites gets no live event at all.
         var newRule = rule("new-rule");
-        cache.applyTargetingRulesEvent("child-flag", List.of(newRule), 2000);
+        cache.applyTargetingRulesEvent("child-flag", List.of(newRule), 1000);
 
-        // A snapshot ties the live targetingRules event's ts, carrying
-        // stale targetingRules (correctly preserved) but genuinely NEW
-        // prerequisites (must NOT be blocked).
+        // A second snapshot ties the SAME ts=1000 again. Both existing
+        // *UpdatedAt fields are now >= 1000 -- carrying stale targetingRules
+        // (correctly preserved) but genuinely NEW prerequisites (must NOT
+        // be blocked).
         var genuinelyNewPrereq = new FlagPrerequisite("genuinely-new-parent", "true", true);
         cache.loadSnapshot(List.of(new FlagEnvironmentState(
-            "id", "child-flag", "test", true, 100, "false", 2000L,
+            "id", "child-flag", "test", true, 100, "false", 1000L,
             List.of(genuinelyNewPrereq), List.of(oldRule), List.of(), 1, 0L, 0L
-        )), 2000);
+        )), 1000);
 
         var state = cache.get("child-flag").orElseThrow();
         assertEquals(List.of(newRule), state.targetingRules(),
             "the live targetingRules update must still be preserved across the tie");
         assertEquals(List.of(genuinelyNewPrereq), state.prerequisites(),
-            "prerequisites must NOT be blocked by an unrelated live TARGETINGRULES event tying the same ts");
+            "prerequisites must NOT be blocked by an unrelated live TARGETINGRULES event tying the same ts -- "
+                + "this specifically catches a bug that wrongly propagates one feature's live-provenance flag to the other");
+    }
+
+    @Test
+    void applyTargetingRulesEventComparesAgainstTargetingRulesUpdatedAtNotPrerequisitesUpdatedAt() {
+        // Found missing by adversarial review of PR #247: every other test
+        // in this suite only ever sets prerequisitesUpdatedAt and
+        // targetingRulesUpdatedAt to the SAME value (both come from
+        // loadSnapshot alone, which always sets both together) -- so a
+        // copy-paste bug in applyTargetingRulesEvent's own staleness guard
+        // (comparing against existing.prerequisitesUpdatedAt() instead of
+        // existing.targetingRulesUpdatedAt()) would go completely
+        // undetected by the rest of this suite. This test deliberately
+        // DIVERGES the two fields first, then picks a ts that is only
+        // valid against the CORRECT field.
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", rule("old-rule"))), 1000);
+        // Both *UpdatedAt fields are 1000 here.
+
+        // A live PREREQUISITES event bumps ONLY prerequisitesUpdatedAt to
+        // 5000 -- targetingRulesUpdatedAt must stay at 1000.
+        cache.applyPrerequisitesEvent("child-flag",
+            List.of(new FlagPrerequisite("new-parent", "true", true)), 5000);
+        assertEquals(1000L, cache.get("child-flag").orElseThrow().targetingRulesUpdatedAt(),
+            "sanity check: targetingRulesUpdatedAt must be untouched by a prerequisites-only event");
+
+        // ts=2000 is NEWER than targetingRulesUpdatedAt (1000, the correct
+        // field to compare against) but OLDER than prerequisitesUpdatedAt
+        // (5000, the WRONG field a copy-paste bug might compare against
+        // instead).
+        var newRule = rule("new-rule");
+        cache.applyTargetingRulesEvent("child-flag", List.of(newRule), 2000);
+
+        var updated = cache.get("child-flag").orElseThrow();
+        assertEquals(List.of(newRule), updated.targetingRules(),
+            "ts=2000 must be accepted against the correct field (targetingRulesUpdatedAt=1000) -- "
+                + "a bug comparing against prerequisitesUpdatedAt (5000) would wrongly reject it as stale");
+        assertEquals(2000L, updated.targetingRulesUpdatedAt());
     }
 
     @Test
