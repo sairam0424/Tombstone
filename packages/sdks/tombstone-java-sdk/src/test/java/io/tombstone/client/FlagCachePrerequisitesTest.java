@@ -153,4 +153,67 @@ public class FlagCachePrerequisitesTest {
         assertEquals(List.of(evenNewerParent), updated.prerequisites());
         assertEquals(3000L, updated.prerequisitesUpdatedAt());
     }
+
+    @Test
+    void loadSnapshotPreservesTheLiveUpdateOnAnExactTsTie() {
+        /** flag-api's snapshot endpoint (environments.go: Ts: time.Now().Unix())
+         *  and its prerequisites-event publisher (prerequisites.go: ts :=
+         *  time.Now().Unix()) both use the SAME 1-second-resolution wall
+         *  clock, so a live event and a racing/in-flight snapshot fetch that
+         *  land in the same wall-clock second get an IDENTICAL ts.
+         *  applyPrerequisitesEvent's own staleness guard uses strict "&lt;",
+         *  meaning it treats an equal ts as "fresh enough to apply" -- this
+         *  preservation check must treat the SAME tie as "fresh enough to
+         *  keep" (i.e. use "&gt;=", not "&gt;"), or the snapshot silently
+         *  overwrites the just-applied live update purely because of a tie.
+         *  Found by adversarial review of the Ruby SDK's identical bug,
+         *  PR #238. */
+        var cache = new FlagCache();
+        var oldParent = new FlagPrerequisite("old-parent", "true", true);
+        cache.loadSnapshot(List.of(flag("child-flag", oldParent)), 1000);
+
+        var newParent = new FlagPrerequisite("new-parent", "true", true);
+        cache.applyPrerequisitesEvent("child-flag", List.of(newParent), 2000);
+
+        // The in-flight snapshot resolves with the EXACT SAME ts as the
+        // live update that already applied.
+        cache.loadSnapshot(List.of(flag("child-flag", oldParent)), 2000);
+
+        var updated = cache.get("child-flag").orElseThrow();
+        assertEquals(List.of(newParent), updated.prerequisites(),
+            "a tied ts must not let the snapshot silently overwrite the already-applied live update");
+        assertEquals(2000L, updated.prerequisitesUpdatedAt());
+    }
+
+    @Test
+    void applyPrerequisitesEventWithAnEmptyListClearsExistingPrerequisites() {
+        /** applyPrerequisitesEvent is documented as a full replacement, not a
+         *  delta -- an empty incoming list must actually clear a flag's
+         *  existing (non-empty) gates, not be mistaken for "nothing to apply". */
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("parent-flag", "true", true))), 1000);
+
+        cache.applyPrerequisitesEvent("child-flag", List.of(), 2000);
+
+        var updated = cache.get("child-flag").orElseThrow();
+        assertEquals(List.of(), updated.prerequisites());
+        assertEquals(2000L, updated.prerequisitesUpdatedAt());
+    }
+
+    @Test
+    void loadSnapshotGlobalMonotonicityGuardAppliesOnAnExactTsTie() {
+        /** Pins down that the monotonicity guard (snapshotTs &lt; lastSnapshotTs)
+         *  rejects only STRICTLY older snapshots -- a retried/duplicate fetch
+         *  arriving with the exact same ts as the last applied snapshot must
+         *  still be accepted (idempotent re-apply), not silently dropped by an
+         *  overly-strict "&lt;=" regression. Found by adversarial review of this
+         *  PR: the analogous "&lt;" vs "&lt;=" boundary IS tested for
+         *  applyPrerequisitesEvent's per-flag staleness check, but was missing
+         *  here for loadSnapshot's own global guard. */
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", 111L)), 5000);
+        cache.loadSnapshot(List.of(flag("child-flag", 222L)), 5000); // exact tie -- must still apply
+
+        assertEquals(222L, cache.get("child-flag").orElseThrow().updatedAt());
+    }
 }

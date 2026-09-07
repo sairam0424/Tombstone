@@ -90,6 +90,14 @@ public class TombstoneClient implements Closeable {
     public boolean isConnected() { return connected.get(); }
     public Set<String> flagKeys() { return cache.flagKeys(); }
 
+    // Package-private test seam: processSseLines's own while loop is gated
+    // on connected.get() (so a real listener stops promptly on close()) --
+    // a test driving processSseLines directly, without a real connect(),
+    // needs a way to satisfy that gate.
+    void setConnectedForTesting(boolean value) {
+        connected.set(value);
+    }
+
     // Package-private test seam: lets a same-package test populate the
     // cache directly with hand-built FlagEnvironmentStates, so evaluate()'s
     // real prerequisite-lookup wiring (cache::get, not a null-returning
@@ -206,34 +214,7 @@ public class TombstoneClient implements Closeable {
                     try (Response resp = http.newCall(req).execute()) {
                         if (resp.body() == null) continue;
                         BufferedReader reader = new BufferedReader(new InputStreamReader(resp.body().byteStream()));
-                        String line;
-                        String eventType = "message";
-                        while ((line = reader.readLine()) != null && connected.get()) {
-                            if (line.isEmpty()) {
-                                eventType = "message"; // blank line ends the SSE frame — reset
-                            } else if (line.startsWith("event:")) {
-                                eventType = line.substring(6).trim();
-                            } else if (line.startsWith("data:")) {
-                                String json = line.substring(5).trim();
-                                if ("lag".equals(eventType)) {
-                                    // Gateway dropped a buffered flag update for this slow client
-                                    // (its 64-slot buffer was full). Recover the lost update by
-                                    // refetching the full snapshot, debounced to coalesce bursts.
-                                    scheduleLagRefetch();
-                                } else if ("prerequisites_updated".equals(eventType)) {
-                                    // services/flag-api/internal/api/v1/prerequisites.go's
-                                    // PrerequisitesEvent -- a distinct payload shape (flag_key/
-                                    // environment/prerequisites/ts, no enabled/rollout_pct/reason
-                                    // at all) from a real flag event, so it gets its own handler
-                                    // rather than being routed through applyEvent, which would
-                                    // otherwise coerce those missing keys into false/0 defaults
-                                    // for a flag that was never actually disabled.
-                                    applyPrerequisitesEvent(json);
-                                } else {
-                                    applyEvent(json);
-                                }
-                            }
-                        }
+                        processSseLines(reader);
                     }
                 } catch (Exception e) {
                     if (!connected.get()) break;
@@ -243,6 +224,47 @@ public class TombstoneClient implements Closeable {
         }, "tombstone-sse");
         sseThread.setDaemon(true);
         sseThread.start();
+    }
+
+    // Package-private (not private) so a test can drive the REAL event-type
+    // dispatch logic (the "event:"/"data:" line parsing, the blank-line
+    // eventType reset, and the string match against "lag"/
+    // "prerequisites_updated") directly with a hand-built BufferedReader,
+    // without standing up a mock HTTP server or SSE connection -- found by
+    // adversarial review of this PR: every existing test previously drove
+    // applyPrerequisitesEvent(String)/scheduleLagRefetch() directly,
+    // bypassing this dispatch logic entirely, so a typo in an eventType
+    // literal or a broken blank-line reset would have gone completely
+    // uncaught.
+    void processSseLines(BufferedReader reader) throws IOException {
+        String line;
+        String eventType = "message";
+        while ((line = reader.readLine()) != null && connected.get()) {
+            if (line.isEmpty()) {
+                eventType = "message"; // blank line ends the SSE frame — reset
+            } else if (line.startsWith("event:")) {
+                eventType = line.substring(6).trim();
+            } else if (line.startsWith("data:")) {
+                String json = line.substring(5).trim();
+                if ("lag".equals(eventType)) {
+                    // Gateway dropped a buffered flag update for this slow client
+                    // (its 64-slot buffer was full). Recover the lost update by
+                    // refetching the full snapshot, debounced to coalesce bursts.
+                    scheduleLagRefetch();
+                } else if ("prerequisites_updated".equals(eventType)) {
+                    // services/flag-api/internal/api/v1/prerequisites.go's
+                    // PrerequisitesEvent -- a distinct payload shape (flag_key/
+                    // environment/prerequisites/ts, no enabled/rollout_pct/reason
+                    // at all) from a real flag event, so it gets its own handler
+                    // rather than being routed through applyEvent, which would
+                    // otherwise coerce those missing keys into false/0 defaults
+                    // for a flag that was never actually disabled.
+                    applyPrerequisitesEvent(json);
+                } else {
+                    applyEvent(json);
+                }
+            }
+        }
     }
 
     private void applyEvent(String json) {
