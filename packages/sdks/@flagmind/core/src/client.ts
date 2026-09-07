@@ -9,6 +9,7 @@ import type {
   FlagEnvironmentState,
   FlagPrerequisite,
   FlagEvent,
+  PrerequisitesUpdateEvent,
   TargetingRule,
   TelemetryEvent,
 } from "./types.js";
@@ -47,6 +48,13 @@ export class TombstoneClient {
         // refetch re-syncs the cache regardless of how briefly we were down.
         // Fire-and-forget: fetchSnapshot() already swallows its own errors.
         void this.fetchSnapshot();
+      },
+      (event: PrerequisitesUpdateEvent) => {
+        this.cache.applyPrerequisitesEvent(
+          event.flagKey,
+          event.prerequisites,
+          event.ts,
+        );
       },
     );
   }

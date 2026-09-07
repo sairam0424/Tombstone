@@ -1,7 +1,12 @@
-import type { FlagEvent, TombstoneClientConfig } from "./types.js";
+import type {
+  FlagEvent,
+  PrerequisitesUpdateEvent,
+  TombstoneClientConfig,
+} from "./types.js";
 
 // SSE client with automatic reconnect and exponential backoff.
-// Handles: flag_updated, kill_switch, heartbeat, connected events.
+// Handles: flag_updated, kill_switch, prerequisites_updated, heartbeat,
+// connected events.
 export class SSEStreamClient {
   private es: EventSource | null = null;
   private reconnectMs: number;
@@ -22,6 +27,9 @@ export class SSEStreamClient {
     private readonly config: TombstoneClientConfig,
     private readonly onEvent: (event: FlagEvent) => void,
     private readonly onReconnect?: () => void,
+    private readonly onPrerequisitesEvent?: (
+      event: PrerequisitesUpdateEvent,
+    ) => void,
   ) {
     this.reconnectMs = config.reconnectIntervalMs ?? 1000;
     this.lagRefetchDebounceMs = config.lagRefetchDebounceMs ?? 500;
@@ -65,6 +73,17 @@ export class SSEStreamClient {
 
     this.es.addEventListener("kill_switch", (e: MessageEvent) => {
       this.handleRawEvent(e.data as string);
+    });
+
+    // services/flag-api/internal/api/v1/prerequisites.go's PrerequisitesEvent
+    // -- a distinct payload shape (flag_key/environment/prerequisites/ts,
+    // no enabled/rollout_pct/reason at all) from FlagEvent, so it gets its
+    // own listener and handler rather than being routed through
+    // handleRawEvent, which would otherwise coerce those missing keys into
+    // FlagEvent's defaults (enabled=false, rolloutPct=0) for a flag that
+    // was never actually disabled.
+    this.es.addEventListener("prerequisites_updated", (e: MessageEvent) => {
+      this.handlePrerequisitesRawEvent(e.data as string);
     });
 
     // The gateway emits a "lag" frame right BEFORE it drops a real flag-update
@@ -113,6 +132,34 @@ export class SSEStreamClient {
       if (event.flagKey) {
         this.onEvent(event);
       }
+    } catch {
+      // malformed event — ignore
+    }
+  }
+
+  private handlePrerequisitesRawEvent(data: string): void {
+    try {
+      const raw = JSON.parse(data) as Record<string, unknown>;
+      const flagKey = String(raw["flag_key"] ?? "");
+      if (!flagKey) return;
+
+      const rawPrereqs = Array.isArray(raw["prerequisites"])
+        ? raw["prerequisites"]
+        : [];
+      const event: PrerequisitesUpdateEvent = {
+        flagKey,
+        environment: String(raw["environment"] ?? ""),
+        ts: Number(raw["ts"] ?? 0),
+        prerequisites: rawPrereqs.map((p) => {
+          const pr = p as Record<string, unknown>;
+          return {
+            flagKey: String(pr["flag_key"] ?? ""),
+            requiredVariation: String(pr["required_variation"] ?? "true"),
+            gate: pr["gate"] !== false,
+          };
+        }),
+      };
+      this.onPrerequisitesEvent?.(event);
     } catch {
       // malformed event — ignore
     }
