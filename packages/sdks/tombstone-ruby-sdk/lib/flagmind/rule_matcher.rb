@@ -12,6 +12,19 @@ module Tombstone
     def self.resolve_attribute(attribute, context)
       return context.user_id if attribute == "user_id"
       return context.org_id if attribute == "org_id"
+      # A blank attribute has nothing to resolve -- without this guard,
+      # "".split(".") returns [], so the segments.each loop below never
+      # runs and `current` falls through UNCHANGED from its initial value
+      # of context.attrs (the WHOLE attrs Hash), not nil. evaluate_condition
+      # only raises InconclusiveMatchError (the graceful "attribute not
+      # present, skip this rule" path) when resolve_attribute returns nil,
+      # so a blank attribute would otherwise silently stringify the entire
+      # attrs Hash via #to_s and substring-match it against contains/
+      # startswith/endswith, producing a spurious match instead of being
+      # skipped. Found by adversarial review of PR #248 -- reachable via a
+      # malformed/legacy targeting-rule row missing "attribute" on the wire
+      # (client.rb's parse_targeting_rules defaults it to "").
+      return nil if attribute.nil? || attribute.empty?
 
       # Dot-notation resolution: split on dots, traverse nested hashes
       segments = attribute.split(".")
@@ -76,6 +89,24 @@ module Tombstone
         evaluate_semver(op, attr_val, values, condition.attribute)
       when "date_before", "date_after"
         evaluate_date(op, attr_val, values, condition.attribute)
+      when "regex"
+        # docs/SDK_CONTRACT.md:32 -- REGEX is declared (a real, distinct
+        # operator value in flag-api's targeting_rules.operator CHECK
+        # constraint) but deliberately NOT IMPLEMENTED in this release,
+        # across all 5 SDKs (parity matrix: "No" for every language) --
+        # matching TypeScript's existing behavior of "always returns false,
+        # not inconclusive". Found by adversarial review of PR #248: this
+        # SDK's own "else raise InconclusiveMatchError" fallback previously
+        # caught "regex" too (normalize_operator passes it through
+        # unchanged), which deviates from that documented contract in two
+        # ways -- it's treated as skip-the-whole-rule rather than a
+        # definite false, AND `negate: true` on a regex condition would
+        # ALSO skip rather than the contract's literal "false, negated ->
+        # true" outcome. This branch closes that narrow conformance gap
+        # WITHOUT implementing real regex matching, which remains
+        # deliberately deferred ("Future work") to keep this SDK consistent
+        # with the other 4, not introduce Ruby-only regex support.
+        false
       else
         raise InconclusiveMatchError, "Unknown operator: '#{op}'"
       end

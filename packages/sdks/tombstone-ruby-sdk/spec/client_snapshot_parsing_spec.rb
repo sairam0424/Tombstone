@@ -157,6 +157,51 @@ RSpec.describe Tombstone::Client do
     )).to be true
   end
 
+  # Found by adversarial review of PR #248: a JSON float that happens to be
+  # a whole number (e.g. flag-api's JSONB "values" column round-tripping
+  # [21.0, 65.0]) must render as "21", not "21.0", or an EQ/IN/NEQ/NIN
+  # condition silently fails to match/exclude a context attribute supplied
+  # as a plain Integer (21) or bare numeric string ("21") -- the natural way
+  # an app would populate EvaluationContext.attrs.
+  it "a whole-number JSON float in targeting rule values round-trips without a trailing .0" do
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "rule_type" => "CUSTOM", "attribute" => "age_bracket", "operator" => "IN",
+              "values" => [21.0, 65.0], "variation" => "on", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    condition = states.first.targeting_rules.first.conditions.first
+    expect(condition.values).to eq(["21", "65"])
+    expect(Tombstone::RuleMatcher.evaluate_condition(
+      condition, Tombstone::EvaluationContext.new(user_id: "u1", org_id: "", attrs: { "age_bracket" => 21 })
+    )).to be true
+  end
+
+  it "a non-whole JSON float in targeting rule values preserves its fractional part" do
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "rule_type" => "CUSTOM", "attribute" => "score", "operator" => "EQ",
+              "values" => [21.5], "variation" => "on", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    condition = states.first.targeting_rules.first.conditions.first
+    expect(condition.values).to eq(["21.5"])
+  end
+
   it "a flag with no targeting_rules key at all parses as an empty array, not an error" do
     data = {
       "flags" => [
@@ -168,6 +213,53 @@ RSpec.describe Tombstone::Client do
     }
     states = client.send(:parse_snapshot_flags, data)
     expect(states.first.targeting_rules).to eq([])
+  end
+
+  # Found by adversarial review of PR #248: parse_targeting_rules' own
+  # `next unless r.is_a?(Hash)` guard (inside a filter_map over the
+  # "targeting_rules" array) had zero test coverage -- deleting that single
+  # line left all existing specs green, since none of them ever fed a
+  # non-Hash entry (e.g. a stray JSON null) into the array.
+  it "a malformed non-Hash entry inside targeting_rules is skipped, not raised" do
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            nil,
+            { "id" => "rule-1", "attribute" => "email", "operator" => "EQ",
+              "values" => ["x@example.com"], "variation" => "matched", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    rules = states.first.targeting_rules
+    expect(rules.length).to eq(1)
+    expect(rules.first.id).to eq("rule-1")
+  end
+
+  # Found by adversarial review of PR #248: the `r["values"].is_a?(Array)`
+  # guard inside parse_targeting_rules had zero test coverage -- a wire row
+  # that omits "values" entirely (or sends it as null) had never been
+  # exercised, even though the guard exists specifically to handle it.
+  it "a targeting rule missing the values key entirely parses with empty values, not an error" do
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "attribute" => "email", "operator" => "EQ", "variation" => "matched", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    rules = states.first.targeting_rules
+    expect(rules.length).to eq(1)
+    expect(rules.first.conditions.first.values).to eq([])
   end
 
   # End-to-end proof that a targeting rule parsed from a REAL snapshot

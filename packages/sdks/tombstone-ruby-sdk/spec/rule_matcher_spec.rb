@@ -20,6 +20,24 @@ RSpec.describe Tombstone::RuleMatcher do
       context = ctx("geo" => { "country" => "us" })
       expect(Tombstone::RuleMatcher.resolve_attribute("geo.country", context)).to eq("us")
     end
+
+    # Found by adversarial review of PR #248: "".split(".") is [] in Ruby, so
+    # without an explicit guard the segments.each loop never runs and
+    # `current` falls through UNCHANGED from context.attrs (the WHOLE attrs
+    # Hash), not nil -- silently stringifying the entire Hash for contains/
+    # startswith/endswith instead of being treated as "attribute not
+    # present". Reachable via a malformed/legacy targeting-rule row missing
+    # "attribute" on the wire (client.rb's parse_targeting_rules defaults it
+    # to "").
+    it "returns nil for an empty-string attribute, not the whole attrs hash" do
+      context = ctx("email" => "x@y.com")
+      expect(Tombstone::RuleMatcher.resolve_attribute("", context)).to be_nil
+    end
+
+    it "returns nil for a nil attribute" do
+      context = ctx("email" => "x@y.com")
+      expect(Tombstone::RuleMatcher.resolve_attribute(nil, context)).to be_nil
+    end
   end
 
   describe ".evaluate_condition" do
@@ -126,6 +144,17 @@ RSpec.describe Tombstone::RuleMatcher do
       expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("plan" => "banned"))).to be false
       expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("plan" => "pro"))).to be true
     end
+
+    # End-to-end proof (not just resolve_attribute's own unit test above)
+    # that a CONTAINS condition with an empty attribute is skipped as
+    # inconclusive rather than spuriously matching against the stringified
+    # attrs Hash. Found by adversarial review of PR #248.
+    it "an empty attribute raises InconclusiveMatchError instead of spuriously matching the stringified attrs hash" do
+      cond = Tombstone::PropertyCondition.new(attribute: "", operator: "contains", values: ["email"], negate: false)
+      expect {
+        Tombstone::RuleMatcher.evaluate_condition(cond, ctx("email" => "x@y.com"))
+      }.to raise_error(Tombstone::InconclusiveMatchError)
+    end
   end
 
   describe ".padded_version" do
@@ -167,6 +196,21 @@ RSpec.describe Tombstone::RuleMatcher do
       expect {
         Tombstone::RuleMatcher.evaluate_condition(cond, context)
       }.to raise_error(Tombstone::InconclusiveMatchError)
+    end
+
+    # docs/SDK_CONTRACT.md:32 -- REGEX is declared but deliberately NOT
+    # implemented in this release, across all 5 SDKs. It must return a
+    # definite `false` (matching TS's documented behavior), NOT raise
+    # InconclusiveMatchError like a genuinely unknown operator would --
+    # found by adversarial review of PR #248.
+    it "REGEX returns false rather than raising, per the documented (not yet implemented) contract" do
+      cond = Tombstone::PropertyCondition.new(attribute: "email", operator: "REGEX", values: ["^admin.*@corp\\.com$"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("email" => "admin1@corp.com"))).to be false
+    end
+
+    it "a negated REGEX condition returns true, per the contract's literal negate semantics" do
+      cond = Tombstone::PropertyCondition.new(attribute: "email", operator: "REGEX", values: ["^admin.*@corp\\.com$"], negate: true)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("email" => "admin1@corp.com"))).to be true
     end
 
     it "date empty values raises InconclusiveMatchError" do
