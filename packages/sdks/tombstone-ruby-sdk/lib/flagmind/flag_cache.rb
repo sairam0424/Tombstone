@@ -27,15 +27,26 @@ module Tombstone
         new_cache = flags.each_with_object({}) do |f, h|
           existing = @cache[f.flag_key]
           # A live prerequisites_updated event may have already advanced
-          # this flag's prerequisites_updated_at PAST this snapshot's own
-          # ts if the snapshot fetch was still in flight when the live
+          # this flag's prerequisites_updated_at to OR PAST this snapshot's
+          # own ts if the snapshot fetch was still in flight when the live
           # event arrived and applied -- in that case the snapshot
-          # reflects an OLDER point in time for THIS flag specifically,
-          # even though the snapshot as a whole passed the monotonicity
-          # check above (which only compares against the last snapshot's
-          # ts, not any per-flag live update). Keep the already-fresher
-          # live data instead of silently regressing it.
-          if existing && existing.prerequisites_updated_at > snapshot_ts
+          # reflects an OLDER (or, on an exact-tie second, no LATER) point
+          # in time for THIS flag specifically, even though the snapshot
+          # as a whole passed the monotonicity check above (which only
+          # compares against the last snapshot's ts, not any per-flag
+          # live update). Uses >=, not >: flag-api's snapshot endpoint
+          # (environments.go: Ts: time.Now().Unix()) and its
+          # prerequisites-event publisher (prerequisites.go: ts :=
+          # time.Now().Unix()) both derive ts from the SAME 1-second-
+          # resolution wall clock, so a live event and a racing snapshot
+          # fetch landing in the same wall-clock second get an IDENTICAL
+          # ts even though the snapshot's DB read can predate the event's
+          # own commit -- apply_prerequisites_event's own staleness guard
+          # (strict "<") already treats a tie as "fresh enough to apply",
+          # so this preservation check must treat the SAME tie as "fresh
+          # enough to keep", or the two guards disagree on who wins a tie
+          # and this one silently loses.
+          if existing && existing.prerequisites_updated_at >= snapshot_ts
             h[f.flag_key] = f.dup.tap do |s|
               s.prerequisites = existing.prerequisites
               s.prerequisites_updated_at = existing.prerequisites_updated_at

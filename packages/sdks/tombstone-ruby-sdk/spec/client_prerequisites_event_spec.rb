@@ -100,6 +100,22 @@ RSpec.describe Tombstone::Client do
     expect { client.send(:dispatch_sse_event, "prerequisites_updated", "not valid json{{{") }.not_to raise_error
   end
 
+  it "a syntactically valid payload with no flag_key at all is swallowed, not raised" do
+    # Distinct from the malformed-JSON case above: this payload IS valid
+    # JSON, it simply omits flag_key entirely -- the exact case
+    # Client#apply_prerequisites_event's `return unless flag_key` guard
+    # exists to handle.
+    load(1000)
+    expect do
+      client.send(:dispatch_sse_event, "prerequisites_updated", <<~JSON)
+        {"environment":"test","prerequisites":[],"ts":9999}
+      JSON
+    end.not_to raise_error
+
+    result = client.evaluate("child-flag", Tombstone::EvaluationContext.of("u1"))
+    expect(result.reason).not_to eq(Tombstone::EvaluationReason::PREREQUISITE_FAILED)
+  end
+
   it "gate omitted on the wire defaults to true, matching flag-api's own AddPrerequisite default" do
     load(1000)
 

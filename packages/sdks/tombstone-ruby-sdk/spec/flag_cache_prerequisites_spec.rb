@@ -61,6 +61,20 @@ RSpec.describe Tombstone::FlagCache do
       expect { cache.apply_prerequisites_event("never-seen", [], 1) }.not_to raise_error
       expect(cache.get("never-seen")).to be_nil
     end
+
+    it "clears a flag's existing prerequisites when the incoming list is empty" do
+      # apply_prerequisites_event is documented as a full replacement, not a
+      # delta -- an empty incoming list must actually clear a flag's
+      # existing (non-empty) gates, not be mistaken for "nothing to apply".
+      cache = described_class.new
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("parent-flag")])], 1000)
+
+      cache.apply_prerequisites_event("child-flag", [], 2000)
+
+      updated = cache.get("child-flag")
+      expect(updated.prerequisites).to eq([])
+      expect(updated.prerequisites_updated_at).to eq(2000)
+    end
   end
 
   describe "#load_snapshot monotonicity" do
@@ -132,6 +146,60 @@ RSpec.describe Tombstone::FlagCache do
       updated = cache.get("child-flag")
       expect(updated.prerequisites).to eq([even_newer_parent])
       expect(updated.prerequisites_updated_at).to eq(3000)
+    end
+
+    it "preserves the live update on an exact ts tie" do
+      # flag-api's snapshot endpoint (environments.go: Ts: time.Now().Unix())
+      # and its prerequisites-event publisher (prerequisites.go: ts :=
+      # time.Now().Unix()) both use the SAME 1-second-resolution wall clock,
+      # so a live event and a racing/in-flight snapshot fetch that land in
+      # the same wall-clock second get an IDENTICAL ts.
+      # apply_prerequisites_event's own staleness guard uses strict "<",
+      # meaning it treats an equal ts as "fresh enough to apply" -- this
+      # preservation check must treat the SAME tie as "fresh enough to
+      # keep" (i.e. use ">=", not ">"), or the snapshot silently overwrites
+      # the just-applied live update purely because of a tie.
+      cache = described_class.new
+      old_parent = prereq("old-parent")
+      cache.load_snapshot([flag("child-flag", prerequisites: [old_parent])], 1000)
+
+      new_parent = prereq("new-parent")
+      cache.apply_prerequisites_event("child-flag", [new_parent], 2000)
+
+      # The in-flight snapshot resolves with the EXACT SAME ts as the live
+      # update that already applied.
+      cache.load_snapshot([flag("child-flag", prerequisites: [old_parent])], 2000)
+
+      updated = cache.get("child-flag")
+      expect(updated.prerequisites).to eq([new_parent])
+      expect(updated.prerequisites_updated_at).to eq(2000)
+    end
+  end
+
+  describe "concurrent access" do
+    it "does not corrupt or lose an update under concurrent apply_event and apply_prerequisites_event calls" do
+      # The PR's own rationale claims FlagCache is "genuinely mutex-guarded"
+      # (unlike Java's disclosed non-atomic race) -- this test backs that
+      # claim with a real concurrent-thread run instead of resting on code
+      # inspection alone, mirroring client_lag_spec.rb's own Thread.new
+      # convention for the debounce-timer thread.
+      cache = described_class.new
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("initial-parent")])], 1000)
+
+      threads = []
+      20.times do |i|
+        threads << Thread.new { cache.apply_event("child-flag", true, i, 2000 + i) }
+        threads << Thread.new { cache.apply_prerequisites_event("child-flag", [prereq("parent-#{i}")], 3000 + i) }
+      end
+      threads.each(&:join)
+
+      # No exceptions, no torn/nil state -- the cache entry must still be a
+      # single, internally-consistent, fully-formed FlagEnvironmentState.
+      final = cache.get("child-flag")
+      expect(final).not_to be_nil
+      expect(final.rollout_pct).to be_a(Integer)
+      expect(final.prerequisites).to be_an(Array)
+      expect(final.prerequisites_updated_at).to be >= 3000
     end
   end
 end
