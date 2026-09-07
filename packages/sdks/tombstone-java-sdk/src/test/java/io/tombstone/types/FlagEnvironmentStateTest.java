@@ -12,7 +12,7 @@ public class FlagEnvironmentStateTest {
 
         var state = new FlagEnvironmentState(
             "id-1", "test-flag", "test", true, 50, "false", 0L,
-            List.of(prereq), List.of(rule), List.of("user-1"), 2
+            List.of(prereq), List.of(rule), List.of("user-1"), 2, 1700000000L
         );
 
         assertEquals(1, state.prerequisites().size());
@@ -21,6 +21,7 @@ public class FlagEnvironmentStateTest {
         assertEquals("plan", state.targetingRules().get(0).conditions().get(0).attribute());
         assertEquals(List.of("user-1"), state.targetList());
         assertEquals(2, state.hashVersion());
+        assertEquals(1700000000L, state.prerequisitesUpdatedAt());
     }
 
     @Test void testDefaultHashVersionIsOneViaConvenienceFactory() {
@@ -29,5 +30,6 @@ public class FlagEnvironmentStateTest {
         assertTrue(state.prerequisites().isEmpty());
         assertTrue(state.targetingRules().isEmpty());
         assertTrue(state.targetList().isEmpty());
+        assertEquals(0L, state.prerequisitesUpdatedAt());
     }
 }

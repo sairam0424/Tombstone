@@ -38,7 +38,7 @@ public class TombstoneClientSnapshotParsingTest {
                "prerequisites":[]}
             ],"hash":"h","ts":1700000000}
             """;
-        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
         assertEquals(1, states.size());
         FlagEnvironmentState s = states.get(0);
         assertEquals("1", s.flagId());
@@ -64,7 +64,7 @@ public class TombstoneClientSnapshotParsingTest {
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
         assertEquals(1, states.size());
         List<FlagPrerequisite> prereqs = states.get(0).prerequisites();
         assertEquals(1, prereqs.size());
@@ -84,7 +84,7 @@ public class TombstoneClientSnapshotParsingTest {
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
         assertTrue(states.get(0).prerequisites().get(0).gate(),
             "gate must default to true (hard-blocking) when the wire omits it, matching flag-api's own AddPrerequisite default");
     }
@@ -100,7 +100,7 @@ public class TombstoneClientSnapshotParsingTest {
                ]}
             ],"hash":"h","ts":1700000000}
             """;
-        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
         assertFalse(states.get(0).prerequisites().get(0).gate());
     }
 
@@ -112,7 +112,7 @@ public class TombstoneClientSnapshotParsingTest {
                "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000}
             ],"hash":"h","ts":1700000000}
             """;
-        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json);
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
         assertEquals(List.of(), states.get(0).prerequisites());
     }
 
@@ -138,10 +138,10 @@ public class TombstoneClientSnapshotParsingTest {
         TombstoneClient client = newClient();
         client.loadSnapshotForTesting(List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", true, 100, "false", 0L,
-                List.of(), List.of(), List.of(), 1),
+                List.of(), List.of(), List.of(), 1, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
                 List.of(new FlagPrerequisite("parent-flag", "true", true)),
-                List.of(), List.of(), 1)
+                List.of(), List.of(), 1, 0L)
         ));
 
         EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));
@@ -154,10 +154,10 @@ public class TombstoneClientSnapshotParsingTest {
         TombstoneClient client = newClient();
         client.loadSnapshotForTesting(List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", false, 0, "false", 0L,
-                List.of(), List.of(), List.of(), 1),
+                List.of(), List.of(), List.of(), 1, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
                 List.of(new FlagPrerequisite("parent-flag", "true", true)),
-                List.of(), List.of(), 1)
+                List.of(), List.of(), 1, 0L)
         ));
 
         EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));

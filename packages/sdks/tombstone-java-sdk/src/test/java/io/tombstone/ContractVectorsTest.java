@@ -49,7 +49,7 @@ public class ContractVectorsTest {
                 () -> {
                     var flag = new FlagEnvironmentState(
                         "id", flagKey, "test", true, rolloutPct, "false", 0L,
-                        List.of(), List.of(), List.of(), hashVersion
+                        List.of(), List.of(), List.of(), hashVersion, 0L
                     );
                     var context = new EvaluationContext(userId, "", Map.of());
                     var result = ENGINE.evaluate(flag, context, false, flagKey);
@@ -99,7 +99,7 @@ public class ContractVectorsTest {
             list.add(DynamicTest.dynamicTest(id, () -> {
                 var flag = new FlagEnvironmentState(
                     "id", "test-flag", "test", true, 0, "false", 0L,
-                    List.of(), List.of(), targetList, 1
+                    List.of(), List.of(), targetList, 1, 0L
                 );
                 var context = new EvaluationContext(userId, "", Map.of());
                 var result = ENGINE.evaluate(flag, context, false, "test-flag");
@@ -146,7 +146,7 @@ public class ContractVectorsTest {
                 int rolloutPct = "true".equals(variation) ? 100 : 0;
                 return new FlagEnvironmentState(
                     "id", key, "test", enabled, rolloutPct, "false", 0L,
-                    List.of(), List.of(), List.of(), 1
+                    List.of(), List.of(), List.of(), 1, 0L
                 );
             };
 

@@ -1,6 +1,7 @@
 package io.tombstone.client;
 
 import io.tombstone.types.FlagEnvironmentState;
+import io.tombstone.types.FlagPrerequisite;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -20,17 +21,60 @@ import java.util.concurrent.atomic.AtomicReference;
 // wiping PR; left unfixed here since it's a separate, latent concurrency
 // bug, not something that PR's own change touches or makes newly
 // reachable -- a real fix needs a CAS loop (AtomicReference.updateAndGet
-// or compareAndSet) and is its own, independent piece of work.
+// or compareAndSet) and is its own, independent piece of work. lastSnapshotTs
+// (added for prerequisites-streaming) and applyPrerequisitesEvent inherit
+// the exact same non-atomic-read-modify-write shape and are left consistent
+// with the rest of this class rather than singled out for a CAS fix.
 public class FlagCache {
     private final AtomicReference<Map<String, FlagEnvironmentState>> cache =
         new AtomicReference<>(Collections.emptyMap());
+    // Sentinel meaning "no snapshot has been loaded yet" -- a real flag-api
+    // snapshot ts (time.Now().Unix()) will never be this low, so any real
+    // incoming ts trivially passes the very first loadSnapshot call.
+    private volatile long lastSnapshotTs = Long.MIN_VALUE;
 
+    /** Convenience overload for tests that don't care about prerequisites-streaming timing semantics. */
     public void loadSnapshot(List<FlagEnvironmentState> flags) {
+        loadSnapshot(flags, 0L);
+    }
+
+    // flag-api's snapshot ts is simply time.Now().Unix() at response
+    // generation (services/flag-api/internal/api/v1/environments.go), not a
+    // per-flag "last changed" value -- so a SLOWER, already-in-flight
+    // fetchSnapshot() call (e.g. a lag-triggered refetch racing a
+    // reconnect-triggered one) can resolve AFTER a newer one already
+    // loaded. Rejecting an incoming snapshot whose own ts is older than the
+    // last one actually applied prevents that older response from silently
+    // clobbering fresher state for every flag, not just prerequisites.
+    public void loadSnapshot(List<FlagEnvironmentState> flags, long snapshotTs) {
+        if (lastSnapshotTs != Long.MIN_VALUE && snapshotTs < lastSnapshotTs) {
+            return;
+        }
+        Map<String, FlagEnvironmentState> current = cache.get();
         Map<String, FlagEnvironmentState> m = new HashMap<>();
         for (FlagEnvironmentState f : flags) {
-            m.put(f.flagKey(), f);
+            FlagEnvironmentState existing = current.get(f.flagKey());
+            // A live prerequisites_updated event may have already advanced
+            // this flag's prerequisitesUpdatedAt PAST this snapshot's own ts
+            // if the snapshot fetch was still in flight when the live event
+            // arrived and applied -- in that case the snapshot reflects an
+            // OLDER point in time for THIS flag specifically, even though
+            // the snapshot as a whole passed the monotonicity check above
+            // (which only compares against the last *snapshot's* ts, not
+            // any per-flag live update). Keep the already-fresher live data
+            // instead of silently regressing it.
+            boolean keepLivePrerequisites =
+                existing != null && existing.prerequisitesUpdatedAt() > snapshotTs;
+            m.put(f.flagKey(), new FlagEnvironmentState(
+                f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
+                f.safeDefault(), f.updatedAt(),
+                keepLivePrerequisites ? existing.prerequisites() : f.prerequisites(),
+                f.targetingRules(), f.targetList(), f.hashVersion(),
+                keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs
+            ));
         }
         cache.set(Collections.unmodifiableMap(m));
+        lastSnapshotTs = snapshotTs;
     }
 
     // Immutable update — never mutates existing map. Threads existing's
@@ -51,7 +95,40 @@ public class FlagCache {
             existing.flagId(), existing.flagKey(), existing.environment(),
             enabled, rolloutPct, existing.safeDefault(), ts,
             existing.prerequisites(), existing.targetingRules(), existing.targetList(),
-            existing.hashVersion()
+            existing.hashVersion(), existing.prerequisitesUpdatedAt()
+        );
+        Map<String, FlagEnvironmentState> next = new HashMap<>(current);
+        next.put(flagKey, updated);
+        cache.set(Collections.unmodifiableMap(next));
+    }
+
+    /**
+     * Applies a live "prerequisites_updated" SSE event -- full replacement of
+     * a flag's prerequisite list, not a delta. No-ops for a flag with no
+     * existing cache entry (nothing to merge a partial update into -- the
+     * next full snapshot refetch is what correctly picks up a flag this
+     * client has never seen before).
+     *
+     * Rejects an incoming event whose ts is OLDER than the currently-cached
+     * prerequisitesUpdatedAt: services/flag-api/internal/api/v1/
+     * prerequisites.go's own PrerequisitesEvent doc comment discloses that
+     * publishPrerequisitesUpdated's SELECT-then-XAdd has no per-flag lock, so
+     * concurrent AddPrerequisite/DeletePrerequisite calls on the SAME flag
+     * can have their events arrive here out of real commit order under
+     * scheduling delays -- comparing ts against what's already cached
+     * (rather than unconditionally overwriting on arrival order) closes that
+     * gap at the point where staleness actually matters.
+     */
+    public void applyPrerequisitesEvent(String flagKey, List<FlagPrerequisite> prerequisites, long ts) {
+        Map<String, FlagEnvironmentState> current = cache.get();
+        FlagEnvironmentState existing = current.get(flagKey);
+        if (existing == null) return;
+        if (ts < existing.prerequisitesUpdatedAt()) return;
+        FlagEnvironmentState updated = new FlagEnvironmentState(
+            existing.flagId(), existing.flagKey(), existing.environment(),
+            existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
+            List.copyOf(prerequisites), existing.targetingRules(), existing.targetList(),
+            existing.hashVersion(), ts
         );
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);

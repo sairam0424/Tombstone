@@ -98,6 +98,13 @@ public class TombstoneClient implements Closeable {
         cache.loadSnapshot(states);
     }
 
+    // Overload letting a test control the snapshot's own "as of" ts, needed
+    // to exercise FlagCache.loadSnapshot's monotonicity/staleness-preserving
+    // behavior deterministically.
+    void loadSnapshotForTesting(List<FlagEnvironmentState> states, long ts) {
+        cache.loadSnapshot(states, ts);
+    }
+
     // Package-private (not private) so the SSE-recovery unit test can override it
     // to observe refetch calls without touching the network. connect(), reconnect,
     // and lag-recovery all funnel through this single snapshot-fetch path.
@@ -108,7 +115,8 @@ public class TombstoneClient implements Closeable {
             .get().build();
         try (Response resp = http.newCall(req).execute()) {
             if (!resp.isSuccessful() || resp.body() == null) return;
-            cache.loadSnapshot(parseSnapshotResponse(resp.body().string()));
+            ParsedSnapshot parsed = parseSnapshotResponse(resp.body().string());
+            cache.loadSnapshot(parsed.flags(), parsed.ts());
         }
     }
 
@@ -116,10 +124,16 @@ public class TombstoneClient implements Closeable {
     // directly with a hand-built JSON string, without standing up a mock
     // HTTP server -- mirrors fetchSnapshot()'s own package-private
     // visibility, which exists for the identical reason (see its comment).
-    List<FlagEnvironmentState> parseSnapshotResponse(String rawJson) throws IOException {
+    // Returns the snapshot's own top-level ts alongside the parsed flags
+    // (flag-api's environments.go: Ts: time.Now().Unix()) -- FlagCache.
+    // loadSnapshot needs it to compare against any live prerequisites_updated
+    // event that may have already advanced a flag's own prerequisitesUpdatedAt
+    // further than this snapshot itself reflects.
+    ParsedSnapshot parseSnapshotResponse(String rawJson) throws IOException {
         Map<?, ?> data = mapper.readValue(rawJson, Map.class);
+        long snapshotTs = data.get("ts") instanceof Number n ? n.longValue() : 0L;
         List<?> flags = (List<?>) data.get("flags");
-        if (flags == null) return List.of();
+        if (flags == null) return new ParsedSnapshot(List.of(), snapshotTs);
         List<FlagEnvironmentState> states = new ArrayList<>();
         for (Object f : flags) {
             Map<?, ?> fm = (Map<?, ?>) f;
@@ -136,6 +150,11 @@ public class TombstoneClient implements Closeable {
             // hash_version fields today -- those stay empty/default 1,
             // same as before -- only prerequisites and updated_at
             // (also previously hardcoded to 0) are now read for real.
+            // prerequisitesUpdatedAt is set to a placeholder here (0L) --
+            // FlagCache.loadSnapshot is the authoritative place that fills
+            // in the real value (either this snapshot's own ts, or a
+            // preserved fresher live-updated value), mirroring the
+            // TypeScript SDK's identical parser/cache split of concerns.
             states.add(new FlagEnvironmentState(
                 str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
                 Boolean.TRUE.equals(fm.get("enabled")),
@@ -143,11 +162,16 @@ public class TombstoneClient implements Closeable {
                 str(fm, "safe_default"),
                 fm.get("updated_at") instanceof Number n ? n.longValue() : 0L,
                 parsePrerequisites(fm.get("prerequisites")),
-                List.of(), List.of(), 1
+                List.of(), List.of(), 1, 0L
             ));
         }
-        return states;
+        return new ParsedSnapshot(states, snapshotTs);
     }
+
+    // Package-private wrapper pairing the parsed flags with the snapshot's
+    // own top-level ts -- see parseSnapshotResponse's doc comment for why
+    // FlagCache.loadSnapshot needs both together.
+    record ParsedSnapshot(List<FlagEnvironmentState> flags, long ts) {}
 
     // flag-api's real wire shape (services/flag-api/internal/api/v1/
     // environments.go's SnapshotPrerequisite): {"id", "flag_key",
@@ -196,6 +220,15 @@ public class TombstoneClient implements Closeable {
                                     // (its 64-slot buffer was full). Recover the lost update by
                                     // refetching the full snapshot, debounced to coalesce bursts.
                                     scheduleLagRefetch();
+                                } else if ("prerequisites_updated".equals(eventType)) {
+                                    // services/flag-api/internal/api/v1/prerequisites.go's
+                                    // PrerequisitesEvent -- a distinct payload shape (flag_key/
+                                    // environment/prerequisites/ts, no enabled/rollout_pct/reason
+                                    // at all) from a real flag event, so it gets its own handler
+                                    // rather than being routed through applyEvent, which would
+                                    // otherwise coerce those missing keys into false/0 defaults
+                                    // for a flag that was never actually disabled.
+                                    applyPrerequisitesEvent(json);
                                 } else {
                                     applyEvent(json);
                                 }
@@ -220,6 +253,21 @@ public class TombstoneClient implements Closeable {
             int pct = m.get("rollout_pct") instanceof Number n ? n.intValue() : 0;
             long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
             cache.applyEvent(flagKey, enabled, pct, ts);
+        } catch (Exception ignored) {}
+    }
+
+    // Package-private (not private) so a test can exercise the real
+    // prerequisites_updated JSON-parsing/dispatch path directly with a
+    // hand-built wire string, without standing up a mock SSE server --
+    // mirrors fetchSnapshot()/parseSnapshotResponse()'s own package-private
+    // visibility, for the identical reason.
+    void applyPrerequisitesEvent(String json) {
+        try {
+            Map<?, ?> m = mapper.readValue(json, Map.class);
+            String flagKey = (String) m.get("flag_key");
+            if (flagKey == null) return;
+            long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
+            cache.applyPrerequisitesEvent(flagKey, parsePrerequisites(m.get("prerequisites")), ts);
         } catch (Exception ignored) {}
     }
 
