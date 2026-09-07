@@ -9,7 +9,11 @@
  */
 import { strict as assert } from "assert";
 import { FlagCache } from "../cache.js";
-import type { FlagPrerequisite, FlagSnapshot } from "../types.js";
+import type {
+  FlagPrerequisite,
+  FlagSnapshot,
+  TargetingRule,
+} from "../types.js";
 
 function snapshotWith(
   ts: number,
@@ -29,6 +33,41 @@ function snapshotWith(
         safeDefault: "false",
         updatedAt: ts,
         prerequisites,
+      },
+    ],
+  };
+}
+
+function rule(id: string): TargetingRule {
+  return {
+    id,
+    ruleType: "USER",
+    attribute: "email",
+    operator: "EQ",
+    values: ["x@example.com"],
+    variation: "true",
+    priority: 0,
+  };
+}
+
+function snapshotWithRules(
+  ts: number,
+  targetingRules: TargetingRule[] = [],
+): FlagSnapshot {
+  return {
+    environment: "production",
+    hash: "h",
+    ts,
+    flags: [
+      {
+        flagId: "1",
+        flagKey: "child-flag",
+        environment: "production",
+        enabled: true,
+        rolloutPct: 100,
+        safeDefault: "false",
+        updatedAt: ts,
+        targetingRules,
       },
     ],
   };
@@ -362,5 +401,231 @@ describe("FlagCache — loadSnapshot preserves a fresher live prerequisites upda
       { flagKey: "even-newer-parent", requiredVariation: "true", gate: true },
     ]);
     assert.equal(state?.prerequisitesUpdatedAt, 3000);
+  });
+});
+
+/**
+ * FlagCache -- targetingRules mirror of the prerequisites suite above.
+ * services/flag-api/internal/api/v1/targeting_rules.go's TargetingRulesEvent
+ * derives its own ts from the SAME coarse (1-second) wall clock as
+ * prerequisites, and targeting_rules already has its own environment
+ * column (unlike global flag_prerequisites) -- but that only changes what
+ * the BACKEND fans out to, not this cache's own tie-breaking shape, which
+ * is identical. All three failure modes below were discovered through
+ * separate rounds of adversarial review for prerequisites (PR #236/#240);
+ * applied here proactively, from the start, rather than rediscovering them.
+ */
+describe("FlagCache — applyTargetingRulesEvent NaN-safety", () => {
+  it("rejects a non-numeric ts outright instead of storing NaN into targetingRulesUpdatedAt", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(5000, [rule("parent-rule")]));
+
+    cache.applyTargetingRulesEvent("child-flag", [rule("corrupt-rule")], NaN);
+
+    const state = cache.get("child-flag");
+    assert.equal(
+      state?.targetingRulesUpdatedAt,
+      5000,
+      "a NaN ts must be rejected -- targetingRulesUpdatedAt must stay at its last real value, not become NaN",
+    );
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("parent-rule")],
+      "the NaN event's targetingRules must not have been applied",
+    );
+  });
+
+  it("a genuinely stale event arriving AFTER a rejected NaN event is still correctly rejected", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(5000, [rule("parent-rule")]));
+
+    cache.applyTargetingRulesEvent("child-flag", [rule("corrupt-rule")], NaN);
+    cache.applyTargetingRulesEvent(
+      "child-flag",
+      [rule("stale-rule")],
+      1000, // older than the 5000 baseline -- must still be rejected
+    );
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("parent-rule")],
+      "a real stale event must still be rejected after a NaN event",
+    );
+    assert.equal(state?.targetingRulesUpdatedAt, 5000);
+  });
+});
+
+describe("FlagCache — loadSnapshot preserves a fresher live targetingRules update", () => {
+  it("does not regress a flag's targetingRules when a newer-but-still-behind-the-live-update snapshot reloads", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(1000, [rule("old-rule")]));
+
+    cache.applyTargetingRulesEvent("child-flag", [rule("new-rule")], 2000);
+
+    // The slower snapshot's own ts=1500 is newer than the cache's LAST
+    // SNAPSHOT ts (1000), so it passes the whole-snapshot monotonicity
+    // guard -- but it still carries the OLD (pre-live-update) rules.
+    cache.loadSnapshot(snapshotWithRules(1500, [rule("old-rule")]));
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("new-rule")],
+      "the already-fresher live update must survive a slower, stale-for-this-flag snapshot reload",
+    );
+    assert.equal(
+      state?.targetingRulesUpdatedAt,
+      2000,
+      "targetingRulesUpdatedAt must not regress from 2000 back to the snapshot's 1500",
+    );
+    assert.equal(state?.updatedAt, 1500);
+  });
+
+  it("preserves the live update on an exact ts tie", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(1000, [rule("old-rule")]));
+    cache.applyTargetingRulesEvent("child-flag", [rule("new-rule")], 2000);
+
+    // The in-flight snapshot resolves with the EXACT SAME ts as the live
+    // update that already applied.
+    cache.loadSnapshot(snapshotWithRules(2000, [rule("old-rule")]));
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("new-rule")],
+      "a tied ts must not let the snapshot silently overwrite the already-applied live update",
+    );
+    assert.equal(state?.targetingRulesUpdatedAt, 2000);
+  });
+
+  it("a SECOND snapshot sharing the exact same ts as a FIRST snapshot (no live event at all) still applies its own data", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(5000, [rule("rule-a")]));
+
+    // A second, completely independent snapshot fetch resolves with the
+    // EXACT SAME ts but genuinely different data. No live event involved.
+    cache.loadSnapshot(snapshotWithRules(5000, [rule("rule-b")]));
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("rule-b")],
+      "a second snapshot's own targetingRules must apply even on a ts tie with the first snapshot, since no live event is involved",
+    );
+    assert.equal(state?.targetingRulesUpdatedAt, 5000);
+  });
+
+  it("a THIRD snapshot tying a live event's ts, arriving AFTER a second tied snapshot already resolved the race, still applies its own data", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(1000, [rule("old-rule")]));
+    cache.applyTargetingRulesEvent("child-flag", [rule("live-rule")], 2000);
+
+    // First tied snapshot after the live event -- must still be blocked.
+    cache.loadSnapshot(snapshotWithRules(2000, [rule("snap-b-rule")]));
+    assert.deepEqual(
+      cache.get("child-flag")?.targetingRules,
+      [rule("live-rule")],
+      "the first tied snapshot after the live event must still be blocked",
+    );
+
+    // A SECOND, independent snapshot arrives, also tying ts=2000. The
+    // protection was already consumed by the snapshot above, so this
+    // snapshot's own data must apply normally.
+    cache.loadSnapshot(snapshotWithRules(2000, [rule("snap-c-rule")]));
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("snap-c-rule")],
+      "a second, independent tied snapshot must apply its own data, not be vetoed by a protection already consumed by the first",
+    );
+    assert.equal(state?.targetingRulesUpdatedAt, 2000);
+  });
+
+  it("a snapshot NEWER than the live update's own ts is applied normally -- no stale preservation needed", () => {
+    const cache = new FlagCache();
+    cache.loadSnapshot(snapshotWithRules(1000, [rule("old-rule")]));
+    cache.applyTargetingRulesEvent("child-flag", [rule("new-rule")], 2000);
+
+    cache.loadSnapshot(snapshotWithRules(3000, [rule("even-newer-rule")]));
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(state?.targetingRules, [rule("even-newer-rule")]);
+    assert.equal(state?.targetingRulesUpdatedAt, 3000);
+  });
+
+  it("prerequisites and targetingRules tie-breaking operate INDEPENDENTLY -- a live prerequisites event does not protect targetingRules, and vice versa", () => {
+    // Both features share the same tie-break SHAPE but must not cross-wire:
+    // a live prerequisites_updated event must never mark targetingRules as
+    // live-sourced (or vice versa), or an unrelated snapshot tie would
+    // incorrectly veto the OTHER feature's genuinely independent update.
+    const cache = new FlagCache();
+    cache.loadSnapshot({
+      environment: "production",
+      hash: "h",
+      ts: 1000,
+      flags: [
+        {
+          flagId: "1",
+          flagKey: "child-flag",
+          environment: "production",
+          enabled: true,
+          rolloutPct: 100,
+          safeDefault: "false",
+          updatedAt: 1000,
+          prerequisites: [
+            { flagKey: "old-parent", requiredVariation: "true", gate: true },
+          ],
+          targetingRules: [rule("old-rule")],
+        },
+      ],
+    });
+
+    // Only a live PREREQUISITES event fires -- targetingRules gets no live
+    // event at all.
+    cache.applyPrerequisitesEvent(
+      "child-flag",
+      [{ flagKey: "new-parent", requiredVariation: "true", gate: true }],
+      2000,
+    );
+
+    // A snapshot ties the live prerequisites event's ts, carrying stale
+    // prerequisites (correctly preserved) but genuinely NEW targetingRules
+    // (must NOT be blocked -- no live targetingRules event ever fired for
+    // this flag, so targetingRulesFromLiveEvent must be false/absent here).
+    cache.loadSnapshot({
+      environment: "production",
+      hash: "h",
+      ts: 2000,
+      flags: [
+        {
+          flagId: "1",
+          flagKey: "child-flag",
+          environment: "production",
+          enabled: true,
+          rolloutPct: 100,
+          safeDefault: "false",
+          updatedAt: 2000,
+          prerequisites: [
+            { flagKey: "old-parent", requiredVariation: "true", gate: true },
+          ],
+          targetingRules: [rule("genuinely-new-rule")],
+        },
+      ],
+    });
+
+    const state = cache.get("child-flag");
+    assert.deepEqual(
+      state?.prerequisites,
+      [{ flagKey: "new-parent", requiredVariation: "true", gate: true }],
+      "the live prerequisites update must still be preserved across the tie",
+    );
+    assert.deepEqual(
+      state?.targetingRules,
+      [rule("genuinely-new-rule")],
+      "targetingRules must NOT be blocked by an unrelated live PREREQUISITES event tying the same ts",
+    );
   });
 });

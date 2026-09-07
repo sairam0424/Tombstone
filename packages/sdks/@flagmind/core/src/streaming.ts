@@ -1,12 +1,14 @@
 import type {
   FlagEvent,
   PrerequisitesUpdateEvent,
+  TargetingRule,
+  TargetingRulesUpdateEvent,
   TombstoneClientConfig,
 } from "./types.js";
 
 // SSE client with automatic reconnect and exponential backoff.
-// Handles: flag_updated, kill_switch, prerequisites_updated, heartbeat,
-// connected events.
+// Handles: flag_updated, kill_switch, prerequisites_updated,
+// targeting_rules_updated, heartbeat, connected events.
 export class SSEStreamClient {
   private es: EventSource | null = null;
   private reconnectMs: number;
@@ -29,6 +31,9 @@ export class SSEStreamClient {
     private readonly onReconnect?: () => void,
     private readonly onPrerequisitesEvent?: (
       event: PrerequisitesUpdateEvent,
+    ) => void,
+    private readonly onTargetingRulesEvent?: (
+      event: TargetingRulesUpdateEvent,
     ) => void,
   ) {
     this.reconnectMs = config.reconnectIntervalMs ?? 1000;
@@ -84,6 +89,15 @@ export class SSEStreamClient {
     // was never actually disabled.
     this.es.addEventListener("prerequisites_updated", (e: MessageEvent) => {
       this.handlePrerequisitesRawEvent(e.data as string);
+    });
+
+    // services/flag-api/internal/api/v1/targeting_rules.go's
+    // TargetingRulesEvent -- same reasoning as prerequisites_updated above:
+    // a distinct payload shape (flag_key/environment/targeting_rules/ts,
+    // no enabled/rollout_pct/reason), so it gets its own listener rather
+    // than being routed through handleRawEvent.
+    this.es.addEventListener("targeting_rules_updated", (e: MessageEvent) => {
+      this.handleTargetingRulesRawEvent(e.data as string);
     });
 
     // The gateway emits a "lag" frame right BEFORE it drops a real flag-update
@@ -160,6 +174,39 @@ export class SSEStreamClient {
         }),
       };
       this.onPrerequisitesEvent?.(event);
+    } catch {
+      // malformed event — ignore
+    }
+  }
+
+  private handleTargetingRulesRawEvent(data: string): void {
+    try {
+      const raw = JSON.parse(data) as Record<string, unknown>;
+      const flagKey = String(raw["flag_key"] ?? "");
+      if (!flagKey) return;
+
+      const rawRules = Array.isArray(raw["targeting_rules"])
+        ? raw["targeting_rules"]
+        : [];
+      const event: TargetingRulesUpdateEvent = {
+        flagKey,
+        environment: String(raw["environment"] ?? ""),
+        ts: Number(raw["ts"] ?? 0),
+        targetingRules: rawRules.map((r): TargetingRule => {
+          const rule = r as Record<string, unknown>;
+          return {
+            id: String(rule["id"] ?? ""),
+            ruleType:
+              (rule["rule_type"] as TargetingRule["ruleType"]) ?? "CUSTOM",
+            attribute: String(rule["attribute"] ?? ""),
+            operator: rule["operator"] as TargetingRule["operator"],
+            values: Array.isArray(rule["values"]) ? rule["values"] : [],
+            variation: String(rule["variation"] ?? ""),
+            priority: Number(rule["priority"] ?? 0),
+          };
+        }),
+      };
+      this.onTargetingRulesEvent?.(event);
     } catch {
       // malformed event — ignore
     }

@@ -153,10 +153,6 @@ class FakeFetch {
       };
       return { ok: true, status: 200, json: async () => snapshot };
     }
-    if (url.includes("/rules")) {
-      // Best-effort per-flag rules fetch — no rules configured in these tests.
-      return { ok: false, status: 404, json: async () => [] };
-    }
     if (url.includes("/api/v1/telemetry")) {
       return { ok: true, status: 204, json: async () => undefined };
     }
@@ -901,6 +897,171 @@ describe("TombstoneClient — live prerequisites_updated streaming (end-to-end)"
     // The unrelated, already-cached flag must be entirely unaffected.
     const result = client.evaluate("child-flag", { userId: "u1" });
     assert.notEqual(result.reason, "PREREQUISITE_FAILED");
+
+    client.disconnect();
+  });
+});
+
+describe("TombstoneClient — live targeting_rules_updated streaming (end-to-end)", () => {
+  /**
+   * Mirrors "TombstoneClient — live prerequisites_updated streaming
+   * (end-to-end)" above exactly, for the targeting_rules follow-up (PR
+   * #245's backend + this PR's SDK consumption). A live
+   * "targeting_rules_updated" SSE frame must actually change what
+   * evaluate() returns for the affected flag, not just be parsed correctly
+   * in isolation (that's already covered by streaming.test.ts's own
+   * "SSEStreamClient — targeting_rules_updated dispatch" suite).
+   */
+  let fakeFetch: FakeFetch;
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    fakeFetch = new FakeFetch();
+    originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = fakeFetch.fn;
+    (globalThis as unknown as { EventSource: unknown }).EventSource =
+      FakeEventSource;
+    FakeEventSource.instances = [];
+  });
+
+  afterEach(() => {
+    (globalThis as unknown as { fetch: unknown }).fetch = originalFetch;
+  });
+
+  function snapshotWithChildFlag(): void {
+    fakeFetch.snapshotFlags = [
+      {
+        flag_id: "1",
+        flag_key: "child-flag",
+        environment: "production",
+        enabled: true,
+        rollout_pct: 0, // 0% -- without a matching rule, evaluate falls through to defaultValue
+        safe_default: "false",
+        updated_at: 1,
+        // No targeting_rules in the snapshot itself -- the live event is
+        // what introduces the rule, proving the update actually reaches
+        // the cache rather than the snapshot's own (absent) rules
+        // happening to already produce the same outcome.
+      },
+    ];
+  }
+
+  const rulePayload = {
+    id: "r1",
+    rule_type: "USER",
+    attribute: "userId",
+    operator: "EQ",
+    values: ["u1"],
+    variation: "special-variant",
+    priority: 0,
+  };
+
+  it("a live targeting_rules_updated event newer than the snapshot changes evaluate()'s outcome", async () => {
+    fakeFetch.snapshotTs = 1000;
+    snapshotWithChildFlag();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    // Before the live event: child-flag has no targeting rules and 0%
+    // rollout, so it falls through to the default value.
+    const before = client.evaluate<string>("child-flag", { userId: "u1" });
+    assert.notEqual(before.reason, "RULE_MATCH");
+
+    FakeEventSource.instances[0].emit(
+      "targeting_rules_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        targeting_rules: [rulePayload],
+        ts: 2000, // newer than the snapshot's ts=1000
+      }),
+    );
+
+    const after = client.evaluate<string>("child-flag", { userId: "u1" });
+    assert.equal(
+      after.reason,
+      "RULE_MATCH",
+      "the live event must actually be applied to the cache and change evaluate()'s outcome",
+    );
+    assert.equal(after.value, "special-variant");
+
+    client.disconnect();
+  });
+
+  it("an event OLDER than the currently-cached ts is rejected -- evaluate() stays unaffected", async () => {
+    fakeFetch.snapshotTs = 5000;
+    snapshotWithChildFlag();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "targeting_rules_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        targeting_rules: [rulePayload],
+        ts: 3000, // OLDER than the snapshot's ts=5000 -- must be rejected
+      }),
+    );
+
+    const result = client.evaluate<string>("child-flag", { userId: "u1" });
+    assert.notEqual(
+      result.reason,
+      "RULE_MATCH",
+      "a stale out-of-order event must not overwrite the newer cached state",
+    );
+
+    client.disconnect();
+  });
+
+  it("an event whose ts EQUALS the currently-cached ts IS applied -- pins down `<`, not `<=`", async () => {
+    fakeFetch.snapshotTs = 5000;
+    snapshotWithChildFlag();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "targeting_rules_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        targeting_rules: [rulePayload],
+        ts: 5000, // EQUAL to the snapshot's own ts=5000
+      }),
+    );
+
+    const result = client.evaluate<string>("child-flag", { userId: "u1" });
+    assert.equal(
+      result.reason,
+      "RULE_MATCH",
+      "an equal-ts event must be applied, not dropped as stale",
+    );
+    assert.equal(result.value, "special-variant");
+
+    client.disconnect();
+  });
+
+  it("an update for a flag the client has never seen is a no-op (nothing to merge into)", async () => {
+    fakeFetch.snapshotTs = 1000;
+    snapshotWithChildFlag();
+    const client = new TombstoneClient(baseConfig());
+    await client.connect();
+
+    assert.doesNotThrow(() =>
+      FakeEventSource.instances[0].emit(
+        "targeting_rules_updated",
+        JSON.stringify({
+          flag_key: "never-configured-flag",
+          environment: "production",
+          targeting_rules: [rulePayload],
+          ts: 9999,
+        }),
+      ),
+    );
+
+    // The unrelated, already-cached flag must be entirely unaffected.
+    const result = client.evaluate<string>("child-flag", { userId: "u1" });
+    assert.notEqual(result.reason, "RULE_MATCH");
 
     client.disconnect();
   });

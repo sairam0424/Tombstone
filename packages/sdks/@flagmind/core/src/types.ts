@@ -70,6 +70,15 @@ export interface FlagEnvironmentState {
    * SDKs could guard against it).
    */
   prerequisitesUpdatedAt?: number;
+  /**
+   * Unix seconds these targetingRules were last known-good as of -- either
+   * the snapshot fetch that loaded them, or a live TargetingRulesUpdateEvent
+   * applied since. Same tie-breaking role as prerequisitesUpdatedAt above,
+   * against services/flag-api/internal/api/v1/targeting_rules.go's
+   * TargetingRulesEvent.Ts -- see FlagCache.applyTargetingRulesEvent's own
+   * doc comment.
+   */
+  targetingRulesUpdatedAt?: number;
 }
 
 /**
@@ -81,6 +90,21 @@ export interface PrerequisitesUpdateEvent {
   flagKey: string;
   environment: string;
   prerequisites: FlagPrerequisite[];
+  ts: number;
+}
+
+/**
+ * The payload of a live "targeting_rules_updated" SSE event (services/
+ * flag-api/internal/api/v1/targeting_rules.go's TargetingRulesEvent) --
+ * carries a flag's CURRENT FULL targeting-rule list FOR THIS ENVIRONMENT,
+ * not a delta. Unlike PrerequisitesUpdateEvent (global, no environment
+ * scoping), targeting_rules already has its own environment column on the
+ * backend, so this event only ever describes ONE environment's rules.
+ */
+export interface TargetingRulesUpdateEvent {
+  flagKey: string;
+  environment: string;
+  targetingRules: TargetingRule[];
   ts: number;
 }
 

@@ -11,6 +11,7 @@ import type {
   FlagEvent,
   PrerequisitesUpdateEvent,
   TargetingRule,
+  TargetingRulesUpdateEvent,
   TelemetryEvent,
 } from "./types.js";
 
@@ -53,6 +54,13 @@ export class TombstoneClient {
         this.cache.applyPrerequisitesEvent(
           event.flagKey,
           event.prerequisites,
+          event.ts,
+        );
+      },
+      (event: TargetingRulesUpdateEvent) => {
+        this.cache.applyTargetingRulesEvent(
+          event.flagKey,
+          event.targetingRules,
           event.ts,
         );
       },
@@ -102,11 +110,15 @@ export class TombstoneClient {
    * the in-memory cache re-syncs after any connectivity gap — not just the
    * first load.
    *
-   * If the snapshot response includes targeting rules per flag they are stored
-   * in the cache automatically.  For any flags that have no rules in the
-   * snapshot, a best-effort fetch of GET /api/v1/flags/{key}/rules is made;
-   * failures are silently ignored — empty rules means evaluate by rollout hash,
-   * which is the unchanged v1 behaviour.
+   * The snapshot response includes each flag's real targeting_rules array
+   * (services/flag-api/internal/api/v1/environments.go, added by PR #245)
+   * -- loadSnapshot stores it directly; an empty array means the flag
+   * genuinely has no rules configured (evaluate falls through to rollout
+   * hash), not "not fetched yet". Previously (before that backend change)
+   * this method also fired a best-effort per-flag GET /api/v1/flags/{key}/rules
+   * for any flag with no rules in the snapshot -- removed, since that
+   * endpoint never existed server-side (it always 404'd) and the snapshot
+   * now carries the real data directly.
    *
    * Never throws — a failed fetch (e.g. flag-api still unreachable) leaves
    * the existing cache untouched so evaluation keeps serving last-known-good
@@ -124,21 +136,6 @@ export class TombstoneClient {
       if (resp.ok) {
         const snap = this.parseSnapshot(await resp.json());
         this.cache.loadSnapshot(snap);
-
-        // Best-effort: for flags whose snapshot entry has no targeting rules,
-        // try to fetch them from the flag-api individually.
-        const rulesPromises = this.cache
-          .keys()
-          .filter((flagKey) => {
-            const entry = this.cache.get(flagKey);
-            return !entry?.targetingRules || entry.targetingRules.length === 0;
-          })
-          .map((flagKey) => this.fetchAndStoreRules(apiUrl, flagKey));
-
-        // Fire-and-forget — we do NOT await; failures are swallowed inside
-        // fetchAndStoreRules.  If they resolve before the first evaluate() call
-        // the rules will be used; otherwise evaluation falls through to rollout.
-        void Promise.allSettled(rulesPromises);
       }
       // Even if snapshot fails, we proceed — fallback to defaults/last-known-good on evaluation
     } catch {
@@ -255,9 +252,12 @@ export class TombstoneClient {
    * client.test.ts's fake fetch returned an already-camelCase object
    * directly, never a real JSON string round-trip.
    *
-   * targeting_rules/target_list/hash_version are read defensively (default
-   * []/[]/1) since the real snapshot endpoint does not send them today --
-   * see fetchAndStoreRules's own comment for why that gap is separate and
+   * targeting_rules is now sent by the real snapshot endpoint (services/
+   * flag-api/internal/api/v1/environments.go's FlagEnvironmentStateWithPrereqs.
+   * TargetingRules, added by PR #245) -- parseFlagEnvironmentState below
+   * parses it directly. target_list/hash_version are still read
+   * defensively (default []/1): target_list has no backend data model at
+   * all yet (a separate, larger, deferred project), and hash_version is
    * out of scope here.
    */
   private parseSnapshot(raw: unknown): FlagSnapshot {
@@ -322,37 +322,6 @@ export class TombstoneClient {
   }
 
   /**
-   * Fetch targeting rules for a single flag from the flag-api.
-   * Stores the result in the cache on success; silently ignores any error.
-   *
-   * NOTE: GET /api/v1/flags/{key}/rules has no server-side route registered
-   * anywhere in flag-api's cmd/main.go today -- this always 404s against a
-   * real backend (confirmed by grep; also encoded honestly in this SDK's own
-   * client.test.ts fake fetch, which returns 404 for any /rules URL). Real-
-   * time targeting-rule propagation is a separate, larger, already-deferred
-   * project (no mutation endpoint or snapshot inclusion exists yet) -- not
-   * fixed here.
-   */
-  private async fetchAndStoreRules(
-    apiUrl: string,
-    flagKey: string,
-  ): Promise<void> {
-    try {
-      const url = `${apiUrl}/api/v1/flags/${encodeURIComponent(flagKey)}/rules`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.config.sdkKey}` },
-      });
-      if (!resp.ok) return;
-      const rules = (await resp.json()) as TargetingRule[];
-      if (Array.isArray(rules) && rules.length > 0) {
-        this.cache.setTargetingRules(flagKey, rules);
-      }
-    } catch {
-      // Fail silently — no rules = evaluate by rollout hash (v1 behaviour)
-    }
-  }
-
-  /**
    * EVAL-2: buffers a telemetry event for the given evaluate() outcome.
    * No-op entirely when telemetryUrl is unset — matches this class's
    * other opt-in network calls (connect()'s snapshot fetch is the
@@ -386,7 +355,7 @@ export class TombstoneClient {
    * buffer. Never throws — a failed POST (network error, evaluator down)
    * drops the batch rather than blocking or re-queuing; telemetry is
    * best-effort observability data, not a delivery guarantee, matching
-   * fetchSnapshot's/fetchAndStoreRules's own fail-silent convention.
+   * fetchSnapshot's own fail-silent convention.
    * The buffer is cleared BEFORE the request starts (not after it
    * resolves) so a slow/hanging request cannot cause the next interval
    * tick to pile a second batch on top of the first.
@@ -400,8 +369,8 @@ export class TombstoneClient {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Matches fetchSnapshot's/fetchAndStoreRules's convention (both
-          // send this) even though the evaluator's /api/v1/telemetry route
+          // Matches fetchSnapshot's convention (also sends this) even
+          // though the evaluator's /api/v1/telemetry route
           // is currently unauthenticated (found by adversarial review of
           // PR #218) -- if that route is ever put behind auth, sending
           // this now means telemetry keeps working with zero SDK change
