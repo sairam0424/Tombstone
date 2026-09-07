@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -142,13 +141,39 @@ public sealed class TombstoneClient : IDisposable
         if (!flag.TryGetProperty("prerequisites", out var raw) || raw.ValueKind != JsonValueKind.Array)
             return new();
         return raw.EnumerateArray()
+            .Where(p => p.ValueKind == JsonValueKind.Object)
             .Select(p => new FlagPrerequisite(
-                p.TryGetProperty("flag_key", out var fk) ? fk.GetString() ?? "" : "",
-                p.TryGetProperty("required_variation", out var rv) ? rv.GetString() ?? "true" : "true",
+                GetStringOrDefault(p, "flag_key", ""),
+                GetStringOrDefault(p, "required_variation", "true"),
                 !(p.TryGetProperty("gate", out var g) && g.ValueKind == JsonValueKind.False)
             ))
             .ToList();
     }
+
+    // JsonElement.GetString() throws InvalidOperationException for any
+    // ValueKind other than String/Null -- a wire row whose field is a
+    // different JSON type (e.g. a numeric "id") would otherwise crash the
+    // WHOLE snapshot parse. Unlike the live-event handlers (ApplyEvent/
+    // ApplyPrerequisitesEvent/ApplyTargetingRulesEvent), which already
+    // swallow any exception via a bare catch, this parsing runs from
+    // ParseSnapshotResponse -> FetchSnapshotAsync -> ConnectAsync with NO
+    // try/catch anywhere in that call chain -- one malformed field on the
+    // snapshot endpoint would otherwise propagate out of the public
+    // ConnectAsync API and prevent the client from ever connecting at all.
+    // Found by adversarial review of PR #249.
+    private static string GetStringOrDefault(JsonElement obj, string prop, string fallback) =>
+        obj.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? fallback
+            : fallback;
+
+    // Same reasoning as GetStringOrDefault -- JsonElement.GetInt32() throws
+    // for a non-Number ValueKind, and even a real Number can throw
+    // (FormatException) if it doesn't fit Int32 or has a fractional part.
+    // TryGetInt32 fails gracefully instead of throwing for either case.
+    private static int GetInt32OrDefault(JsonElement obj, string prop, int fallback) =>
+        obj.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)
+            ? i
+            : fallback;
 
     // flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
     // targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
@@ -172,17 +197,16 @@ public sealed class TombstoneClient : IDisposable
                 ? v.EnumerateArray().Select(StringifyWireValue).ToList()
                 : new List<string>();
             var condition = new PropertyCondition(
-                r.TryGetProperty("attribute", out var attr) ? attr.GetString() ?? "" : "",
-                r.TryGetProperty("operator", out var op) ? op.GetString() ?? "" : "",
+                GetStringOrDefault(r, "attribute", ""),
+                GetStringOrDefault(r, "operator", ""),
                 values
             );
             result.Add(new TargetingRule(
-                r.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                GetStringOrDefault(r, "id", ""),
                 new List<PropertyCondition> { condition },
                 100.0,
-                r.TryGetProperty("variation", out var variation) ? variation.GetString() ?? "" : "",
-                r.TryGetProperty("priority", out var priority) && priority.ValueKind == JsonValueKind.Number
-                    ? priority.GetInt32() : 0
+                GetStringOrDefault(r, "variation", ""),
+                GetInt32OrDefault(r, "priority", 0)
             ));
         }
         return result;
@@ -202,14 +226,35 @@ public sealed class TombstoneClient : IDisposable
     private static string StringifyWireValue(JsonElement v) => v.ValueKind switch
     {
         JsonValueKind.Null => "",
-        JsonValueKind.Number when v.TryGetDouble(out var d) && !double.IsInfinity(d) && d == Math.Truncate(d)
-            => ((long)d).ToString(CultureInfo.InvariantCulture),
-        JsonValueKind.Number => v.GetRawText(),
+        JsonValueKind.Number => StringifyNumber(v),
         JsonValueKind.True => "true",
         JsonValueKind.False => "false",
         JsonValueKind.String => v.GetString() ?? "",
         _ => v.GetRawText(),
     };
+
+    // Operates on the number's own RAW TEXT rather than round-tripping
+    // through double/long -- an EARLIER version of this method did
+    // `((long)(double)v)`, which (a) is an UNCHECKED C# numeric conversion
+    // that silently produces a platform-dependent garbage value (observed
+    // as long.MinValue) for any value outside Int64's ~9.2e18 range instead
+    // of throwing, and (b) loses precision for any whole number above 2^53
+    // (IEEE-754 double's mantissa limit) even when it DOES fit in Int64 --
+    // e.g. 9007199254740993 silently became 9007199254740992. Both found by
+    // adversarial review of PR #249. Operating on GetRawText() directly
+    // sidesteps both: a plain integer literal of any size renders verbatim
+    // (exact digits, no cast, no range limit), and a whole-number-valued
+    // float (e.g. wire "21.0") has its trailing zero fraction stripped via
+    // plain string slicing, never a double roundtrip.
+    private static string StringifyNumber(JsonElement v)
+    {
+        var raw = v.GetRawText();
+        var dot = raw.IndexOf('.');
+        if (dot < 0 || raw.IndexOfAny(ExponentChars) >= 0) return raw;
+        return raw.AsSpan(dot + 1).Trim('0').Length == 0 ? raw[..dot] : raw;
+    }
+
+    private static readonly char[] ExponentChars = { 'e', 'E' };
 
     private async Task RunSseListenerAsync(CancellationToken ct)
     {

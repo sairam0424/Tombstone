@@ -97,6 +97,52 @@ public class TargetingRulesEventTests
         Assert.NotEqual(EvaluationReason.RuleMatch, result.Reason);
     }
 
+    // Found by adversarial review of PR #249: nothing in the suite proved
+    // ApplyTargetingRulesEvent's bare `catch { }` actually swallows a
+    // genuinely unparseable JSON payload -- the only malformed-payload test
+    // above uses well-formed JSON that's merely missing "flag_key", which
+    // never throws at all (TryGetProperty just returns false). A malformed
+    // frame is served FIRST, immediately followed (same stream, no gap) by
+    // a real rule frame -- if the malformed frame crashed instead of being
+    // swallowed, the outer RunSseListenerAsync catch-all would trigger a
+    // 3-second reconnect delay before replaying the SAME two frames from
+    // the start, which the 2-second WaitForReasonAsync timeout below would
+    // not survive, correctly failing this test.
+    [Fact]
+    public async Task MalformedJsonPayload_IsSwallowedNotRaised()
+    {
+        var malformedFrame = "event: targeting_rules_updated\ndata: not valid json{{{\n\n";
+        var handler = new StubHandler(SnapshotJson(1000), malformedFrame + RuleFrame(2000));
+        using var client = new TombstoneClient("sdk-key", "test", httpMessageHandler: handler, defaults: Defaults);
+        await client.ConnectAsync();
+
+        var result = await WaitForReasonAsync(client, EvaluationReason.RuleMatch, TimeSpan.FromSeconds(2));
+        Assert.Equal(EvaluationReason.RuleMatch, result.Reason);
+    }
+
+    // A syntactically valid JSON payload that isn't an Object at the top
+    // level (null/a number/an array) parses successfully via
+    // JsonDocument.Parse, so the malformed-JSON test above does not
+    // exercise this path -- JsonElement.TryGetProperty throws
+    // InvalidOperationException for any non-Object ValueKind, which the
+    // bare `catch { }` must also swallow. The identical bug class (a
+    // narrower `catch (JsonException)` missing this) was found and fixed
+    // in the Ruby SDK's own review (PR #248).
+    [Theory]
+    [InlineData("null")]
+    [InlineData("42")]
+    [InlineData("[1,2,3]")]
+    public async Task ValidJsonNonObjectPayload_IsSwallowedNotRaised(string payload)
+    {
+        var nonObjectFrame = $"event: targeting_rules_updated\ndata: {payload}\n\n";
+        var handler = new StubHandler(SnapshotJson(1000), nonObjectFrame + RuleFrame(2000));
+        using var client = new TombstoneClient("sdk-key", "test", httpMessageHandler: handler, defaults: Defaults);
+        await client.ConnectAsync();
+
+        var result = await WaitForReasonAsync(client, EvaluationReason.RuleMatch, TimeSpan.FromSeconds(2));
+        Assert.Equal(EvaluationReason.RuleMatch, result.Reason);
+    }
+
     // The rule lives in the SNAPSHOT itself (not a live event) so the flag
     // already matches from ConnectAsync onward -- avoiding any race between
     // two back-to-back SSE frames served with no gap between them, which a

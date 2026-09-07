@@ -202,6 +202,104 @@ public class SnapshotParsingTests
             condition, new EvaluationContext("u1", "", new() { ["age_bracket"] = "21" })));
     }
 
+    // Found by adversarial review of PR #249: an EARLIER version of the
+    // whole-number-float fix above round-tripped through `(long)(double)v`,
+    // an UNCHECKED C# numeric conversion that silently produces a
+    // platform-dependent garbage value (observed as long.MinValue) for any
+    // number outside Int64's ~9.2e18 range, instead of throwing or
+    // preserving the real digits. The fix now operates on the number's own
+    // raw JSON text, so a huge integer (far larger than any realistic
+    // attribute value, but still valid JSON) must render VERBATIM, not as
+    // garbage.
+    [Fact]
+    public void TargetingRuleHugeIntegerValueBeyondInt64RangeRendersVerbatimNotAsGarbage()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"CUSTOM","attribute":"big_id","operator":"EQ",
+                  "values":[99999999999999999999],"variation":"on","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var condition = states[0].TargetingRules[0].Conditions[0];
+        Assert.Equal(new List<string> { "99999999999999999999" }, condition.Values);
+    }
+
+    // Found by adversarial review of PR #249: even WITHIN Int64's range, a
+    // whole number above 2^53 (IEEE-754 double's 52-bit mantissa limit)
+    // loses precision if round-tripped through double -- 9007199254740993
+    // would silently become 9007199254740992. Operating on the raw JSON
+    // text (not a double) must preserve the exact original digits.
+    [Fact]
+    public void TargetingRuleLargeIntegerAbove2Pow53PreservesExactPrecision()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"CUSTOM","attribute":"big_id","operator":"EQ",
+                  "values":[9007199254740993],"variation":"on","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var condition = states[0].TargetingRules[0].Conditions[0];
+        Assert.Equal(new List<string> { "9007199254740993" }, condition.Values);
+    }
+
+    // Found by adversarial review of PR #249: ParseTargetingRules
+    // (and ParsePrerequisites) extracted string fields via GetString(),
+    // which throws InvalidOperationException for any ValueKind other than
+    // String/Null -- a wire row whose "id" (or other string field) is a
+    // different JSON type would crash the WHOLE snapshot parse, propagating
+    // uncaught through FetchSnapshotAsync/ConnectAsync (unlike the live-
+    // event handlers, which already swallow every exception). Must parse
+    // with a fallback instead of throwing.
+    [Fact]
+    public void ATargetingRuleWithANonStringIdDoesNotCrashTheWholeParse()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":123,"attribute":"email","operator":"EQ","values":["x@example.com"],"variation":"true","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var rules = states[0].TargetingRules;
+        Assert.Single(rules);
+        Assert.Equal("", rules[0].Id);
+    }
+
+    // Same reasoning as the non-string-id test above, for "priority": a
+    // JSON number that doesn't fit Int32 (or has a fractional part) used to
+    // reach GetInt32() unguarded (only a ValueKind check existed), which
+    // throws FormatException.
+    [Fact]
+    public void ATargetingRuleWithANonIntegerPriorityDoesNotCrashTheWholeParse()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","attribute":"email","operator":"EQ","values":["x@example.com"],"variation":"true","priority":3.5}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var rules = states[0].TargetingRules;
+        Assert.Single(rules);
+        Assert.Equal(0, rules[0].Priority);
+    }
+
     [Fact]
     public void TargetingRuleNumericValuesParseAsTheirStringRepresentation()
     {

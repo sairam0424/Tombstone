@@ -118,6 +118,21 @@ public class RuleMatcherTests
         Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["plan"] = "pro" })));
     }
 
+    // Found by adversarial review of PR #249: the only geo+not_in test
+    // (above) uses an EMPTY values list, so the `values.Count > 0` guard
+    // alone forces the correct (false) outcome regardless of whether the
+    // isGeo ternary's case-insensitive branch is even reached correctly --
+    // the case-insensitive exclusion path itself was completely
+    // unexercised. This test uses a NON-EMPTY values list with a
+    // case-different match, which only passes if isGeo's
+    // ContainsIgnoreCase branch is actually used for "neq"/"nin".
+    [Fact] public void EvaluateCondition_NotInWithNonEmptyValuesIsCaseInsensitiveForGeoAttribute() {
+        var condition = new PropertyCondition("geo.country", "not_in", new List<string> { "US" }, false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.country"] = "us" })),
+            "a case-different match against a geo attribute must still be excluded (case-insensitive), not treated as a non-match");
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.country"] = "ca" })));
+    }
+
     // docs/SDK_CONTRACT.md:32 -- REGEX is declared but deliberately NOT
     // implemented in this release, across all 5 SDKs. It must return a
     // definite `false` (matching TS's documented default:false behavior),
