@@ -143,6 +143,164 @@ public class SnapshotParsingTests
         Assert.Empty(states[0].Prerequisites);
     }
 
+    // Mirrors the prerequisites-parsing tests above exactly, for
+    // targeting_rules (added by flag-api PR #245). flag-api's real per-rule
+    // wire shape: "id"/"rule_type"/"attribute"/"operator"/"values"/
+    // "variation"/"priority" -- ONE condition per rule row, adapted into
+    // this SDK's own richer TargetingRule(Conditions, RolloutPct, Variation,
+    // Priority) model by ParseTargetingRules (see that method's own comment
+    // for why RolloutPct is always 100 for a wire-parsed rule).
+    [Fact]
+    public void TargetingRulesParseCorrectlyFromRealWireJson()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"USER","attribute":"email","operator":"CONTAINS",
+                  "values":["@acme.com"],"variation":"true","priority":3}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var rules = states[0].TargetingRules;
+        Assert.Single(rules);
+        Assert.Equal("rule-1", rules[0].Id);
+        Assert.Equal("true", rules[0].Variation);
+        Assert.Equal(3, rules[0].Priority);
+        Assert.Equal(100.0, rules[0].RolloutPct);
+        Assert.Single(rules[0].Conditions);
+        Assert.Equal("email", rules[0].Conditions[0].Attribute);
+        Assert.Equal("CONTAINS", rules[0].Conditions[0].Operator);
+        Assert.Equal(new List<string> { "@acme.com" }, rules[0].Conditions[0].Values);
+    }
+
+    [Fact]
+    public void TargetingRuleWholeNumberJsonFloatValuesRoundTripWithoutATrailingDotZero()
+    {
+        // flag-api's JSONB "values" column can round-trip a whole-number
+        // value as a JSON float (e.g. 21.0) -- must render as "21", not
+        // "21.0", or an eq/in/neq/nin condition silently fails to match a
+        // context attribute supplied as a plain int or bare numeric string.
+        // Found by adversarial review of the Ruby SDK's identical adapter
+        // (PR #248); fixed here proactively.
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"CUSTOM","attribute":"age_bracket","operator":"IN",
+                  "values":[21.0, 65.0],"variation":"on","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var condition = states[0].TargetingRules[0].Conditions[0];
+        Assert.Equal(new List<string> { "21", "65" }, condition.Values);
+        Assert.True(RuleMatcher.EvaluateCondition(
+            condition, new EvaluationContext("u1", "", new() { ["age_bracket"] = "21" })));
+    }
+
+    [Fact]
+    public void TargetingRuleNumericValuesParseAsTheirStringRepresentation()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"CUSTOM","attribute":"age","operator":"GTE",
+                  "values":[18],"variation":"true","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var condition = states[0].TargetingRules[0].Conditions[0];
+        Assert.Equal(new List<string> { "18" }, condition.Values);
+        Assert.True(RuleMatcher.EvaluateCondition(
+            condition, new EvaluationContext("u1", "", new() { ["age"] = "21" })));
+    }
+
+    [Fact]
+    public void FlagWithNoTargetingRulesFieldAtAllParsesAsEmptyNotAnError()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"1","flag_key":"known-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        Assert.Empty(states[0].TargetingRules);
+    }
+
+    [Fact]
+    public void AMalformedNonObjectEntryInsideTargetingRulesIsSkippedNotThrown()
+    {
+        // parse_targeting_rules' own JsonValueKind.Object guard (inside its
+        // foreach over the "targeting_rules" array) exists specifically for
+        // this -- a stray JSON null or scalar mixed into the array.
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 null,
+                 {"id":"rule-1","attribute":"email","operator":"EQ","values":["x@example.com"],"variation":"matched","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        var rules = states[0].TargetingRules;
+        Assert.Single(rules);
+        Assert.Equal("rule-1", rules[0].Id);
+    }
+
+    [Fact]
+    public void ATargetingRuleMissingTheValuesKeyEntirelyParsesWithEmptyValuesNotAnError()
+    {
+        var json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","attribute":"email","operator":"EQ","variation":"matched","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var states = TombstoneClient.ParseSnapshotResponse(json).Flags;
+        Assert.Empty(states[0].TargetingRules[0].Conditions[0].Values);
+    }
+
+    // End-to-end proof that a targeting rule parsed from a REAL snapshot
+    // response (via ParseSnapshotResponse, not a hand-built
+    // FlagEnvironmentState) actually reaches Evaluate() and changes its
+    // outcome -- mirrors the two prerequisite tests above exactly, closing
+    // the identical gap for targeting_rules.
+    [Fact]
+    public async Task EvaluateResolvesARealRuleMatchFromASnapshotParsedByTheRealWireParser()
+    {
+        var json = """
+            {"flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"test",
+               "enabled":true,"rollout_pct":0,"safe_default":"off","updated_at":0,
+               "targeting_rules":[
+                 {"id":"rule-1","attribute":"email","operator":"EQ","values":["x@example.com"],"variation":"matched","priority":0}
+               ]}
+            ]}
+            """;
+        using var client = new TombstoneClient(
+            "sdk-key", "test", httpMessageHandler: new SnapshotOnlyHandler(json),
+            defaults: new() { ["child-flag"] = "off" });
+        await client.ConnectAsync();
+
+        var result = client.Evaluate<string>(
+            "child-flag", new EvaluationContext("u1", "", new() { ["email"] = "x@example.com" }));
+        Assert.Equal(EvaluationReason.RuleMatch, result.Reason);
+        Assert.Equal("matched", result.Value);
+    }
+
     // The one test in this file proving fix 2 (flagLookup wiring) -- see
     // this file's own top-level doc comment for exactly what state this
     // does and doesn't distinguish.

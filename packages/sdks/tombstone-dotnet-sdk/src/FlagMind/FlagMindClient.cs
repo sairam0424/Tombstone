@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -123,7 +124,8 @@ public sealed class TombstoneClient : IDisposable
                 f.GetProperty("rollout_pct").GetInt32(),
                 f.GetProperty("safe_default").GetString() ?? "false",
                 f.TryGetProperty("updated_at", out var ua) ? ua.GetInt64() : 0L,
-                Prerequisites: ParsePrerequisites(f)
+                Prerequisites: ParsePrerequisites(f),
+                TargetingRules: ParseTargetingRules(f)
             )).ToList();
         return (flags, ts);
     }
@@ -147,6 +149,67 @@ public sealed class TombstoneClient : IDisposable
             ))
             .ToList();
     }
+
+    // flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
+    // targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
+    // "variation"/"priority" -- ONE flat condition per rule row. This SDK's
+    // own TargetingRule model (mirroring Python/Java/Ruby's GrowthBook-style
+    // design: multiple AND-combined conditions per rule + per-rule rollout
+    // sub-bucketing) predates the real backend format and doesn't match it
+    // 1:1 -- adapted here into a single-element conditions list, with
+    // RolloutPct fixed at 100 (there is no per-rule rollout concept on the
+    // backend; 100 means "always apply once matched"), mirroring the Java/
+    // Ruby SDKs' identical ParseTargetingRules adapter (PRs #247/#248).
+    private static List<TargetingRule> ParseTargetingRules(JsonElement flag)
+    {
+        if (!flag.TryGetProperty("targeting_rules", out var raw) || raw.ValueKind != JsonValueKind.Array)
+            return new();
+        var result = new List<TargetingRule>();
+        foreach (var r in raw.EnumerateArray())
+        {
+            if (r.ValueKind != JsonValueKind.Object) continue;
+            var values = r.TryGetProperty("values", out var v) && v.ValueKind == JsonValueKind.Array
+                ? v.EnumerateArray().Select(StringifyWireValue).ToList()
+                : new List<string>();
+            var condition = new PropertyCondition(
+                r.TryGetProperty("attribute", out var attr) ? attr.GetString() ?? "" : "",
+                r.TryGetProperty("operator", out var op) ? op.GetString() ?? "" : "",
+                values
+            );
+            result.Add(new TargetingRule(
+                r.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                new List<PropertyCondition> { condition },
+                100.0,
+                r.TryGetProperty("variation", out var variation) ? variation.GetString() ?? "" : "",
+                r.TryGetProperty("priority", out var priority) && priority.ValueKind == JsonValueKind.Number
+                    ? priority.GetInt32() : 0
+            ));
+        }
+        return result;
+    }
+
+    // A JSON number that happens to be a whole value (e.g. flag-api's JSONB
+    // "values" column round-tripping 21.0) must render as "21", not "21.0"
+    // -- RuleMatcher's Eq/In/Neq/Nin operators compare via plain string
+    // equality against EvaluationContext.Attrs, and a real caller's own
+    // attribute is far more likely to be a plain int (21) or a bare numeric
+    // string ("21") than "21.0", so "21.0" would silently fail to
+    // match/exclude a value it should. Numeric operators that go through
+    // double.TryParse (Gt/Gte/Lt/Lte) are unaffected either way. The
+    // identical .ToString() coercion gap was found by adversarial review of
+    // the Ruby SDK's own equivalent adapter (PR #248); fixed here
+    // proactively.
+    private static string StringifyWireValue(JsonElement v) => v.ValueKind switch
+    {
+        JsonValueKind.Null => "",
+        JsonValueKind.Number when v.TryGetDouble(out var d) && !double.IsInfinity(d) && d == Math.Truncate(d)
+            => ((long)d).ToString(CultureInfo.InvariantCulture),
+        JsonValueKind.Number => v.GetRawText(),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        JsonValueKind.String => v.GetString() ?? "",
+        _ => v.GetRawText(),
+    };
 
     private async Task RunSseListenerAsync(CancellationToken ct)
     {
@@ -196,6 +259,16 @@ public sealed class TombstoneClient : IDisposable
                             // a flag that was never actually disabled.
                             ApplyPrerequisitesEvent(line[5..].Trim());
                         }
+                        else if (eventType == "targeting_rules_updated")
+                        {
+                            // services/flag-api/internal/api/v1/targeting_rules.go's
+                            // TargetingRulesEvent -- mirrors
+                            // ApplyPrerequisitesEvent exactly, for the same
+                            // reason (a distinct payload shape from a real
+                            // flag event, so it gets its own handler rather
+                            // than being routed through ApplyEvent).
+                            ApplyTargetingRulesEvent(line[5..].Trim());
+                        }
                         else
                         {
                             ApplyEvent(line[5..].Trim());
@@ -234,6 +307,20 @@ public sealed class TombstoneClient : IDisposable
             if (string.IsNullOrEmpty(flagKey)) return;
             var ts = r.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
             _cache.ApplyPrerequisitesEvent(flagKey, ParsePrerequisites(r), ts);
+        }
+        catch { /* malformed event — ignore */ }
+    }
+
+    private void ApplyTargetingRulesEvent(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            var flagKey = r.TryGetProperty("flag_key", out var fk) ? fk.GetString() : null;
+            if (string.IsNullOrEmpty(flagKey)) return;
+            var ts = r.TryGetProperty("ts", out var tsEl) ? tsEl.GetInt64() : 0L;
+            _cache.ApplyTargetingRulesEvent(flagKey, ParseTargetingRules(r), ts);
         }
         catch { /* malformed event — ignore */ }
     }

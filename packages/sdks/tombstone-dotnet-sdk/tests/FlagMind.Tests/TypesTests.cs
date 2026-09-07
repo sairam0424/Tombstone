@@ -35,6 +35,7 @@ public class TypesTests
         Assert.Empty(state.TargetingRules);
         Assert.Empty(state.TargetList);
         Assert.Equal(0L, state.PrerequisitesUpdatedAt);
+        Assert.Equal(0L, state.TargetingRulesUpdatedAt);
     }
 
     [Fact] public void FlagPrerequisite_ConstructsWithAllFields() {

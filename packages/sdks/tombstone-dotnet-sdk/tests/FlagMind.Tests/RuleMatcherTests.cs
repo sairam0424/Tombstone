@@ -58,6 +58,81 @@ public class RuleMatcherTests
         Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.country"] = "us" })));
     }
 
+    // flag-api's targeting_rules.operator CHECK constraint (schema.sql) has
+    // GEO_COUNTRY/GEO_REGION as real operator VALUES, not just an
+    // attribute-name convention -- NormalizeOperator must map both to "in"
+    // so they reach the case-insensitive isGeo branch above, or every
+    // GEO_COUNTRY/GEO_REGION rule from a real backend response would throw
+    // InconclusiveMatchException (unknown operator) and never match for
+    // any user. Found while wiring the real backend wire format into this
+    // SDK for the first time.
+    [Fact] public void EvaluateCondition_GeoCountryOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.country", "GEO_COUNTRY", new List<string> { "US", "CA" }, false);
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.country"] = "us" })));
+    }
+
+    [Fact] public void EvaluateCondition_GeoRegionOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.region", "GEO_REGION", new List<string> { "CA-ON" }, false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.region"] = "CA-QC" })));
+    }
+
+    // Found by adversarial review of the Java/Ruby SDKs' identical fix
+    // (PRs #247/#248): isGeo was originally decided PURELY by attribute
+    // name (GeoAttributes.Contains(attribute)), so a GEO_COUNTRY rule using
+    // a non-canonical attribute name (nothing validates that
+    // operator=GEO_COUNTRY implies attribute=="geo.country") silently fell
+    // back to case-SENSITIVE matching. Checked here proactively.
+    [Fact] public void EvaluateCondition_GeoCountryOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("country", "GEO_COUNTRY", new List<string> { "US" }, false);
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["country"] = "us" })),
+            "the GEO_COUNTRY operator must match case-insensitively regardless of the attribute's own name");
+    }
+
+    [Fact] public void EvaluateCondition_GeoRegionOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("region", "GEO_REGION", new List<string> { "CA-ON" }, false);
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["region"] = "ca-on" })),
+            "the GEO_REGION operator must match case-insensitively regardless of the attribute's own name");
+    }
+
+    // An EMPTY values list must never match "neq"/"nin": !values.Contains(x)
+    // on an empty list is vacuously true, which would make a rule with an
+    // empty/missing "values" list match EVERY context unconditionally --
+    // the same bug class found and fixed in the TypeScript/Java/Ruby SDKs'
+    // own NOT_IN operators (PRs #246/#247/#248), which explicitly flagged
+    // this as likely present in the remaining SDKs too. Confirmed here.
+    [Fact] public void EvaluateCondition_NotInWithEmptyValuesNeverMatches() {
+        var condition = new PropertyCondition("plan", "not_in", new List<string>(), false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["plan"] = "anything" })),
+            "an empty NOT_IN values list must never match, not vacuously match everyone");
+    }
+
+    [Fact] public void EvaluateCondition_NotInWithEmptyValuesNeverMatchesForGeoAttribute() {
+        var condition = new PropertyCondition("geo.country", "not_in", new List<string>(), false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["geo.country"] = "US" })),
+            "an empty NOT_IN values list must never match, even for a geo (case-insensitive) attribute");
+    }
+
+    [Fact] public void EvaluateCondition_NotInWithNonEmptyValuesStillExcludesCorrectly() {
+        var condition = new PropertyCondition("plan", "not_in", new List<string> { "banned", "suspended" }, false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["plan"] = "banned" })));
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["plan"] = "pro" })));
+    }
+
+    // docs/SDK_CONTRACT.md:32 -- REGEX is declared but deliberately NOT
+    // implemented in this release, across all 5 SDKs. It must return a
+    // definite `false` (matching TS's documented default:false behavior),
+    // NOT throw InconclusiveMatchException like a genuinely unknown
+    // operator would.
+    [Fact] public void EvaluateCondition_RegexReturnsFalseRatherThanThrowing() {
+        var condition = new PropertyCondition("email", "REGEX", new List<string> { "^admin.*@corp\\.com$" }, false);
+        Assert.False(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["email"] = "admin1@corp.com" })));
+    }
+
+    [Fact] public void EvaluateCondition_NegatedRegexReturnsTrue() {
+        var condition = new PropertyCondition("email", "REGEX", new List<string> { "^admin.*@corp\\.com$" }, true);
+        Assert.True(RuleMatcher.EvaluateCondition(condition, Ctx(new() { ["email"] = "admin1@corp.com" })));
+    }
+
     [Fact] public void PaddedVersion_OrdersNumericSegmentsCorrectly() {
         Assert.True(string.CompareOrdinal(RuleMatcher.PaddedVersion("1.9.0"), RuleMatcher.PaddedVersion("1.10.0")) < 0);
     }

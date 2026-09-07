@@ -41,6 +41,7 @@ public class FlagCache
     private sealed record CacheState(
         ImmutableDictionary<string, FlagEnvironmentState> Cache,
         ImmutableDictionary<string, bool> PrerequisitesFromLiveEvent,
+        ImmutableDictionary<string, bool> TargetingRulesFromLiveEvent,
         long LastSnapshotTs);
 
     // Sentinel meaning "no snapshot loaded yet" -- a real flag-api snapshot
@@ -50,6 +51,7 @@ public class FlagCache
 
     private volatile CacheState _state = new(
         ImmutableDictionary<string, FlagEnvironmentState>.Empty,
+        ImmutableDictionary<string, bool>.Empty,
         ImmutableDictionary<string, bool>.Empty,
         NoSnapshotYet);
 
@@ -74,6 +76,7 @@ public class FlagCache
         // behavior this Builder-based loop replaced.
         var next = ImmutableDictionary.CreateBuilder<string, FlagEnvironmentState>();
         var nextFromLiveEvent = ImmutableDictionary.CreateBuilder<string, bool>();
+        var nextTargetingRulesFromLiveEvent = ImmutableDictionary.CreateBuilder<string, bool>();
         foreach (var f in flags)
         {
             // A live prerequisites_updated event may have already advanced
@@ -104,23 +107,42 @@ public class FlagCache
                 current.Cache.TryGetValue(f.FlagKey, out var existing) &&
                 current.PrerequisitesFromLiveEvent.TryGetValue(f.FlagKey, out var fromLive) && fromLive &&
                 existing.PrerequisitesUpdatedAt >= snapshotTs;
-            next.Add(f.FlagKey, keepLivePrerequisites
+            // Identical reasoning to keepLivePrerequisites above, applied to
+            // TargetingRules against services/flag-api/internal/api/v1/
+            // targeting_rules.go's TargetingRulesEvent -- see
+            // ApplyTargetingRulesEvent's own doc comment. Tracked via its OWN
+            // TargetingRulesFromLiveEvent map so a live PREREQUISITES event
+            // never protects TargetingRules (or vice versa) from an
+            // unrelated tied snapshot.
+            var keepLiveTargetingRules =
+                existing is not null &&
+                current.TargetingRulesFromLiveEvent.TryGetValue(f.FlagKey, out var rulesFromLive) && rulesFromLive &&
+                existing.TargetingRulesUpdatedAt >= snapshotTs;
+            var merged = keepLivePrerequisites
                 ? f with { Prerequisites = existing!.Prerequisites, PrerequisitesUpdatedAt = existing.PrerequisitesUpdatedAt }
-                : f with { PrerequisitesUpdatedAt = snapshotTs });
+                : f with { PrerequisitesUpdatedAt = snapshotTs };
+            merged = keepLiveTargetingRules
+                ? merged with { TargetingRules = existing!.TargetingRules, TargetingRulesUpdatedAt = existing.TargetingRulesUpdatedAt }
+                : merged with { TargetingRulesUpdatedAt = snapshotTs };
+            next.Add(f.FlagKey, merged);
             // ONE-SHOT consumption, always false here (never
-            // keepLivePrerequisites): this LoadSnapshot call has now fully
-            // resolved the race between the live event and ITS OWN specific
-            // in-flight snapshot. Re-propagating true would make the
-            // protection "sticky", vetoing a later, independent snapshot
-            // that merely happens to tie the same coarse-resolution second
-            // too. Residual, accepted limitation: two snapshot fetches that
-            // were BOTH already in flight when the SAME live event fired
-            // will only have the first-arriving one correctly blocked;
-            // solving that fully would require a signal finer than
-            // flag-api's 1-second-resolution wall-clock ts.
+            // keepLivePrerequisites/keepLiveTargetingRules): this
+            // LoadSnapshot call has now fully resolved the race between the
+            // live event and ITS OWN specific in-flight snapshot. Re-
+            // propagating true would make the protection "sticky", vetoing a
+            // later, independent snapshot that merely happens to tie the
+            // same coarse-resolution second too. Residual, accepted
+            // limitation: two snapshot fetches that were BOTH already in
+            // flight when the SAME live event fired will only have the
+            // first-arriving one correctly blocked; solving that fully
+            // would require a signal finer than flag-api's
+            // 1-second-resolution wall-clock ts.
             nextFromLiveEvent.Add(f.FlagKey, false);
+            nextTargetingRulesFromLiveEvent.Add(f.FlagKey, false);
         }
-        _state = new CacheState(next.ToImmutable(), nextFromLiveEvent.ToImmutable(), snapshotTs);
+        _state = new CacheState(
+            next.ToImmutable(), nextFromLiveEvent.ToImmutable(),
+            nextTargetingRulesFromLiveEvent.ToImmutable(), snapshotTs);
     }
 
     // Immutable update — creates a new CacheState, never mutates existing
@@ -161,6 +183,27 @@ public class FlagCache
         _state = new CacheState(
             current.Cache.SetItem(flagKey, updated),
             current.PrerequisitesFromLiveEvent.SetItem(flagKey, true),
+            current.TargetingRulesFromLiveEvent,
+            current.LastSnapshotTs);
+    }
+
+    // Applies a live "targeting_rules_updated" SSE event -- full replacement
+    // of a flag's targeting-rule list FOR THIS ENVIRONMENT, not a delta
+    // (matching TargetingRulesEvent's own documented design on the flag-api
+    // side -- services/flag-api/internal/api/v1/targeting_rules.go).
+    // No-ops for a flag with no existing cache entry, mirrors
+    // ApplyPrerequisitesEvent's own staleness guard exactly (strict "<",
+    // comparing against TargetingRulesUpdatedAt).
+    public void ApplyTargetingRulesEvent(string flagKey, List<TargetingRule> targetingRules, long ts)
+    {
+        var current = _state;
+        if (!current.Cache.TryGetValue(flagKey, out var existing)) return;
+        if (ts < existing.TargetingRulesUpdatedAt) return;
+        var updated = existing with { TargetingRules = targetingRules, TargetingRulesUpdatedAt = ts };
+        _state = new CacheState(
+            current.Cache.SetItem(flagKey, updated),
+            current.PrerequisitesFromLiveEvent,
+            current.TargetingRulesFromLiveEvent.SetItem(flagKey, true),
             current.LastSnapshotTs);
     }
 
