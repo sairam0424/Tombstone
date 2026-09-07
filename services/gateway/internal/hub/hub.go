@@ -235,13 +235,34 @@ func (h *Hub) Broadcast(environment string, event FlagEvent, streamMsgID string)
 	}
 }
 
+// rawRelayEventKinds are Streams-only event kinds that bypass FlagEvent's
+// typed unmarshal/dedup entirely and are relayed to SSE clients verbatim via
+// BroadcastRaw below -- neither of these payloads' fields is ever inspected
+// by gateway, so there is nothing to gain from a typed unmarshal/remarshal
+// round-trip. Checked by three independent call sites that must all agree
+// on this set: streams.go's live RunStreamConsumer path, dlq.go's
+// reclaim-and-retry path, and streams.go's BuildReplayFrames XRANGE
+// catch-up path -- if any one of them checked a kind the others didn't, a
+// reconnecting client's catch-up replay could relay an event the live path
+// would have skipped (or vice versa), or a reclaimed message could get
+// mis-unmarshaled as a FlagEvent (see prerequisites_updated's own original
+// disclosure of that exact failure mode, dlq.go).
+var rawRelayEventKinds = map[string]bool{
+	"prerequisites_updated":   true,
+	"targeting_rules_updated": true,
+}
+
+func isRawRelayEventKind(kind string) bool {
+	return rawRelayEventKinds[kind]
+}
+
 // BroadcastRaw fans out a pre-serialized JSON payload verbatim under the
 // given SSE event: name, for event kinds this Hub does not need to
-// typed-unmarshal or dedupe (currently only prerequisites_updated).
+// typed-unmarshal or dedupe (see rawRelayEventKinds above).
 // Deliberately does NOT run eventDeduper.claim -- dedup exists solely to
 // suppress a second delivery of the SAME logical event via the legacy
-// pub/sub transport, and prerequisites_updated is never dual-written there
-// (see RunStreamConsumer's own "event" Values-map discriminator check).
+// pub/sub transport, and no kind in rawRelayEventKinds is ever dual-written
+// there (see RunStreamConsumer's own "event" Values-map discriminator check).
 func (h *Hub) BroadcastRaw(environment, eventType string, payload []byte, streamMsgID string) {
 	v, ok := h.envs.Load(environment)
 	if !ok {

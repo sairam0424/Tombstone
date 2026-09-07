@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"encoding/json"
 )
 
 const getEnvironmentSnapshot = `-- name: GetEnvironmentSnapshot :many
@@ -102,6 +103,62 @@ func (q *Queries) GetEnvironmentSnapshotPrerequisites(ctx context.Context, arg G
 			&i.PrereqFlagKey,
 			&i.RequiredVariation,
 			&i.Gate,
+			&i.Priority,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getEnvironmentSnapshotTargetingRules = `-- name: GetEnvironmentSnapshotTargetingRules :many
+SELECT tr.flag_id, tr.id, tr.rule_type, tr.attribute, tr.operator, tr.values, tr.variation, tr.priority
+FROM targeting_rules tr
+JOIN flags f ON f.id = tr.flag_id
+WHERE tr.environment = $1 AND f.state = 'ACTIVE' AND f.project_id = $2
+ORDER BY tr.flag_id, tr.priority ASC, tr.created_at ASC
+`
+
+type GetEnvironmentSnapshotTargetingRulesParams struct {
+	Environment string
+	ProjectID   string
+}
+
+type GetEnvironmentSnapshotTargetingRulesRow struct {
+	FlagID    string
+	ID        string
+	RuleType  string
+	Attribute string
+	Operator  string
+	Values    json.RawMessage
+	Variation string
+	Priority  int32
+}
+
+func (q *Queries) GetEnvironmentSnapshotTargetingRules(ctx context.Context, arg GetEnvironmentSnapshotTargetingRulesParams) ([]GetEnvironmentSnapshotTargetingRulesRow, error) {
+	rows, err := q.db.QueryContext(ctx, getEnvironmentSnapshotTargetingRules, arg.Environment, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetEnvironmentSnapshotTargetingRulesRow
+	for rows.Next() {
+		var i GetEnvironmentSnapshotTargetingRulesRow
+		if err := rows.Scan(
+			&i.FlagID,
+			&i.ID,
+			&i.RuleType,
+			&i.Attribute,
+			&i.Operator,
+			&i.Values,
+			&i.Variation,
 			&i.Priority,
 		); err != nil {
 			return nil, err

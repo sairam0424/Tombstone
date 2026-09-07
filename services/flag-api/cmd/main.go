@@ -170,6 +170,7 @@ func main() {
 	retentionH := v1.NewRetentionHandler(logger, auditRetention, auditRetentionDays)
 	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)
 	prereqH := v1.NewPrerequisiteHandler(db, rdb, logger)
+	targetingRuleH := v1.NewTargetingRuleHandler(db, rdb, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
 	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter, marketplaceURL)
@@ -299,6 +300,18 @@ func main() {
 			Get("/flags/{key}/prerequisites", prereqH.ListPrerequisites)
 		r.With(rbacMw.RequirePermission("flags", "write")).
 			Delete("/flags/{key}/prerequisites/{id}", prereqH.DeletePrerequisite)
+
+		// Per-environment targeting rules -- unlike prerequisites, these are
+		// scoped to a specific environment (targeting_rules has its own
+		// environment column, matching flag_environments' granularity), so
+		// they're gated the same way UpdateEnvironment is (environments:write/
+		// environments:read), not flags:write/flags:read.
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			Post("/flags/{key}/environments/{env}/rules", targetingRuleH.AddTargetingRule)
+		r.With(rbacMw.RequirePermission("environments", "read")).
+			Get("/flags/{key}/environments/{env}/rules", targetingRuleH.ListTargetingRules)
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			Delete("/flags/{key}/environments/{env}/rules/{id}", targetingRuleH.DeleteTargetingRule)
 
 		// Scheduled changes — a scheduled write is still a write, gated at
 		// schedule time (the scheduler itself runs in-process, not via HTTP).

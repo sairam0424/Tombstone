@@ -247,3 +247,47 @@ func TestBuildReplayFrames_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 		t.Errorf("expected the raw payload verbatim, got frame: %s", frame)
 	}
 }
+
+// TestBuildReplayFrames_RelaysTargetingRulesUpdatedVerbatim mirrors
+// TestBuildReplayFrames_RelaysPrerequisitesUpdatedVerbatim exactly, proving
+// isRawRelayEventKind's generalization (hub.go) covers a reconnecting
+// client's XRANGE catch-up replay for the NEW "targeting_rules_updated"
+// kind too, not just the original "prerequisites_updated" it was written
+// for.
+func TestBuildReplayFrames_RelaysTargetingRulesUpdatedVerbatim(t *testing.T) {
+	rdb := newTestRedis(t)
+	streamKey := StreamKey("production")
+	ctx := context.Background()
+
+	sentinelID := xaddEvent(t, rdb, streamKey, FlagEvent{FlagKey: "sentinel", Environment: "production"})
+
+	payload := `{"flag_key":"checkout-flow","environment":"production","targeting_rules":[{"id":"r1","rule_type":"USER","attribute":"email","operator":"CONTAINS","values":["@acme.com"],"variation":"true","priority":0}],"ts":1700000000}`
+	if _, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey,
+		Values: map[string]interface{}{
+			"kind":        "targeting_rules_updated",
+			"event":       "targeting_rules_updated",
+			"flag_key":    "checkout-flow",
+			"environment": "production",
+			"payload":     payload,
+		},
+	}).Result(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	msgs, ok, err := ReplaySince(ctx, rdb, streamKey, sentinelID)
+	if err != nil || !ok {
+		t.Fatalf("ReplaySince: ok=%v err=%v", ok, err)
+	}
+	frames := BuildReplayFrames(msgs)
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d", len(frames))
+	}
+	frame := string(frames[0])
+	if !strings.Contains(frame, "event: targeting_rules_updated\n") {
+		t.Errorf("expected targeting_rules_updated event type, got frame: %s", frame)
+	}
+	if !strings.Contains(frame, payload) {
+		t.Errorf("expected the raw payload verbatim, got frame: %s", frame)
+	}
+}

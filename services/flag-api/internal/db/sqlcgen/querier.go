@@ -54,6 +54,7 @@ type Querier interface {
 	CreateSCIMOrphanChangeRequest(ctx context.Context, arg CreateSCIMOrphanChangeRequestParams) error
 	CreateScheduledChange(ctx context.Context, arg CreateScheduledChangeParams) (CreateScheduledChangeRow, error)
 	DeletePrerequisite(ctx context.Context, arg DeletePrerequisiteParams) (int64, error)
+	DeleteTargetingRule(ctx context.Context, arg DeleteTargetingRuleParams) (int64, error)
 	DeprovisionSCIMUser(ctx context.Context, externalID string) (string, error)
 	FinalizeAppliedChangeRequest(ctx context.Context, arg FinalizeAppliedChangeRequestParams) error
 	FlagExistsInProject(ctx context.Context, arg FlagExistsInProjectParams) (bool, error)
@@ -64,6 +65,7 @@ type Querier interface {
 	GetCurrentFlagEnvironmentState(ctx context.Context, arg GetCurrentFlagEnvironmentStateParams) (GetCurrentFlagEnvironmentStateRow, error)
 	GetEnvironmentSnapshot(ctx context.Context, arg GetEnvironmentSnapshotParams) ([]GetEnvironmentSnapshotRow, error)
 	GetEnvironmentSnapshotPrerequisites(ctx context.Context, arg GetEnvironmentSnapshotPrerequisitesParams) ([]GetEnvironmentSnapshotPrerequisitesRow, error)
+	GetEnvironmentSnapshotTargetingRules(ctx context.Context, arg GetEnvironmentSnapshotTargetingRulesParams) ([]GetEnvironmentSnapshotTargetingRulesRow, error)
 	GetFlag(ctx context.Context, arg GetFlagParams) (GetFlagRow, error)
 	// Shared by flags.go's UpdateEnvironment and change_requests.go's
 	// ApproveChangeRequest apply path — byte-identical SQL in both original
@@ -99,6 +101,7 @@ type Querier interface {
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (string, error)
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
+	InsertTargetingRule(ctx context.Context, arg InsertTargetingRuleParams) (InsertTargetingRuleRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
 	ListActiveFlagsByOwner(ctx context.Context, ownerID string) ([]ListActiveFlagsByOwnerRow, error)
 	// The project_id parameter is cast to ::uuid (never the column to text) on
@@ -129,6 +132,7 @@ type Querier interface {
 	// plain TEXT columns compared to a TEXT parameter, so (unlike a uuid column)
 	// there is no cast-direction ambiguity to worry about here at all.
 	ListScheduledChanges(ctx context.Context, arg ListScheduledChangesParams) ([]ListScheduledChangesRow, error)
+	ListTargetingRulesForFlag(ctx context.Context, arg ListTargetingRulesForFlagParams) ([]ListTargetingRulesForFlagRow, error)
 	// Serializes appends to one chain. pg_advisory_xact_lock releases
 	// automatically at commit/rollback, so a crashed writer cannot wedge it.
 	// flag_key is the plain (possibly empty) string, not a NULL sentinel — "" is
