@@ -17,6 +17,7 @@ import { SSEStreamClient } from "../streaming.js";
 import type {
   FlagEvent,
   PrerequisitesUpdateEvent,
+  TargetingRulesUpdateEvent,
   TombstoneClientConfig,
 } from "../types.js";
 
@@ -371,6 +372,156 @@ describe("SSEStreamClient — prerequisites_updated dispatch", () => {
         "prerequisites_updated",
         JSON.stringify({ flag_key: "child-flag", prerequisites: [] }),
       ),
+    );
+    client.disconnect();
+  });
+});
+
+describe("SSEStreamClient — targeting_rules_updated dispatch", () => {
+  // services/flag-api/internal/api/v1/targeting_rules.go's
+  // TargetingRulesEvent has a distinct payload shape from FlagEvent
+  // (flag_key/environment/targeting_rules/ts, no enabled/rollout_pct/
+  // reason at all). Mirrors the prerequisites_updated suite above exactly.
+  beforeEach(() => {
+    (globalThis as unknown as { EventSource: unknown }).EventSource =
+      FakeEventSource;
+    FakeEventSource.instances = [];
+  });
+
+  it("parses a real targeting_rules_updated frame and forwards it via its own callback, not onEvent", () => {
+    let flagEventCalls = 0;
+    let received: TargetingRulesUpdateEvent | undefined;
+    const client = new SSEStreamClient(
+      baseConfig,
+      (_e: FlagEvent) => {
+        flagEventCalls++;
+      },
+      undefined,
+      undefined,
+      (e: TargetingRulesUpdateEvent) => {
+        received = e;
+      },
+    );
+    client.connect();
+
+    const es = FakeEventSource.instances[0];
+    es.emit(
+      "targeting_rules_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        targeting_rules: [
+          {
+            id: "r1",
+            rule_type: "USER",
+            attribute: "email",
+            operator: "CONTAINS",
+            values: ["@acme.com"],
+            variation: "true",
+            priority: 0,
+          },
+        ],
+        ts: 1_700_000_000,
+      }),
+    );
+
+    assert.equal(flagEventCalls, 0, "must not be routed through onEvent");
+    assert.ok(received, "onTargetingRulesEvent must have been called");
+    assert.equal(received?.flagKey, "child-flag");
+    assert.equal(received?.environment, "production");
+    assert.equal(received?.ts, 1_700_000_000);
+    assert.deepEqual(received?.targetingRules, [
+      {
+        id: "r1",
+        ruleType: "USER",
+        attribute: "email",
+        operator: "CONTAINS",
+        values: ["@acme.com"],
+        variation: "true",
+        priority: 0,
+      },
+    ]);
+
+    client.disconnect();
+  });
+
+  it("works with no onTargetingRulesEvent callback provided (optional parameter)", () => {
+    const client = new SSEStreamClient(baseConfig, (_e: FlagEvent) => {});
+    client.connect();
+    assert.doesNotThrow(() =>
+      FakeEventSource.instances[0].emit(
+        "targeting_rules_updated",
+        JSON.stringify({ flag_key: "child-flag", targeting_rules: [] }),
+      ),
+    );
+    client.disconnect();
+  });
+
+  it("an empty flag_key is silently ignored -- never forwards a malformed event", () => {
+    let received: TargetingRulesUpdateEvent | undefined;
+    const client = new SSEStreamClient(
+      baseConfig,
+      (_e: FlagEvent) => {},
+      undefined,
+      undefined,
+      (e: TargetingRulesUpdateEvent) => {
+        received = e;
+      },
+    );
+    client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "targeting_rules_updated",
+      JSON.stringify({ environment: "production", targeting_rules: [] }),
+    );
+
+    assert.equal(received, undefined);
+    client.disconnect();
+  });
+
+  it("a non-numeric per-rule priority defaults to 0 instead of becoming NaN", () => {
+    // A NaN priority would feed directly into evaluation.ts's sort
+    // comparator (a.priority - b.priority), whose result is NaN whenever
+    // either operand is -- making this rule's relative order among
+    // same-flag rules undefined instead of the deterministic,
+    // priority-ascending order this feature promises. Found by adversarial
+    // review of PR #246.
+    let received: TargetingRulesUpdateEvent | undefined;
+    const client = new SSEStreamClient(
+      baseConfig,
+      (_e: FlagEvent) => {},
+      undefined,
+      undefined,
+      (e: TargetingRulesUpdateEvent) => {
+        received = e;
+      },
+    );
+    client.connect();
+
+    FakeEventSource.instances[0].emit(
+      "targeting_rules_updated",
+      JSON.stringify({
+        flag_key: "child-flag",
+        environment: "production",
+        targeting_rules: [
+          {
+            id: "r1",
+            rule_type: "USER",
+            attribute: "email",
+            operator: "EQ",
+            values: ["x"],
+            variation: "true",
+            priority: "not-a-number",
+          },
+        ],
+        ts: 1,
+      }),
+    );
+
+    assert.equal(received?.targetingRules[0]?.priority, 0);
+    assert.ok(
+      Number.isFinite(received?.targetingRules[0]?.priority),
+      "priority must never be NaN",
     );
     client.disconnect();
   });

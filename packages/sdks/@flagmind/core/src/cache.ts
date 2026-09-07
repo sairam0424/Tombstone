@@ -26,6 +26,16 @@ export class FlagCache {
   // mirroring `memory`'s own freshness, so a flag dropped from a later
   // snapshot can't leave a stale entry behind.
   private prerequisitesFromLiveEvent: Map<string, boolean> = new Map();
+  // Same role as prerequisitesFromLiveEvent above, for targetingRules --
+  // see applyTargetingRulesEvent's own doc comment. Applied proactively
+  // from the start here (unlike prerequisites, where this was discovered
+  // through two rounds of adversarial review) since the lesson is already
+  // known: a two-field (map + timestamp) design is safe in this
+  // single-threaded module, but a >= tie-break on ts ALONE cannot
+  // distinguish "a live event that must win a tie against a slower,
+  // still-in-flight snapshot" from "two different snapshots that merely
+  // share flag-api's coarse-resolution ts" without this provenance map.
+  private targetingRulesFromLiveEvent: Map<string, boolean> = new Map();
 
   loadSnapshot(snapshot: FlagSnapshot): void {
     // flag-api's snapshot.ts is simply time.Now().Unix() at response
@@ -47,6 +57,7 @@ export class FlagCache {
 
     const next = new Map<string, FlagEnvironmentState>();
     const nextFromLiveEvent = new Map<string, boolean>();
+    const nextTargetingRulesFromLiveEvent = new Map<string, boolean>();
     for (const flag of snapshot.flags) {
       const existing = this.memory.get(flag.flagKey);
       // A live prerequisites_updated event may have already advanced this
@@ -78,11 +89,24 @@ export class FlagCache {
         existing?.prerequisitesUpdatedAt !== undefined &&
         this.prerequisitesFromLiveEvent.get(flag.flagKey) === true &&
         existing.prerequisitesUpdatedAt >= snapshotTs;
+      // Identical reasoning to keepLivePrerequisites above, applied to
+      // targetingRules against services/flag-api/internal/api/v1/
+      // targeting_rules.go's TargetingRulesEvent -- see
+      // applyTargetingRulesEvent's own doc comment.
+      const keepLiveTargetingRules =
+        existing?.targetingRulesUpdatedAt !== undefined &&
+        this.targetingRulesFromLiveEvent.get(flag.flagKey) === true &&
+        existing.targetingRulesUpdatedAt >= snapshotTs;
       next.set(flag.flagKey, {
         ...flag,
-        targetingRules: Array.isArray(flag.targetingRules)
-          ? [...flag.targetingRules]
-          : [],
+        targetingRules: keepLiveTargetingRules
+          ? existing.targetingRules
+          : Array.isArray(flag.targetingRules)
+            ? [...flag.targetingRules]
+            : [],
+        targetingRulesUpdatedAt: keepLiveTargetingRules
+          ? existing.targetingRulesUpdatedAt
+          : snapshotTs,
         prerequisites: keepLivePrerequisites
           ? existing.prerequisites
           : (flag.prerequisites ?? []),
@@ -106,11 +130,13 @@ export class FlagCache {
       // overwrite the live event's data with its own equally-stale
       // pre-mutation snapshot. Solving this fully would require a signal
       // finer than flag-api's 1-second-resolution wall-clock ts, which the
-      // wire protocol does not provide.
+      // wire protocol does not provide. Same applies to targetingRules.
       nextFromLiveEvent.set(flag.flagKey, false);
+      nextTargetingRulesFromLiveEvent.set(flag.flagKey, false);
     }
     this.memory = next;
     this.prerequisitesFromLiveEvent = nextFromLiveEvent;
+    this.targetingRulesFromLiveEvent = nextTargetingRulesFromLiveEvent;
     this.snapshot = { ...snapshot, ts: snapshotTs, flags: [...snapshot.flags] };
   }
 
@@ -125,6 +151,7 @@ export class FlagCache {
       prerequisites: existing.prerequisites ?? [],
       targetingRules: existing.targetingRules ?? [],
       prerequisitesUpdatedAt: existing.prerequisitesUpdatedAt,
+      targetingRulesUpdatedAt: existing.targetingRulesUpdatedAt,
     };
     const next = new Map(this.memory);
     next.set(event.flagKey, updated);
@@ -185,16 +212,45 @@ export class FlagCache {
     ).set(flagKey, true);
   }
 
-  setTargetingRules(flagKey: string, rules: TargetingRule[]): void {
+  /**
+   * Applies a live "targeting_rules_updated" SSE event -- full replacement
+   * of a flag's targeting-rule list FOR THIS ENVIRONMENT, not a delta
+   * (matching TargetingRulesEvent's own documented design on the flag-api
+   * side). No-ops for a flag with no existing cache entry (nothing to
+   * merge a partial update into -- the next full snapshot refetch is what
+   * correctly picks up a flag this client has never seen before).
+   *
+   * Rejects an incoming event whose ts is OLDER than the currently-cached
+   * targetingRulesUpdatedAt -- mirrors applyPrerequisitesEvent's own
+   * staleness guard exactly (see that method's doc comment).
+   */
+  applyTargetingRulesEvent(
+    flagKey: string,
+    targetingRules: TargetingRule[],
+    ts: number,
+  ): void {
     const existing = this.memory.get(flagKey);
     if (!existing) return;
+    // Same NaN-rejection reasoning as applyPrerequisitesEvent's own guard.
+    if (!Number.isFinite(ts)) {
+      return;
+    }
+    if (ts < (existing.targetingRulesUpdatedAt ?? 0)) {
+      return;
+    }
     const updated: FlagEnvironmentState = {
       ...existing,
-      targetingRules: [...rules],
+      targetingRules: [...targetingRules],
+      targetingRulesUpdatedAt: ts,
     };
     const next = new Map(this.memory);
     next.set(flagKey, updated);
     this.memory = next;
+    // Marks this flag's targetingRules as LIVE-sourced -- see
+    // targetingRulesFromLiveEvent's own field comment.
+    this.targetingRulesFromLiveEvent = new Map(
+      this.targetingRulesFromLiveEvent,
+    ).set(flagKey, true);
   }
 
   get(flagKey: string): FlagEnvironmentState | undefined {
