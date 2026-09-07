@@ -273,4 +273,50 @@ public class FlagCachePrerequisitesTest {
 
         assertEquals(222L, cache.get("child-flag").orElseThrow().updatedAt());
     }
+
+    @Test
+    void concurrentLoadSnapshotAndApplyPrerequisitesEventDoNotCorruptOrLoseState() throws InterruptedException {
+        /** Found by adversarial review of this fix's own first draft: the
+         *  cache map and the prerequisitesFromLiveEvent map used to be two
+         *  SEPARATE fields, updated by separate statements -- a real JVM
+         *  thread (e.g. the SSE listener calling applyPrerequisitesEvent
+         *  concurrently with a lag-recovery loadSnapshot, exactly the
+         *  scenario this class's own top-of-file comment names) could
+         *  observe the two fields in an INCONSISTENT combination, silently
+         *  defeating the tie-break protection itself. Fixed by combining
+         *  both into one CacheState swapped via a single AtomicReference,
+         *  so any read is always mutually consistent. This test backs that
+         *  guarantee with a real concurrent-thread run (mirroring the Ruby
+         *  SDK's own "concurrent access" spec), asserting no exceptions and
+         *  a fully-formed final state -- not a proof of the specific race
+         *  (which is now structurally impossible, not merely improbable),
+         *  but a smoke test against any future regression that reintroduces
+         *  a second independently-updated field.
+         *
+         *  Deliberately does NOT assert a specific winning ts: the
+         *  pre-existing, disclosed "lost update" race (see this class's own
+         *  top-of-file comment) means the LAST state.set() to land wins
+         *  outright regardless of which ts it carries, so under adversarial
+         *  scheduling the final prerequisitesUpdatedAt could legitimately be
+         *  any of the values raced here -- that risk is accepted/deferred,
+         *  not what this test exists to catch. */
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("initial-parent", "true", true))), 1000);
+
+        var threads = new java.util.ArrayList<Thread>();
+        for (int i = 0; i < 20; i++) {
+            final int n = i;
+            threads.add(new Thread(() -> cache.loadSnapshot(
+                List.of(flag("child-flag", new FlagPrerequisite("snap-parent-" + n, "true", true))), 2000 + n)));
+            threads.add(new Thread(() -> cache.applyPrerequisitesEvent(
+                "child-flag", List.of(new FlagPrerequisite("live-parent-" + n, "true", true)), 3000 + n)));
+        }
+        for (Thread t : threads) t.start();
+        for (Thread t : threads) t.join();
+
+        var finalState = cache.get("child-flag").orElseThrow();
+        assertNotNull(finalState.prerequisites());
+        assertEquals(1, finalState.prerequisites().size(),
+            "the final prerequisites list must be a single, internally-consistent list from ONE update, never a corrupted mix");
+    }
 }
