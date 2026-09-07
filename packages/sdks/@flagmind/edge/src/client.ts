@@ -118,6 +118,16 @@ export class EdgeFlagClient {
   private cachedSnapshot: FlagSnapshot | null = null;
   private snapshotCachedAt = 0;
   private readonly cacheTtlMs: number;
+  // Memoizes buildLookup(snapshot.flags) by snapshot IDENTITY (reference
+  // equality, not a deep comparison), so the Map is rebuilt only when
+  // getSnapshot() actually loads a NEW snapshot (KV/origin hit), not on
+  // every evaluate() call within the same cacheTtlMs window. Without this,
+  // an org with thousands of flags pays an O(N) Map allocation on EVERY
+  // evaluate() call -- even for a flag with zero prerequisites -- directly
+  // undermining this package's own "sub-1ms flag evaluation" goal. Found
+  // by adversarial review of PR #244.
+  private lookupSnapshotRef: FlagSnapshot | null = null;
+  private lookupCache: FlagLookup | null = null;
 
   constructor(config: EdgeClientConfig) {
     this.kv = config.kv;
@@ -142,8 +152,19 @@ export class EdgeFlagClient {
     const defaultValue = (this.defaults[flagKey] ?? false) as T;
     // A lookup over the SAME snapshot already loaded, not an extra fetch —
     // lets evaluate() resolve a prerequisite flag's own state recursively.
-    const cache = snapshot ? buildLookup(snapshot.flags) : undefined;
+    // Memoized (see lookupCache's own field comment) — NOT rebuilt on
+    // every call.
+    const cache = snapshot ? this.getLookup(snapshot) : undefined;
     return evaluate<T>(flagState, context, defaultValue, flagKey, cache);
+  }
+
+  private getLookup(snapshot: FlagSnapshot): FlagLookup {
+    if (this.lookupCache && this.lookupSnapshotRef === snapshot) {
+      return this.lookupCache;
+    }
+    this.lookupSnapshotRef = snapshot;
+    this.lookupCache = buildLookup(snapshot.flags);
+    return this.lookupCache;
   }
 
   /** Convenience wrapper — returns the boolean value directly. */
@@ -267,18 +288,35 @@ export async function syncSnapshotToKV(env: {
 // see @tombstone/core's parseFlagEnvironmentState for the same convention.
 // gate defaults to true (matches flag-api's AddPrerequisite default)
 // unless explicitly false; requiredVariation defaults to "true" when absent.
+//
+// Filters out any null/undefined/non-object element BEFORE mapping: this
+// whole function must never throw, matching every other field in
+// normalizeSnapshot (all String()/Number()/Boolean() coercions, which
+// never throw). Without this filter, `p["flag_key"]` on a null/undefined
+// entry throws — and because normalizeSnapshot maps the ENTIRE flags array
+// in one pass, that exception would silently degrade every OTHER flag in
+// the snapshot to ERROR/default too, not just the one with malformed
+// prerequisite data (confirmed empirically by adversarial review of PR
+// #244 — a snapshot with one flag's prerequisites containing a stray
+// `null` broke evaluate() for an unrelated flag with no prerequisites at
+// all, because getSnapshot()'s try/catch swallows the thrown error and
+// falls back to nothing being parsed).
 function normalizePrerequisites(raw: unknown): FlagPrerequisite[] {
   const rawPrereqs = Array.isArray(raw) ? raw : [];
-  return rawPrereqs.map((p) => {
-    const pr = p as Record<string, unknown>;
-    return {
-      flagKey: String(pr["flag_key"] ?? pr["flagKey"] ?? ""),
-      requiredVariation: String(
-        pr["required_variation"] ?? pr["requiredVariation"] ?? "true",
-      ),
-      gate: pr["gate"] !== false,
-    } satisfies FlagPrerequisite;
-  });
+  return rawPrereqs
+    .filter(
+      (p): p is Record<string, unknown> => p !== null && typeof p === "object",
+    )
+    .map(
+      (pr) =>
+        ({
+          flagKey: String(pr["flag_key"] ?? pr["flagKey"] ?? ""),
+          requiredVariation: String(
+            pr["required_variation"] ?? pr["requiredVariation"] ?? "true",
+          ),
+          gate: pr["gate"] !== false,
+        }) satisfies FlagPrerequisite,
+    );
 }
 
 function normalizeSnapshot(raw: unknown): FlagSnapshot {

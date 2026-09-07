@@ -31,6 +31,14 @@ export interface EvaluationResult<T = boolean> {
   reason: EvaluationReason;
   fromCache: boolean;
   flagKey: string;
+  /**
+   * Set only on PREREQUISITE_FAILED — the specific prerequisite flagKey
+   * that blocked evaluation, matching @tombstone/core's EvaluationResult
+   * (found missing by adversarial review of PR #244: without this, a
+   * caller with multiple prerequisites on one flag has no way to tell
+   * which one actually failed).
+   */
+  ruleId?: string;
 }
 
 export interface FlagPrerequisite {

@@ -247,6 +247,11 @@ describe("@tomb-stone/edge — evaluate() prerequisites (SDK-2 follow-up)", () =
     const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
     assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
     assert.strictEqual(result.value, false);
+    assert.strictEqual(
+      result.ruleId,
+      "parent-flag",
+      "ruleId must identify which prerequisite blocked evaluation",
+    );
   });
 
   it("proceeds to the child's own rollout when a gating prerequisite's variation matches", () => {
@@ -286,6 +291,7 @@ describe("@tomb-stone/edge — evaluate() prerequisites (SDK-2 follow-up)", () =
     const cache = lookup([child]);
     const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
     assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
+    assert.strictEqual(result.ruleId, "never-seen");
   });
 
   it("does not block when a non-gating prerequisite flag is missing from the cache", () => {
@@ -349,5 +355,30 @@ describe("@tomb-stone/edge — evaluate() prerequisites (SDK-2 follow-up)", () =
     const result = evaluate<boolean>(flags[0], ctx, false, "flag0", cache);
     assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
+  });
+
+  it("a non-finite depth (NaN) does not silently disable prerequisite enforcement", () => {
+    // Before the fix, `depth < MAX_PREREQ_DEPTH` with depth=NaN evaluates
+    // to false (any comparison with NaN is false), so checkPrerequisites
+    // was never invoked at all -- gating silently skipped with no error.
+    // A direct low-level caller could pass this by mistake since depth is
+    // part of evaluate()'s public signature. Found by adversarial review
+    // of PR #244.
+    const parent = flagState("parent-flag", { enabled: false }); // OFF -> "false"
+    const child = flagState("child-flag", {
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: true },
+      ],
+    });
+    const cache = lookup([parent, child]);
+    const result = evaluate<boolean>(
+      child,
+      ctx,
+      false,
+      "child-flag",
+      cache,
+      NaN,
+    );
+    assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
   });
 });

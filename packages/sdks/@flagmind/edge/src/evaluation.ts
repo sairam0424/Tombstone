@@ -204,6 +204,7 @@ function checkPrerequisites<T>(
           reason: "PREREQUISITE_FAILED",
           fromCache: true,
           flagKey: parentKey,
+          ruleId: prereq.flagKey,
         };
       }
       continue;
@@ -225,6 +226,7 @@ function checkPrerequisites<T>(
         reason: "PREREQUISITE_FAILED",
         fromCache: true,
         flagKey: parentKey,
+        ruleId: prereq.flagKey,
       };
     }
   }
@@ -250,15 +252,22 @@ export function evaluate<T = boolean>(
       flagKey,
     };
   }
+  // A non-finite depth (NaN, ±Infinity) would make `depth < MAX_PREREQ_DEPTH`
+  // silently evaluate to false, disabling prerequisite enforcement with no
+  // error — found by adversarial review of PR #244 probing evaluate()'s
+  // now-public signature directly. depth is an internal recursion counter,
+  // never derived from snapshot/network data, but a direct low-level
+  // caller could still pass a bad value by mistake.
+  const safeDepth = Number.isFinite(depth) ? depth : 0;
   const prereqs = flagState.prerequisites ?? [];
-  if (prereqs.length > 0 && cache && depth < MAX_PREREQ_DEPTH) {
+  if (prereqs.length > 0 && cache && safeDepth < MAX_PREREQ_DEPTH) {
     const blocked = checkPrerequisites<T>(
       prereqs,
       context,
       defaultValue,
       cache,
       flagKey,
-      depth,
+      safeDepth,
     );
     if (blocked !== null) return blocked;
   }

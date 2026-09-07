@@ -11,6 +11,8 @@
 
 import assert from "assert";
 import { EdgeFlagClient } from "../client.js";
+import type { FlagLookup } from "../evaluation.js";
+import type { FlagSnapshot } from "../types.js";
 
 class FakeKV {
   private store = new Map<string, string>();
@@ -174,5 +176,96 @@ describe("@tomb-stone/edge — EdgeFlagClient prerequisite parsing + evaluation"
     const result = await client.evaluate<boolean>("solo-flag", { userId: "u" });
     assert.strictEqual(result.reason, "FALLTHROUGH");
     assert.strictEqual(result.value, true);
+  });
+
+  it("a malformed (null) prerequisite entry on one flag does not poison parsing of the ENTIRE snapshot", async () => {
+    // Found by adversarial review of PR #244: normalizePrerequisites used
+    // to do `p as Record<string, unknown>` with no null check, so a single
+    // stray `null` in ANY flag's prerequisites array threw inside the one
+    // .map() call that parses every flag in the snapshot -- silently
+    // degrading an UNRELATED flag (one with no prerequisites at all) to
+    // ERROR/default, since getSnapshot()'s try/catch swallows the error.
+    const kv = new FakeKV();
+    kv.seed("production", {
+      environment: "production",
+      hash: "h1",
+      ts: 1,
+      flags: [
+        {
+          flag_key: "critical-checkout-flow",
+          enabled: true,
+          rollout_pct: 100,
+          safe_default: "false",
+          environment: "production",
+          // No prerequisites at all -- must be completely unaffected by
+          // the OTHER flag's malformed data below.
+        },
+        {
+          flag_key: "some-other-teams-flag",
+          enabled: true,
+          rollout_pct: 100,
+          safe_default: "false",
+          environment: "production",
+          prerequisites: [null],
+        },
+      ],
+    });
+    const client = new EdgeFlagClient({
+      kv: kv as never,
+      environment: "production",
+    });
+
+    const result = await client.evaluate<boolean>("critical-checkout-flow", {
+      userId: "u",
+    });
+    assert.strictEqual(
+      result.reason,
+      "FALLTHROUGH",
+      "an unrelated flag must evaluate normally despite malformed prerequisite data elsewhere in the snapshot",
+    );
+    assert.strictEqual(result.value, true);
+  });
+
+  it("memoizes the prerequisite lookup by snapshot identity — not rebuilt on every evaluate() call", async () => {
+    // MEDIUM finding from adversarial review of PR #244: buildLookup()
+    // previously ran on every single evaluate() call (O(N) Map allocation
+    // over the WHOLE snapshot), even for a flag with zero prerequisites --
+    // directly undermining this package's own "sub-1ms" goal for an org
+    // with thousands of flags. Reaches the private getLookup/lookupCache
+    // fields directly since there is no public way to observe allocation
+    // count otherwise.
+    const kv = new FakeKV();
+    kv.seed("production", {
+      environment: "production",
+      hash: "h1",
+      ts: 1,
+      flags: [
+        {
+          flag_key: "solo-flag",
+          enabled: true,
+          rollout_pct: 100,
+          safe_default: "false",
+          environment: "production",
+        },
+      ],
+    });
+    const client = new EdgeFlagClient({
+      kv: kv as never,
+      environment: "production",
+    });
+    const internals = client as unknown as {
+      getLookup(snapshot: FlagSnapshot): FlagLookup;
+    };
+
+    await client.evaluate<boolean>("solo-flag", { userId: "u" });
+    await client.evaluate<boolean>("solo-flag", { userId: "u" });
+    const snapshot = (await client.getSnapshot())!;
+    const first = internals.getLookup(snapshot);
+    const second = internals.getLookup(snapshot);
+    assert.strictEqual(
+      first,
+      second,
+      "the SAME snapshot object must reuse the SAME lookup, not rebuild it",
+    );
   });
 });
