@@ -32,6 +32,19 @@ public class FlagCache {
     // snapshot ts (time.Now().Unix()) will never be this low, so any real
     // incoming ts trivially passes the very first loadSnapshot call.
     private volatile long lastSnapshotTs = Long.MIN_VALUE;
+    // Tracks which flag keys' CURRENT prerequisites/prerequisitesUpdatedAt
+    // came from a live prerequisites_updated event (true) rather than a
+    // snapshot load (false/absent). A tied ts alone cannot distinguish "a
+    // live event that must win a tie against a slower, still-in-flight
+    // snapshot" from "two DIFFERENT snapshots that happen to share flag-api's
+    // coarse 1-second-resolution ts, where the second (newer LOAD, regardless
+    // of ts) must still win" -- without this, loadSnapshot's own >= tie-break
+    // would incorrectly freeze prerequisites on the FIRST of two same-ts
+    // snapshots forever. This protection is ONE-SHOT: loadSnapshot always
+    // resets this to false after evaluating it (see loadSnapshot's own
+    // comment for why re-propagating true would make the protection
+    // "sticky" and veto a later, independent snapshot too).
+    private volatile Map<String, Boolean> prerequisitesFromLiveEvent = Collections.emptyMap();
 
     /** Convenience overload for tests that don't care about prerequisites-streaming timing semantics. */
     public void loadSnapshot(List<FlagEnvironmentState> flags) {
@@ -51,7 +64,9 @@ public class FlagCache {
             return;
         }
         Map<String, FlagEnvironmentState> current = cache.get();
+        Map<String, Boolean> currentFromLiveEvent = prerequisitesFromLiveEvent;
         Map<String, FlagEnvironmentState> m = new HashMap<>();
+        Map<String, Boolean> nextFromLiveEvent = new HashMap<>();
         for (FlagEnvironmentState f : flags) {
             FlagEnvironmentState existing = current.get(f.flagKey());
             // A live prerequisites_updated event may have already advanced
@@ -74,8 +89,17 @@ public class FlagCache {
             // to keep", or the two guards disagree on who wins a tie and
             // this one silently loses (found by adversarial review of the
             // Ruby SDK's identical fix, PR #238).
+            //
+            // Also requires prerequisitesFromLiveEvent to be true: without
+            // it, a SECOND snapshot sharing the exact same ts as a FIRST
+            // snapshot (no live event involved at all) would incorrectly
+            // take this same "preserve" branch and freeze prerequisites on
+            // the first snapshot's value forever (found by adversarial
+            // review of this fix's own first draft).
             boolean keepLivePrerequisites =
-                existing != null && existing.prerequisitesUpdatedAt() >= snapshotTs;
+                existing != null &&
+                Boolean.TRUE.equals(currentFromLiveEvent.get(f.flagKey())) &&
+                existing.prerequisitesUpdatedAt() >= snapshotTs;
             m.put(f.flagKey(), new FlagEnvironmentState(
                 f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
                 f.safeDefault(), f.updatedAt(),
@@ -83,8 +107,22 @@ public class FlagCache {
                 f.targetingRules(), f.targetList(), f.hashVersion(),
                 keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs
             ));
+            // ONE-SHOT consumption, always false here (never
+            // keepLivePrerequisites): this loadSnapshot call has now fully
+            // resolved the race between the live event and ITS OWN specific
+            // in-flight snapshot. Re-propagating true would make the
+            // protection "sticky", vetoing a later, independent snapshot
+            // that merely happens to tie the same coarse-resolution second
+            // too (found by a second round of adversarial review of this
+            // same fix). Residual, accepted limitation: two snapshot
+            // fetches that were BOTH already in flight when the SAME live
+            // event fired will only have the first-arriving one correctly
+            // blocked; solving that fully would require a signal finer than
+            // flag-api's 1-second-resolution wall-clock ts.
+            nextFromLiveEvent.put(f.flagKey(), false);
         }
         cache.set(Collections.unmodifiableMap(m));
+        prerequisitesFromLiveEvent = Collections.unmodifiableMap(nextFromLiveEvent);
         lastSnapshotTs = snapshotTs;
     }
 
@@ -144,6 +182,13 @@ public class FlagCache {
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);
         cache.set(Collections.unmodifiableMap(next));
+        // Marks this flag's prerequisites as LIVE-sourced -- see
+        // prerequisitesFromLiveEvent's own field comment for why loadSnapshot
+        // needs this distinction, not just a ts comparison, to decide whether
+        // a tied-or-older incoming snapshot should be allowed to overwrite it.
+        Map<String, Boolean> nextFromLiveEvent = new HashMap<>(prerequisitesFromLiveEvent);
+        nextFromLiveEvent.put(flagKey, true);
+        prerequisitesFromLiveEvent = Collections.unmodifiableMap(nextFromLiveEvent);
     }
 
     public Optional<FlagEnvironmentState> get(String flagKey) {

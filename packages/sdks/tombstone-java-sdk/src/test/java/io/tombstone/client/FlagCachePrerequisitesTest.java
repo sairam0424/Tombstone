@@ -186,6 +186,63 @@ public class FlagCachePrerequisitesTest {
     }
 
     @Test
+    void aSecondSnapshotSharingTheExactSameTsAsAFirstSnapshotNoLiveEventStillAppliesItsOwnData() {
+        /** Regression test for a real bug the &gt;= tie-break above introduced
+         *  in its own first draft (found by adversarial review of that fix):
+         *  with only a ts comparison, this cache cannot tell "existing.
+         *  prerequisitesUpdatedAt came from a live event that must win a
+         *  tie" from "existing.prerequisitesUpdatedAt came from a PRIOR
+         *  SNAPSHOT LOAD that merely happens to share flag-api's coarse
+         *  1-second-resolution ts with a SECOND, later snapshot". Without
+         *  prerequisitesFromLiveEvent tracking, this second snapshot's
+         *  genuinely different prerequisites would be silently discarded. */
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("parent-a", "true", true))), 5000);
+
+        // A second, completely independent snapshot fetch resolves with the
+        // EXACT SAME ts but genuinely different data. No live event at all.
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("parent-b", "true", true))), 5000);
+
+        var updated = cache.get("child-flag").orElseThrow();
+        assertEquals(List.of(new FlagPrerequisite("parent-b", "true", true)), updated.prerequisites(),
+            "a second snapshot's own prerequisites must apply even on a ts tie with the first snapshot, since no live event is involved");
+        assertEquals(5000L, updated.prerequisitesUpdatedAt());
+    }
+
+    @Test
+    void aThirdSnapshotTyingALiveEventsTsAfterASecondTiedSnapshotAlreadyResolvedTheRaceStillAppliesItsOwnData() {
+        /** Regression test found by a SECOND round of adversarial review of
+         *  this fix's own first draft: prerequisitesFromLiveEvent was being
+         *  re-set to true every time it was used to preserve a live event
+         *  across a tied snapshot, making the protection "sticky" -- EVERY
+         *  subsequent snapshot at or before that ts would ALSO get vetoed,
+         *  not just the one snapshot that legitimately raced the live
+         *  event. The protection must be ONE-SHOT: consumed the first time
+         *  a loadSnapshot call resolves the race, so an independent, LATER
+         *  snapshot that merely happens to tie the same coarse-resolution
+         *  ts is trusted normally. */
+        var cache = new FlagCache();
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("old-parent", "true", true))), 1000);
+        cache.applyPrerequisitesEvent("child-flag", List.of(new FlagPrerequisite("live-parent", "true", true)), 2000);
+
+        // First tied snapshot after the live event -- the ONE specific race
+        // the live event's own protection exists to close. Must preserve.
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("snap-b-parent", "true", true))), 2000);
+        assertEquals(List.of(new FlagPrerequisite("live-parent", "true", true)),
+            cache.get("child-flag").orElseThrow().prerequisites(),
+            "the first tied snapshot after the live event must still be blocked");
+
+        // A SECOND, independent snapshot arrives, also tying ts=2000. No new
+        // live event raced THIS one -- the protection was already consumed.
+        cache.loadSnapshot(List.of(flag("child-flag", new FlagPrerequisite("snap-c-parent", "true", true))), 2000);
+
+        var updated = cache.get("child-flag").orElseThrow();
+        assertEquals(List.of(new FlagPrerequisite("snap-c-parent", "true", true)), updated.prerequisites(),
+            "a second, independent tied snapshot must apply its own data, not be vetoed by a protection already consumed by the first");
+        assertEquals(2000L, updated.prerequisitesUpdatedAt());
+    }
+
+    @Test
     void applyPrerequisitesEventWithAnEmptyListClearsExistingPrerequisites() {
         /** applyPrerequisitesEvent is documented as a full replacement, not a
          *  delta -- an empty incoming list must actually clear a flag's
