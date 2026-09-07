@@ -69,7 +69,8 @@ module Tombstone
       req["Authorization"] = "Bearer #{@sdk_key}"
       resp = Net::HTTP.start(uri.host, uri.port) { |h| h.request(req) }
       return unless resp.is_a?(Net::HTTPSuccess)
-      @cache.load_snapshot(parse_snapshot_flags(JSON.parse(resp.body)))
+      data = JSON.parse(resp.body)
+      @cache.load_snapshot(parse_snapshot_flags(data), (data["ts"] || 0).to_i)
     rescue => e
       warn "[Tombstone] snapshot fetch failed: #{e.message}"
     end
@@ -157,13 +158,34 @@ module Tombstone
       # malformed event — ignore
     end
 
+    # services/flag-api/internal/api/v1/prerequisites.go's PrerequisitesEvent
+    # -- a distinct payload shape (flag_key/environment/prerequisites/ts, no
+    # enabled/rollout_pct/reason at all) from a real flag event, so it gets
+    # its own handler rather than being routed through apply_event, which
+    # would otherwise coerce those missing keys into false/0 defaults for a
+    # flag that was never actually disabled.
+    def apply_prerequisites_event(json)
+      data = JSON.parse(json)
+      flag_key = data["flag_key"]
+      return unless flag_key
+      @cache.apply_prerequisites_event(
+        flag_key, parse_prerequisites(data["prerequisites"]), (data["ts"] || 0).to_i
+      )
+    rescue JSON::ParserError
+      # malformed event — ignore
+    end
+
     # Route a parsed SSE frame. A "lag" frame is the gateway warning us that our
     # buffer overflowed and it DROPPED the real flag-update event; recover the
-    # dropped update by refetching the full snapshot. Everything else is a normal
-    # flag-update event applied incrementally to the cache.
+    # dropped update by refetching the full snapshot. A "prerequisites_updated"
+    # frame gets its own handler (see apply_prerequisites_event's comment).
+    # Everything else is a normal flag-update event applied incrementally to
+    # the cache.
     def dispatch_sse_event(event_type, data)
       if event_type == "lag"
         schedule_snapshot_refetch
+      elsif event_type == "prerequisites_updated"
+        apply_prerequisites_event(data)
       else
         apply_event(data)
       end

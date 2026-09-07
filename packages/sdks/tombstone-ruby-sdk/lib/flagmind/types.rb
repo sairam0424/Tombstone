@@ -28,19 +28,22 @@ module Tombstone
     :flag_id, :flag_key, :environment,
     :enabled, :rollout_pct, :safe_default, :updated_at,
     :prerequisites, :targeting_rules, :target_list, :hash_version,
+    :prerequisites_updated_at,
     keyword_init: true
   ) do
     # Default values for the new fields
     def initialize(
       flag_id:, flag_key:, environment:,
       enabled:, rollout_pct:, safe_default:, updated_at:,
-      prerequisites: [], targeting_rules: [], target_list: [], hash_version: 1
+      prerequisites: [], targeting_rules: [], target_list: [], hash_version: 1,
+      prerequisites_updated_at: 0
     )
       super(
         flag_id: flag_id, flag_key: flag_key, environment: environment,
         enabled: enabled, rollout_pct: rollout_pct, safe_default: safe_default, updated_at: updated_at,
         prerequisites: prerequisites, targeting_rules: targeting_rules,
-        target_list: target_list, hash_version: hash_version
+        target_list: target_list, hash_version: hash_version,
+        prerequisites_updated_at: prerequisites_updated_at
       )
     end
   end
