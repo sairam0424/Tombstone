@@ -99,6 +99,106 @@ RSpec.describe Tombstone::Client do
     expect(states.first.prerequisites).to eq([])
   end
 
+  # Mirrors the prerequisites-parsing tests above exactly, for
+  # targeting_rules (added by flag-api PR #245). flag-api's real per-rule
+  # wire shape: "id"/"rule_type"/"attribute"/"operator"/"values"/
+  # "variation"/"priority" -- ONE condition per rule row, adapted into
+  # this SDK's own richer TargetingRule(conditions, rollout_pct, variation,
+  # priority) model by parse_targeting_rules (see that method's own comment
+  # for why rollout_pct is always 100 for a wire-parsed rule).
+  it "parses real targeting_rules using the flat wire shape into the richer TargetingRule model" do
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "rule_type" => "USER", "attribute" => "email", "operator" => "CONTAINS",
+              "values" => ["@acme.com"], "variation" => "true", "priority" => 3 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    rules = states.first.targeting_rules
+    expect(rules.length).to eq(1)
+    expect(rules.first).to be_a(Tombstone::TargetingRule)
+    expect(rules.first.id).to eq("rule-1")
+    expect(rules.first.variation).to eq("true")
+    expect(rules.first.priority).to eq(3)
+    expect(rules.first.rollout_pct).to eq(100)
+    expect(rules.first.conditions.length).to eq(1)
+    expect(rules.first.conditions.first.attribute).to eq("email")
+    expect(rules.first.conditions.first.operator).to eq("CONTAINS")
+    expect(rules.first.conditions.first.values).to eq(["@acme.com"])
+  end
+
+  it "targeting rule numeric values parse as their string representation" do
+    # "values" can carry JSON numbers (e.g. for GT/GTE/LT/LTE operators) --
+    # must round-trip as the plain string form Float() can consume, not
+    # e.g. "18.0" for an integer 18.
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "rule_type" => "CUSTOM", "attribute" => "age", "operator" => "GTE",
+              "values" => [18], "variation" => "true", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    condition = states.first.targeting_rules.first.conditions.first
+    expect(condition.values).to eq(["18"])
+    expect(Tombstone::RuleMatcher.evaluate_condition(
+      condition, Tombstone::EvaluationContext.new(user_id: "u1", org_id: "", attrs: { "age" => "21" })
+    )).to be true
+  end
+
+  it "a flag with no targeting_rules key at all parses as an empty array, not an error" do
+    data = {
+      "flags" => [
+        {
+          "flag_key" => "known-flag", "flag_id" => "1", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 100, "safe_default" => "false", "updated_at" => 0
+        }
+      ]
+    }
+    states = client.send(:parse_snapshot_flags, data)
+    expect(states.first.targeting_rules).to eq([])
+  end
+
+  # End-to-end proof that a targeting rule parsed from a REAL snapshot
+  # response (via parse_snapshot_flags, not a hand-built
+  # FlagEnvironmentState) actually reaches evaluate() and changes its
+  # outcome -- mirrors the two prerequisite tests below exactly, closing the
+  # identical gap for targeting_rules.
+  it "evaluate resolves a real rule match from a snapshot parsed by the real wire parser" do
+    client_with_default = described_class.new(sdk_key: "sdk-test-key", environment: "test", defaults: { "child-flag" => "off" })
+    data = {
+      "flags" => [
+        {
+          "flag_id" => "2", "flag_key" => "child-flag", "environment" => "production",
+          "enabled" => true, "rollout_pct" => 0, "safe_default" => "off", "updated_at" => 1_700_000_000,
+          "targeting_rules" => [
+            { "id" => "rule-1", "rule_type" => "USER", "attribute" => "email", "operator" => "EQ",
+              "values" => ["x@example.com"], "variation" => "matched", "priority" => 0 }
+          ]
+        }
+      ]
+    }
+    states = client_with_default.send(:parse_snapshot_flags, data)
+    client_with_default.instance_variable_get(:@cache).load_snapshot(states, 1_700_000_000)
+
+    result = client_with_default.evaluate(
+      "child-flag", Tombstone::EvaluationContext.new(user_id: "u1", org_id: "", attrs: { "email" => "x@example.com" })
+    )
+    expect(result.reason).to eq(Tombstone::EvaluationReason::RULE_MATCH)
+    expect(result.value).to eq("matched")
+  end
+
   # Regression suite for a SECOND bug: evaluate() called
   # EvaluationEngine#evaluate with only 4 positional args, so flag_lookup
   # defaulted to ->(k) { nil } -- documented there as being for callers with

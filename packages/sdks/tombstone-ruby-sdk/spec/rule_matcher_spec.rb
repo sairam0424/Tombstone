@@ -68,6 +68,64 @@ RSpec.describe Tombstone::RuleMatcher do
       cond = Tombstone::PropertyCondition.new(attribute: "geo.country", operator: "in", values: ["US", "CA"], negate: false)
       expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("geo" => { "country" => "us" }))).to be true
     end
+
+    # flag-api's targeting_rules.operator CHECK constraint (schema.sql) has
+    # GEO_COUNTRY/GEO_REGION as real operator VALUES, not just an
+    # attribute-name convention -- normalize_operator must map both to "in"
+    # so they reach the case-insensitive is_geo branch above, or every
+    # GEO_COUNTRY/GEO_REGION rule from a real backend response would raise
+    # InconclusiveMatchError (unknown operator) and never match for any
+    # user. Found while wiring the real backend wire format into this SDK
+    # for the first time.
+    it "GEO_COUNTRY operator is recognized" do
+      cond = Tombstone::PropertyCondition.new(attribute: "geo.country", operator: "GEO_COUNTRY", values: ["US", "CA"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("geo" => { "country" => "us" }))).to be true
+    end
+
+    it "GEO_REGION operator is recognized" do
+      cond = Tombstone::PropertyCondition.new(attribute: "geo.region", operator: "GEO_REGION", values: ["CA-ON"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("geo" => { "region" => "CA-QC" }))).to be false
+    end
+
+    # Found by adversarial review of the Java SDK's identical fix (PR #247):
+    # is_geo was originally decided purely by attribute name
+    # (GEO_ATTRIBUTES.include?(attribute)), so a GEO_COUNTRY rule using a
+    # non-canonical attribute name (nothing validates that operator=
+    # GEO_COUNTRY implies attribute=="geo.country") silently fell back to
+    # case-SENSITIVE matching instead of the case-insensitive semantics the
+    # operator itself declares. Checked here proactively.
+    it "GEO_COUNTRY operator is case-insensitive even with a non-canonical attribute name" do
+      cond = Tombstone::PropertyCondition.new(attribute: "country", operator: "GEO_COUNTRY", values: ["US"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("country" => "us"))).to be true
+    end
+
+    it "GEO_REGION operator is case-insensitive even with a non-canonical attribute name" do
+      cond = Tombstone::PropertyCondition.new(attribute: "region", operator: "GEO_REGION", values: ["CA-ON"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("region" => "ca-on"))).to be true
+    end
+
+    # An EMPTY values list must never match "neq"/"nin": !values.include?(x)
+    # on an empty list is vacuously true, which would make a rule with an
+    # empty/missing "values" list match EVERY context unconditionally --
+    # the same bug class found and fixed in the TypeScript SDK's NOT_IN
+    # operator and the Java SDK's "neq"/"nin" branch (adversarial review of
+    # PR #246/#247), which explicitly flagged this as likely present in the
+    # other SDKs too. Confirmed here.
+    it "NOT_IN with empty values never matches" do
+      cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "not_in", values: [], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("plan" => "anything"))).to be false
+    end
+
+    it "NOT_IN with empty values never matches for a geo attribute" do
+      cond = Tombstone::PropertyCondition.new(attribute: "geo.country", operator: "not_in", values: [], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("geo" => { "country" => "US" }))).to be false
+    end
+
+    it "NOT_IN with non-empty values still excludes correctly" do
+      cond = Tombstone::PropertyCondition.new(attribute: "plan", operator: "not_in", values: ["banned", "suspended"], negate: false)
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("plan" => "banned"))).to be false
+      expect(Tombstone::RuleMatcher.evaluate_condition(cond, ctx("plan" => "pro"))).to be true
+    end
   end
 
   describe ".padded_version" do

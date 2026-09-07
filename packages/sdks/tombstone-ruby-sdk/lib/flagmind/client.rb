@@ -87,7 +87,8 @@ module Tombstone
           rollout_pct: (f["rollout_pct"] || 0).to_i,
           safe_default: f["safe_default"] || "false",
           updated_at: (f["updated_at"] || 0).to_i,
-          prerequisites: parse_prerequisites(f["prerequisites"])
+          prerequisites: parse_prerequisites(f["prerequisites"]),
+          targeting_rules: parse_targeting_rules(f["targeting_rules"])
         )
       end
     end
@@ -113,6 +114,32 @@ module Tombstone
           flag_key: p["flag_key"] || "",
           required_variation: p["required_variation"] || "true",
           gate: p["gate"] != false
+        )
+      end
+    end
+
+    # flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
+    # targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
+    # "variation"/"priority" -- ONE flat condition per rule row. This SDK's
+    # own TargetingRule model (mirroring Python/Java's GrowthBook-style
+    # design: multiple AND-combined conditions per rule + per-rule rollout
+    # sub-bucketing) predates the real backend format and doesn't match it
+    # 1:1 -- adapted here into a single-element conditions list, with
+    # rollout_pct fixed at 100 (there is no per-rule rollout concept on the
+    # backend; 100 means "always apply once matched"), mirroring the Java
+    # SDK's identical parseTargetingRules adapter (PR #247).
+    def parse_targeting_rules(raw)
+      return [] unless raw.is_a?(Array)
+      raw.filter_map do |r|
+        next unless r.is_a?(Hash)
+        values = r["values"].is_a?(Array) ? r["values"].map { |v| v.nil? ? "" : v.to_s } : []
+        condition = PropertyCondition.new(
+          attribute: r["attribute"] || "", operator: r["operator"] || "",
+          values: values, negate: false
+        )
+        TargetingRule.new(
+          id: r["id"] || "", conditions: [condition], rollout_pct: 100,
+          variation: r["variation"] || "", priority: (r["priority"] || 0).to_i
         )
       end
     end
@@ -175,17 +202,34 @@ module Tombstone
       # malformed event — ignore
     end
 
+    # services/flag-api/internal/api/v1/targeting_rules.go's TargetingRulesEvent
+    # -- mirrors apply_prerequisites_event exactly, for the same reason (a
+    # distinct payload shape from a real flag event, so it gets its own
+    # handler rather than being routed through apply_event).
+    def apply_targeting_rules_event(json)
+      data = JSON.parse(json)
+      flag_key = data["flag_key"]
+      return unless flag_key
+      @cache.apply_targeting_rules_event(
+        flag_key, parse_targeting_rules(data["targeting_rules"]), (data["ts"] || 0).to_i
+      )
+    rescue JSON::ParserError
+      # malformed event — ignore
+    end
+
     # Route a parsed SSE frame. A "lag" frame is the gateway warning us that our
     # buffer overflowed and it DROPPED the real flag-update event; recover the
     # dropped update by refetching the full snapshot. A "prerequisites_updated"
-    # frame gets its own handler (see apply_prerequisites_event's comment).
-    # Everything else is a normal flag-update event applied incrementally to
-    # the cache.
+    # or "targeting_rules_updated" frame gets its own handler (see each
+    # handler's own comment). Everything else is a normal flag-update event
+    # applied incrementally to the cache.
     def dispatch_sse_event(event_type, data)
       if event_type == "lag"
         schedule_snapshot_refetch
       elsif event_type == "prerequisites_updated"
         apply_prerequisites_event(data)
+      elsif event_type == "targeting_rules_updated"
+        apply_targeting_rules_event(data)
       else
         apply_event(data)
       end

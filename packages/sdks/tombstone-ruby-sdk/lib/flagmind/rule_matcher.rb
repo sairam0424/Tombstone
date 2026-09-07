@@ -34,15 +34,36 @@ module Tombstone
       raise InconclusiveMatchError, "Attribute '#{condition.attribute}' not present in evaluation context" if raw.nil?
 
       attr_val = raw.to_s
+      raw_op = condition.operator.downcase
       op = normalize_operator(condition.operator)
       values = condition.values
-      is_geo = GEO_ATTRIBUTES.include?(condition.attribute)
+      # is_geo is true whenever EITHER the attribute is a recognized geo path
+      # OR the operator itself declares geo semantics (GEO_COUNTRY/
+      # GEO_REGION) -- checking the attribute name ALONE would mean a rule
+      # using a non-canonical attribute (e.g. "country" instead of
+      # "geo.country") with a real GEO_COUNTRY operator silently falls back
+      # to case-SENSITIVE matching, even though nothing (backend or SDK)
+      # validates that operator=GEO_COUNTRY implies attribute=="geo.country".
+      # Found and fixed in the Java SDK's equivalent evaluateCondition by
+      # adversarial review of PR #247; checked here proactively.
+      is_geo = GEO_ATTRIBUTES.include?(condition.attribute) ||
+               raw_op == "geo_country" || raw_op == "geo_region"
 
       result = case op
       when "eq", "in"
         is_geo ? contains_ignore_case(values, attr_val) : values.include?(attr_val)
       when "neq", "nin"
-        is_geo ? !contains_ignore_case(values, attr_val) : !values.include?(attr_val)
+        # An EMPTY values list must never match "neq"/"nin":
+        # !values.include?(x) on an empty list is vacuously true (there is
+        # nothing to find, so "not found" is trivially true), which would
+        # make a rule with an empty/missing "values" list match EVERY
+        # context unconditionally -- the opposite of "no exclusions
+        # configured, so exclude nothing". Same bug class found and fixed in
+        # the TypeScript SDK's NOT_IN operator (adversarial review of PR
+        # #246) and the Java SDK's "neq"/"nin" branch (PR #247); fixed here
+        # proactively per those findings' own explicit note that the
+        # remaining SDKs likely share it.
+        !values.empty? && (is_geo ? !contains_ignore_case(values, attr_val) : !values.include?(attr_val))
       when "contains"
         any_contains_ignore_case(values, attr_val)
       when "startswith"
@@ -68,6 +89,19 @@ module Tombstone
       when "not_in" then "nin"
       when "prefix" then "startswith"
       when "suffix" then "endswith"
+      # flag-api's targeting_rules.operator CHECK constraint (schema.sql)
+      # has GEO_COUNTRY/GEO_REGION as real, distinct operator VALUES (not
+      # just an attribute-name convention) -- without this mapping, a
+      # targeting rule using either would hit the else branch below and
+      # raise InconclusiveMatchError on every evaluation, silently never
+      # matching for any user. Mapped to "in" so it falls into the existing
+      # "eq"/"in" branch above, whose is_geo case-insensitive comparison
+      # already implements the real geo-matching semantics correctly. Found
+      # while wiring the real backend wire format into this SDK for the
+      # first time (targeting_rules had zero real snapshot data before this
+      # change, so this gap was never previously reachable) -- the identical
+      # gap the Java SDK's own normalizeOperator needed (PR #247).
+      when "geo_country", "geo_region" then "in"
       else op
       end
     end
