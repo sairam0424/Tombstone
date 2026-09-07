@@ -13,7 +13,8 @@ public class TypesTests
             new List<FlagPrerequisite> { prereq },
             new List<TargetingRule> { rule },
             new List<string> { "user-1" },
-            2
+            2,
+            1700000000L
         );
 
         Assert.Equal(1, state.Prerequisites.Count);
@@ -22,6 +23,7 @@ public class TypesTests
         Assert.Equal("plan", state.TargetingRules[0].Conditions[0].Attribute);
         Assert.Equal(new List<string> { "user-1" }, state.TargetList);
         Assert.Equal(2, state.HashVersion);
+        Assert.Equal(1700000000L, state.PrerequisitesUpdatedAt);
     }
 
     [Fact] public void FlagEnvironmentState_DefaultsNewFieldsWhenOmitted() {
@@ -32,6 +34,7 @@ public class TypesTests
         Assert.Empty(state.Prerequisites);
         Assert.Empty(state.TargetingRules);
         Assert.Empty(state.TargetList);
+        Assert.Equal(0L, state.PrerequisitesUpdatedAt);
     }
 
     [Fact] public void FlagPrerequisite_ConstructsWithAllFields() {
