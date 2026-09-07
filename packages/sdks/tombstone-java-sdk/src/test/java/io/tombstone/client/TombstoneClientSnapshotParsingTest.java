@@ -116,6 +116,74 @@ public class TombstoneClientSnapshotParsingTest {
         assertEquals(List.of(), states.get(0).prerequisites());
     }
 
+    // Mirrors prerequisitesParseCorrectlyFromRealWireJson exactly, for
+    // targeting_rules (added by flag-api PR #245). flag-api's real
+    // per-rule wire shape: "id"/"rule_type"/"attribute"/"operator"/
+    // "values"/"variation"/"priority" -- ONE condition per rule row,
+    // adapted into this SDK's own richer TargetingRule(conditions, rolloutPct,
+    // variation, priority) model by parseTargetingRules (see that method's
+    // own doc comment for why rolloutPct is always 100 for a wire-parsed rule).
+    @Test
+    void targetingRulesParseCorrectlyFromRealWireJson() throws IOException {
+        String json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"USER","attribute":"email","operator":"CONTAINS",
+                  "values":["@acme.com"],"variation":"true","priority":3}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
+        assertEquals(1, states.size());
+        List<io.tombstone.types.TargetingRule> rules = states.get(0).targetingRules();
+        assertEquals(1, rules.size());
+        assertEquals("rule-1", rules.get(0).id());
+        assertEquals("true", rules.get(0).variation());
+        assertEquals(3, rules.get(0).priority());
+        assertEquals(100.0, rules.get(0).rolloutPct());
+        assertEquals(1, rules.get(0).conditions().size());
+        assertEquals("email", rules.get(0).conditions().get(0).attribute());
+        assertEquals("CONTAINS", rules.get(0).conditions().get(0).operator());
+        assertEquals(List.of("@acme.com"), rules.get(0).conditions().get(0).values());
+    }
+
+    @Test
+    void targetingRuleNumericValuesParseAsTheirStringRepresentation() throws IOException {
+        // "values" can carry JSON numbers (e.g. for GT/GTE/LT/LTE operators)
+        // -- must round-trip as the plain string form Double.parseDouble
+        // can consume, not e.g. "18.0" for an integer 18.
+        String json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"CUSTOM","attribute":"age","operator":"GTE",
+                  "values":[18],"variation":"true","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
+        var condition = states.get(0).targetingRules().get(0).conditions().get(0);
+        assertEquals(List.of("18"), condition.values());
+        assertTrue(io.tombstone.evaluation.RuleMatcher.evaluateCondition(
+            condition, new EvaluationContext("u1", "", Map.of("age", "21"))),
+            "the round-tripped numeric value must still be usable by evaluateNumeric");
+    }
+
+    @Test
+    void flagWithNoTargetingRulesFieldAtAllParsesAsEmptyNotAnError() throws IOException {
+        String json = """
+            {"environment":"production","flags":[
+              {"flag_id":"1","flag_key":"known-flag","environment":"production",
+               "enabled":true,"rollout_pct":100,"safe_default":"false","updated_at":1700000000}
+            ],"hash":"h","ts":1700000000}
+            """;
+        List<FlagEnvironmentState> states = newClient().parseSnapshotResponse(json).flags();
+        assertEquals(List.of(), states.get(0).targetingRules());
+    }
+
     /** Regression suite for a SECOND bug, found by adversarial review of this
      *  PR's own fix above: evaluate() called EvaluationEngine's 4-arg
      *  convenience overload, which hardcodes flagLookup to `key -> null` --
@@ -138,10 +206,10 @@ public class TombstoneClientSnapshotParsingTest {
         TombstoneClient client = newClient();
         client.loadSnapshotForTesting(List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", true, 100, "false", 0L,
-                List.of(), List.of(), List.of(), 1, 0L),
+                List.of(), List.of(), List.of(), 1, 0L, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
                 List.of(new FlagPrerequisite("parent-flag", "true", true)),
-                List.of(), List.of(), 1, 0L)
+                List.of(), List.of(), 1, 0L, 0L)
         ));
 
         EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));
@@ -154,13 +222,44 @@ public class TombstoneClientSnapshotParsingTest {
         TombstoneClient client = newClient();
         client.loadSnapshotForTesting(List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", false, 0, "false", 0L,
-                List.of(), List.of(), List.of(), 1, 0L),
+                List.of(), List.of(), List.of(), 1, 0L, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
                 List.of(new FlagPrerequisite("parent-flag", "true", true)),
-                List.of(), List.of(), 1, 0L)
+                List.of(), List.of(), 1, 0L, 0L)
         ));
 
         EvaluationResult<Boolean> result = client.evaluate("child-flag", EvaluationContext.of("u1"));
         assertEquals(EvaluationReason.PREREQUISITE_FAILED, result.reason());
+    }
+
+    // End-to-end proof that a targeting rule parsed from a REAL snapshot
+    // response (via parseSnapshotResponse, not a hand-built
+    // FlagEnvironmentState) actually reaches evaluate() and changes its
+    // outcome -- mirrors the two prerequisite tests above exactly, closing
+    // the identical gap for targeting_rules.
+    @Test
+    void evaluateResolvesARealRuleMatchFromASnapshotParsedByTheRealWireParser() throws IOException {
+        TombstoneClient client = new TombstoneClient(
+            "test-key", "test", "http://api.invalid", "http://gw.invalid",
+            Map.of("child-flag", "off")
+        );
+        String json = """
+            {"environment":"production","flags":[
+              {"flag_id":"2","flag_key":"child-flag","environment":"production",
+               "enabled":true,"rollout_pct":0,"safe_default":"off","updated_at":1700000000,
+               "targeting_rules":[
+                 {"id":"rule-1","rule_type":"USER","attribute":"email","operator":"EQ",
+                  "values":["x@example.com"],"variation":"matched","priority":0}
+               ]}
+            ],"hash":"h","ts":1700000000}
+            """;
+        var parsed = client.parseSnapshotResponse(json);
+        client.loadSnapshotForTesting(parsed.flags(), parsed.ts());
+
+        EvaluationResult<String> result = client.evaluate(
+            "child-flag", new EvaluationContext("u1", "", Map.of("email", "x@example.com")));
+        assertEquals(EvaluationReason.RULE_MATCH, result.reason(),
+            "a targeting rule parsed from a real snapshot response must actually be evaluated, not silently dropped");
+        assertEquals("matched", result.value());
     }
 }

@@ -2,6 +2,7 @@ package io.tombstone.client;
 
 import io.tombstone.types.FlagEnvironmentState;
 import io.tombstone.types.FlagPrerequisite;
+import io.tombstone.types.TargetingRule;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -24,13 +25,20 @@ import java.util.concurrent.atomic.AtomicReference;
 // (AtomicReference.updateAndGet or compareAndSet) and is its own,
 // independent piece of work.
 public class FlagCache {
-    // Combines the flag map, the prerequisites-live-event-provenance map,
-    // and the last-applied-snapshot ts into ONE object swapped via a
-    // single AtomicReference -- see the field's own comment for why this
-    // combination is load-bearing, not just a style preference.
+    // Combines the flag map, BOTH live-event-provenance maps (prerequisites
+    // and targetingRules), and the last-applied-snapshot ts into ONE object
+    // swapped via a single AtomicReference -- see the field's own comment
+    // for why this combination is load-bearing, not just a style
+    // preference. targetingRulesFromLiveEvent is included here from the
+    // START (not added as a separate field later): the concurrency-tear
+    // lesson that forced prerequisitesFromLiveEvent into this same
+    // CacheState (found by a SECOND round of adversarial review, see that
+    // field's own history) applies identically to any second live-event
+    // provenance map, so there is no reason to repeat the discovery.
     private record CacheState(
         Map<String, FlagEnvironmentState> flags,
         Map<String, Boolean> prerequisitesFromLiveEvent,
+        Map<String, Boolean> targetingRulesFromLiveEvent,
         long lastSnapshotTs
     ) {}
 
@@ -61,7 +69,8 @@ public class FlagCache {
     // CacheState, whichever set() lands second wins outright) -- that
     // remains exactly as accepted/deferred as before.
     private final AtomicReference<CacheState> state =
-        new AtomicReference<>(new CacheState(Collections.emptyMap(), Collections.emptyMap(), NO_SNAPSHOT_YET));
+        new AtomicReference<>(new CacheState(
+            Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), NO_SNAPSHOT_YET));
 
     /** Convenience overload for tests that don't care about prerequisites-streaming timing semantics. */
     public void loadSnapshot(List<FlagEnvironmentState> flags) {
@@ -83,8 +92,10 @@ public class FlagCache {
         }
         Map<String, FlagEnvironmentState> current = currentState.flags();
         Map<String, Boolean> currentFromLiveEvent = currentState.prerequisitesFromLiveEvent();
+        Map<String, Boolean> currentTargetingRulesFromLiveEvent = currentState.targetingRulesFromLiveEvent();
         Map<String, FlagEnvironmentState> m = new HashMap<>();
         Map<String, Boolean> nextFromLiveEvent = new HashMap<>();
+        Map<String, Boolean> nextTargetingRulesFromLiveEvent = new HashMap<>();
         for (FlagEnvironmentState f : flags) {
             FlagEnvironmentState existing = current.get(f.flagKey());
             // A live prerequisites_updated event may have already advanced
@@ -118,30 +129,43 @@ public class FlagCache {
                 existing != null &&
                 Boolean.TRUE.equals(currentFromLiveEvent.get(f.flagKey())) &&
                 existing.prerequisitesUpdatedAt() >= snapshotTs;
+            // Identical reasoning to keepLivePrerequisites above, applied
+            // to targetingRules against services/flag-api/internal/api/v1/
+            // targeting_rules.go's TargetingRulesEvent -- see
+            // applyTargetingRulesEvent's own doc comment.
+            boolean keepLiveTargetingRules =
+                existing != null &&
+                Boolean.TRUE.equals(currentTargetingRulesFromLiveEvent.get(f.flagKey())) &&
+                existing.targetingRulesUpdatedAt() >= snapshotTs;
             m.put(f.flagKey(), new FlagEnvironmentState(
                 f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
                 f.safeDefault(), f.updatedAt(),
                 keepLivePrerequisites ? existing.prerequisites() : f.prerequisites(),
-                f.targetingRules(), f.targetList(), f.hashVersion(),
-                keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs
+                keepLiveTargetingRules ? existing.targetingRules() : f.targetingRules(),
+                f.targetList(), f.hashVersion(),
+                keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs,
+                keepLiveTargetingRules ? existing.targetingRulesUpdatedAt() : snapshotTs
             ));
             // ONE-SHOT consumption, always false here (never
-            // keepLivePrerequisites): this loadSnapshot call has now fully
-            // resolved the race between the live event and ITS OWN specific
-            // in-flight snapshot. Re-propagating true would make the
-            // protection "sticky", vetoing a later, independent snapshot
-            // that merely happens to tie the same coarse-resolution second
-            // too (found by a second round of adversarial review of this
-            // same fix). Residual, accepted limitation: two snapshot
-            // fetches that were BOTH already in flight when the SAME live
-            // event fired will only have the first-arriving one correctly
-            // blocked; solving that fully would require a signal finer than
-            // flag-api's 1-second-resolution wall-clock ts.
+            // keepLivePrerequisites/keepLiveTargetingRules): this
+            // loadSnapshot call has now fully resolved the race between
+            // the live event and ITS OWN specific in-flight snapshot.
+            // Re-propagating true would make the protection "sticky",
+            // vetoing a later, independent snapshot that merely happens to
+            // tie the same coarse-resolution second too (found by a second
+            // round of adversarial review of this same fix). Residual,
+            // accepted limitation: two snapshot fetches that were BOTH
+            // already in flight when the SAME live event fired will only
+            // have the first-arriving one correctly blocked; solving that
+            // fully would require a signal finer than flag-api's
+            // 1-second-resolution wall-clock ts.
             nextFromLiveEvent.put(f.flagKey(), false);
+            nextTargetingRulesFromLiveEvent.put(f.flagKey(), false);
         }
         state.set(new CacheState(
             Collections.unmodifiableMap(m),
             Collections.unmodifiableMap(nextFromLiveEvent),
+            Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
             snapshotTs
         ));
     }
@@ -165,13 +189,14 @@ public class FlagCache {
             existing.flagId(), existing.flagKey(), existing.environment(),
             enabled, rolloutPct, existing.safeDefault(), ts,
             existing.prerequisites(), existing.targetingRules(), existing.targetList(),
-            existing.hashVersion(), existing.prerequisitesUpdatedAt()
+            existing.hashVersion(), existing.prerequisitesUpdatedAt(), existing.targetingRulesUpdatedAt()
         );
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);
         state.set(new CacheState(
             Collections.unmodifiableMap(next),
             currentState.prerequisitesFromLiveEvent(),
+            currentState.targetingRulesFromLiveEvent(),
             currentState.lastSnapshotTs()
         ));
     }
@@ -203,7 +228,7 @@ public class FlagCache {
             existing.flagId(), existing.flagKey(), existing.environment(),
             existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
             List.copyOf(prerequisites), existing.targetingRules(), existing.targetList(),
-            existing.hashVersion(), ts
+            existing.hashVersion(), ts, existing.targetingRulesUpdatedAt()
         );
         Map<String, FlagEnvironmentState> next = new HashMap<>(current);
         next.put(flagKey, updated);
@@ -219,6 +244,44 @@ public class FlagCache {
         state.set(new CacheState(
             Collections.unmodifiableMap(next),
             Collections.unmodifiableMap(nextFromLiveEvent),
+            currentState.targetingRulesFromLiveEvent(),
+            currentState.lastSnapshotTs()
+        ));
+    }
+
+    /**
+     * Applies a live "targeting_rules_updated" SSE event -- full replacement
+     * of a flag's targeting-rule list FOR THIS ENVIRONMENT, not a delta
+     * (matching TargetingRulesEvent's own documented design on the flag-api
+     * side -- services/flag-api/internal/api/v1/targeting_rules.go).
+     * No-ops for a flag with no existing cache entry, mirrors
+     * applyPrerequisitesEvent's own staleness guard exactly (strict "&lt;",
+     * comparing against targetingRulesUpdatedAt).
+     */
+    public void applyTargetingRulesEvent(String flagKey, List<TargetingRule> targetingRules, long ts) {
+        CacheState currentState = state.get();
+        Map<String, FlagEnvironmentState> current = currentState.flags();
+        FlagEnvironmentState existing = current.get(flagKey);
+        if (existing == null) return;
+        if (ts < existing.targetingRulesUpdatedAt()) return;
+        FlagEnvironmentState updated = new FlagEnvironmentState(
+            existing.flagId(), existing.flagKey(), existing.environment(),
+            existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
+            existing.prerequisites(), List.copyOf(targetingRules), existing.targetList(),
+            existing.hashVersion(), existing.prerequisitesUpdatedAt(), ts
+        );
+        Map<String, FlagEnvironmentState> next = new HashMap<>(current);
+        next.put(flagKey, updated);
+        // Marks this flag's targetingRules as LIVE-sourced -- see
+        // targetingRulesFromLiveEvent's own field comment (on CacheState's
+        // declaration above).
+        Map<String, Boolean> nextTargetingRulesFromLiveEvent =
+            new HashMap<>(currentState.targetingRulesFromLiveEvent());
+        nextTargetingRulesFromLiveEvent.put(flagKey, true);
+        state.set(new CacheState(
+            Collections.unmodifiableMap(next),
+            currentState.prerequisitesFromLiveEvent(),
+            Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
             currentState.lastSnapshotTs()
         ));
     }

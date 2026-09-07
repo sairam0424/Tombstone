@@ -62,6 +62,48 @@ public class RuleMatcherTest {
         assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "us"))));
     }
 
+    // flag-api's targeting_rules.operator CHECK constraint (schema.sql) has
+    // GEO_COUNTRY/GEO_REGION as real operator VALUES, not just an
+    // attribute-name convention -- normalizeOperator must map both to "in"
+    // so they reach the case-insensitive isGeo branch above, or every
+    // GEO_COUNTRY/GEO_REGION rule from a real backend response would throw
+    // InconclusiveMatchException (unknown operator) and never match for
+    // any user. Found while wiring the real backend wire format into this
+    // SDK for the first time.
+    @Test void testEvaluateConditionGeoCountryOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.country", "GEO_COUNTRY", List.of("US", "CA"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "us"))));
+    }
+
+    @Test void testEvaluateConditionGeoRegionOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.region", "GEO_REGION", List.of("CA-ON"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.region", "CA-QC"))));
+    }
+
+    // An EMPTY values list must never match "neq"/"nin": !values.contains(x)
+    // on an empty list is vacuously true, which would make a rule with an
+    // empty/missing "values" list match EVERY context unconditionally --
+    // the same bug class found and fixed in the TypeScript SDK's NOT_IN
+    // operator (adversarial review of PR #246), which explicitly flagged
+    // this as likely present in the other SDKs too. Confirmed here.
+    @Test void testEvaluateConditionNotInWithEmptyValuesNeverMatches() {
+        var condition = new PropertyCondition("plan", "not_in", List.of(), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "anything"))),
+            "an empty NOT_IN values list must never match, not vacuously match everyone");
+    }
+
+    @Test void testEvaluateConditionNotInWithEmptyValuesNeverMatchesForGeoAttribute() {
+        var condition = new PropertyCondition("geo.country", "not_in", List.of(), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "US"))),
+            "an empty NOT_IN values list must never match, even for a geo (case-insensitive) attribute");
+    }
+
+    @Test void testEvaluateConditionNotInWithNonEmptyValuesStillExcludesCorrectly() {
+        var condition = new PropertyCondition("plan", "not_in", List.of("banned", "suspended"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "banned"))));
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "pro"))));
+    }
+
     @Test void testPaddedVersionOrdersNumericSegmentsCorrectly() {
         assertTrue(RuleMatcher.paddedVersion("1.9.0").compareTo(RuleMatcher.paddedVersion("1.10.0")) < 0);
     }

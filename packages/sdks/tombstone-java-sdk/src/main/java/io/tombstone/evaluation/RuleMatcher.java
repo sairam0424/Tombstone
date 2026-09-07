@@ -46,9 +46,18 @@ public class RuleMatcher {
             case "eq", "in" -> result = isGeo
                 ? containsIgnoreCase(values, attrVal)
                 : values.contains(attrVal);
-            case "neq", "nin" -> result = isGeo
+            // An EMPTY values list must never match "neq"/"nin": !values.contains(x)
+            // on an empty list is vacuously true (there is nothing to find, so
+            // "not found" is trivially true), which would make a rule with an
+            // empty/missing "values" list match EVERY context for EVERY
+            // attribute -- the opposite of "no exclusions configured, so
+            // exclude nothing". Same bug class found and fixed in the
+            // TypeScript SDK's evaluation.ts (adversarial review of PR #246);
+            // checked here proactively per that finding's own explicit note
+            // that the other 4 SDKs' evaluation engines likely share it.
+            case "neq", "nin" -> result = !values.isEmpty() && (isGeo
                 ? !containsIgnoreCase(values, attrVal)
-                : !values.contains(attrVal);
+                : !values.contains(attrVal));
             case "contains" -> result = anyContainsIgnoreCase(values, attrVal);
             case "startswith" -> result = anyStartsWithIgnoreCase(values, attrVal);
             case "endswith" -> result = anyEndsWithIgnoreCase(values, attrVal);
@@ -68,6 +77,19 @@ public class RuleMatcher {
             case "not_in" -> "nin";
             case "prefix" -> "startswith";
             case "suffix" -> "endswith";
+            // flag-api's targeting_rules.operator CHECK constraint (schema.sql)
+            // has GEO_COUNTRY/GEO_REGION as real, distinct operator VALUES
+            // (not just an attribute-name convention) -- without this mapping,
+            // a targeting rule using either would hit the switch's default
+            // branch below and throw InconclusiveMatchException on every
+            // evaluation, silently never matching for any user. Mapped to
+            // "in" so it falls into the existing case "eq","in" branch, whose
+            // isGeo case-insensitive comparison (via GEO_ATTRIBUTES) already
+            // implements the real geo-matching semantics correctly -- found
+            // while wiring the real backend wire format into this SDK for the
+            // first time (targeting_rules had zero real snapshot data before
+            // this change, so this gap was never previously reachable).
+            case "geo_country", "geo_region" -> "in";
             default -> op;
         };
     }

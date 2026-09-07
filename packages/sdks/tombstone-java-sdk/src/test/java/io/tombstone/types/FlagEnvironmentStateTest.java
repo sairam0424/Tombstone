@@ -12,7 +12,7 @@ public class FlagEnvironmentStateTest {
 
         var state = new FlagEnvironmentState(
             "id-1", "test-flag", "test", true, 50, "false", 0L,
-            List.of(prereq), List.of(rule), List.of("user-1"), 2, 1700000000L
+            List.of(prereq), List.of(rule), List.of("user-1"), 2, 1700000000L, 1700000000L
         );
 
         assertEquals(1, state.prerequisites().size());

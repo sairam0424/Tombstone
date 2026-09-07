@@ -38,9 +38,9 @@ public class TombstoneClientPrerequisitesEventTest {
     private static List<FlagEnvironmentState> parentAndChild() {
         return List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", false, 0, "false", 0L,
-                List.of(), List.of(), List.of(), 1, 0L),
+                List.of(), List.of(), List.of(), 1, 0L, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
-                List.of(), List.of(), List.of(), 1, 0L)
+                List.of(), List.of(), List.of(), 1, 0L, 0L)
         );
     }
 
@@ -148,10 +148,10 @@ public class TombstoneClientPrerequisitesEventTest {
         TombstoneClient client = newClient();
         client.loadSnapshotForTesting(List.of(
             new FlagEnvironmentState("1", "parent-flag", "test", false, 0, "false", 0L,
-                List.of(), List.of(), List.of(), 1, 0L),
+                List.of(), List.of(), List.of(), 1, 0L, 0L),
             new FlagEnvironmentState("2", "child-flag", "test", true, 100, "false", 0L,
                 List.of(new FlagPrerequisite("parent-flag", "true", true)),
-                List.of(), List.of(), 1, 1000L)
+                List.of(), List.of(), 1, 1000L, 0L)
         ), 1000);
 
         // Confirm the gate is active before clearing it.
