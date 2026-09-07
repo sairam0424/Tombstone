@@ -79,6 +79,24 @@ public class RuleMatcher {
                 result = evaluateSemver(op, attrVal, values, condition.attribute());
             case "date_before", "date_after" ->
                 result = evaluateDate(op, attrVal, values, condition.attribute());
+            // docs/SDK_CONTRACT.md:32 -- REGEX is declared (a real, distinct
+            // operator value in flag-api's targeting_rules.operator CHECK
+            // constraint) but deliberately NOT IMPLEMENTED in this release,
+            // across all 5 SDKs (parity matrix: "No" for every language) --
+            // matching TypeScript's own default:false behavior. Returning
+            // a definite false (not throwing) matters specifically for
+            // negate=true: a thrown exception would skip the whole rule
+            // regardless of negate, while the contract's literal
+            // "false, negated -> true" semantics require a definite
+            // result here. Does NOT implement real regex matching, which
+            // remains deliberately deferred ("Future work") for cross-SDK
+            // parity. Found missing by adversarial review of the .NET
+            // SDK's PR #249, which discovered Java's own switch had no
+            // "regex" case and fell through to the default throw below,
+            // diverging from the documented contract -- the .NET/Ruby
+            // SDKs already had this fix; this closes the identical gap
+            // here.
+            case "regex" -> result = false;
             default -> throw new InconclusiveMatchException("Unknown operator: '" + op + "'");
         }
         return condition.negate() ? !result : result;

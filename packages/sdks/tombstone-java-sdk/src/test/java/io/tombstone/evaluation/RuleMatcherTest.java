@@ -122,6 +122,23 @@ public class RuleMatcherTest {
         assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "pro"))));
     }
 
+    // docs/SDK_CONTRACT.md:32 -- REGEX is declared but deliberately NOT
+    // implemented in this release, across all 5 SDKs. It must return a
+    // definite false (matching TS's documented behavior), NOT throw
+    // InconclusiveMatchException like a genuinely unknown operator would.
+    // Found missing here by adversarial review of the .NET SDK's PR #249
+    // -- the .NET/Ruby SDKs already had this fix; Java's switch had no
+    // "regex" case at all and fell through to the default throw.
+    @Test void testEvaluateConditionRegexReturnsFalseRatherThanThrowing() {
+        var condition = new PropertyCondition("email", "REGEX", List.of("^admin.*@corp\\.com$"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("email", "admin1@corp.com"))));
+    }
+
+    @Test void testEvaluateConditionNegatedRegexReturnsTrue() {
+        var condition = new PropertyCondition("email", "REGEX", List.of("^admin.*@corp\\.com$"), true);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("email", "admin1@corp.com"))));
+    }
+
     @Test void testPaddedVersionOrdersNumericSegmentsCorrectly() {
         assertTrue(RuleMatcher.paddedVersion("1.9.0").compareTo(RuleMatcher.paddedVersion("1.10.0")) < 0);
     }
