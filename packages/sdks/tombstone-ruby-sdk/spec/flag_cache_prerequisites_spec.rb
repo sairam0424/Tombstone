@@ -174,6 +174,53 @@ RSpec.describe Tombstone::FlagCache do
       expect(updated.prerequisites).to eq([new_parent])
       expect(updated.prerequisites_updated_at).to eq(2000)
     end
+
+    it "still applies a second snapshot's own data on a ts tie with a first snapshot, no live event involved" do
+      # Regression test for a real bug the >= tie-break above introduced in
+      # its own first draft: with only a ts comparison, this cache cannot
+      # tell "existing.prerequisites_updated_at came from a live event that
+      # must win a tie" from "existing.prerequisites_updated_at came from a
+      # PRIOR SNAPSHOT LOAD that merely happens to share flag-api's coarse
+      # 1-second-resolution ts with a SECOND, later snapshot". Without
+      # @prerequisites_from_live_event tracking, this second snapshot's
+      # genuinely different prerequisites would be silently discarded.
+      cache = described_class.new
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("parent-a")])], 5000)
+
+      # A second, completely independent snapshot fetch resolves with the
+      # EXACT SAME ts but genuinely different data. No live event at all.
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("parent-b")])], 5000)
+
+      updated = cache.get("child-flag")
+      expect(updated.prerequisites).to eq([prereq("parent-b")])
+      expect(updated.prerequisites_updated_at).to eq(5000)
+    end
+
+    it "still applies a third snapshot's own data after a second tied snapshot already resolved the race with a live event" do
+      # Regression test found by a SECOND round of adversarial review of
+      # this fix's own first draft: @prerequisites_from_live_event was
+      # being re-set to true every time it was used to preserve a live
+      # event across a tied snapshot, making the protection "sticky" --
+      # EVERY subsequent snapshot at or before that ts would ALSO get
+      # vetoed, not just the one snapshot that legitimately raced the live
+      # event. The protection must be ONE-SHOT.
+      cache = described_class.new
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("old-parent")])], 1000)
+      cache.apply_prerequisites_event("child-flag", [prereq("live-parent")], 2000)
+
+      # First tied snapshot after the live event -- the ONE specific race
+      # the live event's own protection exists to close. Must preserve.
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("snap-b-parent")])], 2000)
+      expect(cache.get("child-flag").prerequisites).to eq([prereq("live-parent")])
+
+      # A SECOND, independent snapshot arrives, also tying ts=2000. No new
+      # live event raced THIS one -- the protection was already consumed.
+      cache.load_snapshot([flag("child-flag", prerequisites: [prereq("snap-c-parent")])], 2000)
+
+      updated = cache.get("child-flag")
+      expect(updated.prerequisites).to eq([prereq("snap-c-parent")])
+      expect(updated.prerequisites_updated_at).to eq(2000)
+    end
   end
 
   describe "concurrent access" do
