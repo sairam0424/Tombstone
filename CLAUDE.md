@@ -4,7 +4,7 @@ Tombstone is the **production intelligence layer** for feature flags at scale. I
 
 **Core thesis:** Every competitor asks "how do I deliver a flag value?" — Tombstone asks "which of my 5,000 active flags is responsible for what's happening in production right now?"
 
-**Current version: v1.2.1**
+**Current version: v1.5.0** (last tagged release; `develop`/`main` are well ahead of it working toward v2.0.0 — see `CHANGELOG.md`'s `[Unreleased]` section)
 
 ## Architecture
 
@@ -25,17 +25,19 @@ Tombstone/
 │   ├── gitops-sync/     # Go — YAML-as-code flag sync
 │   ├── ast-rewriter/    # Go — dead-code scanner + jscodeshift rewrite
 │   ├── marketplace/     # Go — integration registry (Slack, Datadog, PagerDuty, OpsGenie,
-│   │                    #        Jira, Linear, OTel)
+│   │                    #        Jira, Linear, OTel); flag-api calls it on every flag-lifecycle
+│   │                    #        mutation (create/enable-disable/kill/rollback-step/recovery/archive)
 │   └── tombstone-operator/ # Go — Kubernetes operator (FeatureFlag/FlagPolicy CRDs)
 ├── packages/sdks/
-│   ├── @tombstone/core/  # TypeScript — Node.js SDK, 5-step eval pipeline, 108 tests
-│   ├── @tombstone/react/ # TypeScript — React SDK (hooks + TombstoneProvider)
-│   ├── @tombstone/edge/  # TypeScript — Cloudflare Workers KV-backed snapshot + Cron Trigger
-│   └── @tombstone/browser/ # TypeScript — browser bundle (no Node deps)
-├── packages/sdk-wasm/   # @tombstone/eval — zero-dependency WASM-ready engine, 41 tests
-├── workspace-cli/       # @tombstone/cli — Commander CLI
+│   ├── @flagmind/core/   # TypeScript, npm name @tomb-stone/core — Node.js SDK, 5-step eval pipeline, 168 tests
+│   ├── @flagmind/react/  # TypeScript, npm name @tomb-stone/react — React SDK (hooks + TombstoneProvider)
+│   ├── @flagmind/edge/   # TypeScript, npm name @tomb-stone/edge — Cloudflare Workers KV-backed snapshot + Cron Trigger, 34 tests
+│   ├── tombstone-java-sdk/, tombstone-ruby-sdk/, tombstone-python-sdk/, tombstone-dotnet-sdk/ # full 5-step pipeline parity SDKs
+│   └── test-contract/vectors.json # shared cross-SDK contract vectors (the "@tombstone/browser" bundle named here in older docs was never built — do not assume it exists)
+├── packages/sdk-wasm/   # @tombstone/eval — zero-dependency WASM-ready engine, 51 tests
+├── workspace-cli/       # @tomb-stone/cli — Commander CLI
 ├── workspace-dashboard/ # React 19 + Vite + Tailwind v4 — management UI
-├── workspace-mcp/       # MCP server — 8 tools, Streamable HTTP at /api/mcp/mcp
+├── workspace-mcp/       # MCP server — 9 tools, Streamable HTTP at /api/mcp/mcp
 ├── proto/v1/            # Protobuf contracts (source of truth for all APIs)
 └── infra/               # Docker Compose + Helm (multi-region) + Terraform tombstone_region
 ```
@@ -99,18 +101,18 @@ uv sync --all-packages
 uv run pytest tests/
 ```
 
-**@tombstone/core (TypeScript SDK):**
+**@flagmind/core (TypeScript SDK, npm name @tomb-stone/core):**
 ```bash
-cd packages/sdks/@tombstone/core
+cd packages/sdks/@flagmind/core
 npm run build
-npm run test        # mocha dist/tests/**/*.test.js
+npm run test        # mocha dist/tests/**/*.test.js — 168 tests
 ```
 
 **@tombstone/eval (WASM engine):**
 ```bash
 cd packages/sdk-wasm
 npm run build
-npm run test        # 41 tests
+npm run test        # 51 tests
 ```
 
 **dashboard (React):**
@@ -136,10 +138,15 @@ make gen-proto      # Regenerate Go stubs from .proto files
 | `services/flag-api/internal/db/schema.sql` | PostgreSQL schema (authoritative) |
 | `proto/v1/flags/flags.proto` | Flag evaluation + CRUD contracts |
 | `proto/v1/admin/admin.proto` | Approval, audit, governance contracts |
-| `packages/sdks/@tombstone/core/src/evaluation.ts` | In-process evaluation engine (5-step pipeline) |
-| `packages/sdks/@tombstone/core/src/cache.ts` | Three-tier immutable flag cache |
-| `packages/sdks/@tombstone/core/src/provider.ts` | OpenFeature provider implementation |
-| `packages/sdks/@tombstone/core/src/testing.ts` | TombstoneTestClient — deterministic test utilities |
+| `packages/sdks/@flagmind/core/src/evaluation.ts` | In-process evaluation engine (5-step pipeline) |
+| `packages/sdks/@flagmind/core/src/cache.ts` | Three-tier immutable flag cache |
+| `packages/sdks/@flagmind/core/src/provider.ts` | OpenFeature provider implementation |
+| `packages/sdks/@flagmind/core/src/testing.ts` | TombstoneTestClient — deterministic test utilities |
+| `services/flag-api/internal/api/v1/targeting_rules.go` | Targeting-rules CRUD + live `targeting_rules_updated` SSE event |
+| `services/flag-api/internal/api/v1/change_requests.go` | Four-eyes approval: propose/approve/reject/apply |
+| `services/flag-api/internal/api/v1/scim.go` | SCIM 2.0 user provisioning/deprovisioning |
+| `services/flag-api/internal/api/v1/audit.go` | Audit log + Merkle-chain verify (`GET /api/v1/audit/verify`) |
+| `services/evaluator/internal/blast/blast_radius.go` | Blast-radius computation (`GET /api/v1/blast-radius`) |
 | `packages/sdk-wasm/src/index.ts` | WASM-ready zero-dependency eval engine |
 | `services/gateway/internal/hub/hub.go` | SSE connection hub |
 | `services/gateway/internal/hub/broadcaster.go` | Redis Streams → SSE fan-out |
@@ -172,7 +179,7 @@ make gen-proto      # Regenerate Go stubs from .proto files
 - **Rekor:** Transparency log writes are fail-open and async. Do not add synchronous Rekor blocking to hot paths.
 - **Redis Streams:** `tombstone:stream:{environment}` — gateway `XREADGROUP` consumers read from here. Legacy pub/sub `stream:{env}:updates` still active (remove in v2.1).
 - **Consumer group:** `gateway-workers` — each gateway instance is a named consumer `gateway-{hostname}`. Use `XACK` after successful delivery; failed messages stay in PEL for retry. Last 10,000 events retained per stream (approximate trim).
-- **Contract vectors:** Evaluation correctness is pinned against LD-verified 5-step pipeline contract tests. Changes to `evaluation.ts` or `@tombstone/eval` must pass all 108 + 41 contract tests.
+- **Contract vectors:** Evaluation correctness is pinned against LD-verified 5-step pipeline contract tests. Changes to `evaluation.ts` or `@tombstone/eval` must pass all 168 + 51 tests (`@flagmind/core` + `packages/sdk-wasm`).
 - **Kill switch / break-glass:** Gated by `RequirePermission`. Never bypass in hot paths — circuit breaker handles auto-rollback.
 - **Conventional Commits:** `type(scope)` — scopes: `flag-api`, `gateway`, `evaluator`, `intelligence`, `sdk`, `dashboard`, `cli`, `proto`, `infra`, `operator`, `marketplace`, `ast-rewriter`
 
