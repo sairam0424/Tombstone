@@ -206,7 +206,7 @@ Results ranked by Reciprocal Rank Fusion (RRF) across all three signals.
 | AST dead-code scanner + rewriter | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ paid |
 | WASM zero-dependency eval engine | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Self-hosted, fully open-source | ✅ MIT | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Cloud managed option | planned v1.1 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cloud managed option | ❌ no timeline | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 **Legend:** ✅ = implemented · partial = limited implementation · ❌ = not available · paid = cloud/enterprise tier only
 
@@ -291,7 +291,7 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 
 ### What Tombstone is not
 
-- A feature flag SaaS with a managed cloud (planned for v1.1)
+- A feature flag SaaS with a managed cloud (no committed timeline — originally targeted at v1.1; the project is now at v1.5.0 heading to v2.0.0 with this still unshipped)
 - An A/B testing platform with visual editor (use GrowthBook for that alongside Tombstone)
 - A session recording or analytics tool (use PostHog, Mixpanel, etc.)
 - A deployment orchestrator (use ArgoCD, Flux, etc. for that)
@@ -324,7 +324,7 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 
 **The intelligence service is large.** The Docker image bundles BAAI/bge-m3 (~400MB) for NLP search. First build takes 3–5 minutes. Subsequent builds use the cached layer.
 
-**Managed cloud hosting status is unverified in this doc pass** — `infra/.env.example` documents a real Northflank + Oracle + Cloudflare Pages production topology, which may mean this is now further along than "not yet available" implies. Not independently re-verified here (out of scope for this pass); don't treat either this doc's older claim or that inference as settled without checking the actual deployment.
+**Managed cloud hosting status, now verified**: the "not a SaaS with managed cloud" claim above still holds — no committed timeline exists for it, and it remains unshipped well past its original v1.1 target (the project is now at v1.5.0 heading to v2.0.0). `infra/.env.example`'s Northflank + Oracle + Cloudflare Pages topology and `infra/northflank/README.md` are self-hosting instructions — a runbook for deploying YOUR OWN instance across three third-party platforms, not a Tombstone-operated managed cloud offering. No SaaS exists; there is nothing to sign up for.
 
 ---
 
