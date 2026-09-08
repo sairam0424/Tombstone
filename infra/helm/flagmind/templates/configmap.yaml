@@ -46,3 +46,12 @@ data:
   # optional" posture. Defaults to this chart's own in-cluster marketplace
   # service when enabled, the same pattern FLAG_API_URL above uses.
   MARKETPLACE_URL: {{ .Values.marketplace.enabled | ternary (printf "http://%s-marketplace:%v" (include "tombstone.fullname" .) .Values.marketplace.service.port) "" | quote }}
+  # INFRA-1: MTLS_ENABLED defaults to false everywhere in this chart (never
+  # set), so this is inert today -- but if it's ever flipped on, flag-api's
+  # cert-generation path (cmd/main.go's WriteCerts) would otherwise write
+  # to the real default /certs, which doesn't exist and isn't mounted on
+  # this chart's now-read-only-root-filesystem Deployments, guaranteeing a
+  # logger.Fatal crash-loop the moment mTLS is enabled (found by
+  # adversarial review of the securityContext hardening in this same PR).
+  # Point it at the /tmp emptyDir every Deployment already mounts instead.
+  CERTS_DIR: "/tmp/certs"

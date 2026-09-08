@@ -1,0 +1,81 @@
+{{/*
+INFRA-1: one PodDisruptionBudget per service, guarding voluntary
+disruptions (node drains, cluster upgrades) from taking every replica of
+a component down at once. Deliberately does not guard involuntary
+disruptions (a real outage) -- that's what replicaCount/autoscaling
+minReplicas + the anti-affinity spread in each Deployment are for.
+*/}}
+{{- if and .Values.flagApi.enabled .Values.flagApi.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tombstone.fullname" . }}-flag-api
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.flagApi.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: flag-api
+{{- end }}
+---
+{{- if and .Values.gateway.enabled .Values.gateway.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tombstone.fullname" . }}-gateway
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.gateway.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+{{- end }}
+---
+{{- if and .Values.evaluator.enabled .Values.evaluator.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tombstone.fullname" . }}-evaluator
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.evaluator.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: evaluator
+{{- end }}
+---
+{{- if and .Values.intelligence.enabled .Values.intelligence.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tombstone.fullname" . }}-intelligence
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.intelligence.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: intelligence
+{{- end }}
+---
+{{- if and .Values.marketplace.enabled .Values.marketplace.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tombstone.fullname" . }}-marketplace
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.marketplace.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tombstone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: marketplace
+{{- end }}
