@@ -26,6 +26,7 @@ import type {
   EvaluationContext,
   FlagEnvironmentState,
   FlagPrerequisite,
+  TargetingRule,
 } from "../types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -380,5 +381,185 @@ describe("@tomb-stone/edge — evaluate() prerequisites (SDK-2 follow-up)", () =
       NaN,
     );
     assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
+  });
+});
+
+// The "~30 deferred comments" audit flagged this package's EvaluationReason
+// as reserving RULE_MATCH but never producing it -- targeting_rules has had
+// a real backend REST surface + full evaluation logic in every OTHER SDK
+// since PR #245-251. This suite mirrors @tombstone/core's own
+// "Step 4 — Rule matching" describe block exactly (same fixtures, same
+// operator coverage), confirming this port produces identical results.
+describe("@tomb-stone/edge — evaluate() targeting rules (SDK-2 follow-up part 2)", () => {
+  const ctx: EvaluationContext = { userId: "u", attrs: { plan: "pro" } };
+
+  function flagState(
+    flagKey: string,
+    opts: {
+      rolloutPct?: number;
+      targetingRules?: TargetingRule[];
+    } = {},
+  ): FlagEnvironmentState {
+    return {
+      flagKey,
+      enabled: true,
+      rolloutPct: opts.rolloutPct ?? 0, // 0 by default: proves RULE_MATCH wins over FALLTHROUGH, not the other way around
+      safeDefault: "false",
+      environment: "test",
+      targetingRules: opts.targetingRules,
+    };
+  }
+
+  it("RULE_MATCH: IN operator, ruleId is set", () => {
+    const flag = flagState("f", {
+      targetingRules: [
+        {
+          id: "rule-pro",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro", "enterprise"],
+          variation: "v2",
+          priority: 10,
+        },
+      ],
+    });
+    const r = evaluate<string>(flag, ctx, "default", "f");
+    assert.strictEqual(r.reason, "RULE_MATCH");
+    assert.strictEqual(r.value, "v2");
+    assert.strictEqual(r.ruleId, "rule-pro");
+  });
+
+  it("lower priority number wins (evaluated first)", () => {
+    const flag = flagState("f", {
+      targetingRules: [
+        {
+          id: "low-prio",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "low-prio-var",
+          priority: 99,
+        },
+        {
+          id: "high-prio",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "IN",
+          values: ["pro"],
+          variation: "high-prio-var",
+          priority: 1,
+        },
+      ],
+    });
+    const r = evaluate<string>(flag, ctx, "default", "f");
+    assert.strictEqual(r.value, "high-prio-var");
+    assert.strictEqual(r.ruleId, "high-prio");
+  });
+
+  it("falls through to rollout when no rule matches", () => {
+    const flag = flagState("f", {
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          id: "r1",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "IN",
+          values: ["enterprise"], // ctx.attrs.plan is "pro" — no match
+          variation: "v2",
+          priority: 0,
+        },
+      ],
+    });
+    const r = evaluate<boolean>(flag, ctx, false, "f");
+    assert.strictEqual(r.reason, "FALLTHROUGH");
+    assert.strictEqual(r.value, true);
+  });
+
+  it("GEO_COUNTRY resolves from context.geo, not the generic attribute path", () => {
+    const flag = flagState("f", {
+      targetingRules: [
+        {
+          id: "r1",
+          ruleType: "USER",
+          attribute: "geo.country", // deliberately mismatched vs GEO_COUNTRY's real resolution path
+          operator: "GEO_COUNTRY",
+          values: ["US", "CA"],
+          variation: "geo-var",
+          priority: 0,
+        },
+      ],
+    });
+    const r = evaluate<string>(
+      flag,
+      { userId: "u", geo: { country: "ca" } }, // lowercase — must uppercase-normalize
+      "default",
+      "f",
+    );
+    assert.strictEqual(r.reason, "RULE_MATCH");
+    assert.strictEqual(r.value, "geo-var");
+  });
+
+  it("NOT_IN with an empty values array never matches (fails closed, matching @tombstone/core's PR #246 fix)", () => {
+    const flag = flagState("f", {
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          id: "r1",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "NOT_IN",
+          values: [], // malformed/absent exclusion list
+          variation: "should-never-win",
+          priority: 0,
+        },
+      ],
+    });
+    const r = evaluate<boolean>(flag, ctx, false, "f");
+    assert.strictEqual(
+      r.reason,
+      "FALLTHROUGH",
+      "an empty NOT_IN values array must exclude nothing, not match everything",
+    );
+  });
+
+  it("an unimplemented operator (REGEX) never matches, by design — shared TypeScript-wide parity gap", () => {
+    const flag = flagState("f", {
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          id: "r1",
+          ruleType: "USER",
+          attribute: "plan",
+          operator: "REGEX",
+          values: ["^pro$"],
+          variation: "should-never-win",
+          priority: 0,
+        },
+      ],
+    });
+    const r = evaluate<boolean>(flag, ctx, false, "f");
+    assert.strictEqual(r.reason, "FALLTHROUGH");
+  });
+
+  it("an attribute missing from context never matches (resolveAttribute returns undefined)", () => {
+    const flag = flagState("f", {
+      rolloutPct: 100,
+      targetingRules: [
+        {
+          id: "r1",
+          ruleType: "USER",
+          attribute: "missing_attr",
+          operator: "EQ",
+          values: ["x"],
+          variation: "should-never-win",
+          priority: 0,
+        },
+      ],
+    });
+    const r = evaluate<boolean>(flag, ctx, false, "f");
+    assert.strictEqual(r.reason, "FALLTHROUGH");
   });
 });

@@ -31,7 +31,7 @@ Tombstone/
 ├── packages/sdks/
 │   ├── @flagmind/core/   # TypeScript, npm name @tomb-stone/core — Node.js SDK, 5-step eval pipeline, 168 tests
 │   ├── @flagmind/react/  # TypeScript, npm name @tomb-stone/react — React SDK (hooks + TombstoneProvider)
-│   ├── @flagmind/edge/   # TypeScript, npm name @tomb-stone/edge — Cloudflare Workers KV-backed snapshot + Cron Trigger, 34 tests
+│   ├── @flagmind/edge/   # TypeScript, npm name @tomb-stone/edge — Cloudflare Workers KV-backed snapshot + Cron Trigger, 44 tests
 │   ├── tombstone-java-sdk/, tombstone-ruby-sdk/, tombstone-python-sdk/, tombstone-dotnet-sdk/ # full 5-step pipeline parity SDKs
 │   └── test-contract/vectors.json # shared cross-SDK contract vectors (the "@tombstone/browser" bundle named here in older docs was never built — do not assume it exists)
 ├── packages/sdk-wasm/   # @tombstone/eval — zero-dependency WASM-ready engine, 51 tests
