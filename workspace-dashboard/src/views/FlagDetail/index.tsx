@@ -4,6 +4,7 @@ import { FlagHealthBadge } from "../../components/FlagHealthBadge.js";
 import { CircuitBreakerStatus } from "../../components/CircuitBreakerStatus.js";
 import { AutonomousRolloutToggle } from "../../components/AutonomousRolloutToggle.js";
 import { DependenciesTab } from "../../components/DependenciesTab.js";
+import { TargetingRulesTab } from "../../components/TargetingRulesTab.js";
 import { BlastRadiusBadge } from "../../components/BlastRadiusBadge.js";
 import { EVAL_URL } from "../../config.js";
 
@@ -98,9 +99,9 @@ export default function FlagDetail() {
   const [envStates, setEnvStates] = useState<Record<string, FlagEnvState>>({});
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [activeEnv, setActiveEnv] = useState<Env>("production");
-  const [activeTab, setActiveTab] = useState<"overview" | "dependencies">(
-    "overview",
-  );
+  const [activeTab, setActiveTab] = useState<
+    "overview" | "dependencies" | "targeting-rules"
+  >("overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Scoped per environment, not a single shared flag — otherwise a check/
@@ -346,6 +347,12 @@ export default function FlagDetail() {
         >
           Dependencies
         </button>
+        <button
+          onClick={() => setActiveTab("targeting-rules")}
+          className={`px-4 py-2 rounded ${activeTab === "targeting-rules" ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-300"}`}
+        >
+          Targeting Rules
+        </button>
       </div>
 
       {/* Overview tab content */}
@@ -544,6 +551,18 @@ export default function FlagDetail() {
       {/* Dependencies tab content */}
       {activeTab === "dependencies" && key && (
         <DependenciesTab flagKey={key} apiUrl={apiUrl} token={tok} />
+      )}
+
+      {/* Targeting Rules tab content */}
+      {activeTab === "targeting-rules" && key && (
+        <TargetingRulesTab
+          flagKey={key}
+          apiUrl={apiUrl}
+          token={tok}
+          environment={activeEnv}
+          environments={ENVS}
+          onEnvironmentChange={(env) => setActiveEnv(env as Env)}
+        />
       )}
     </div>
   );
