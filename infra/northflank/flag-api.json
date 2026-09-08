@@ -35,6 +35,7 @@
         "DB_URL": "${SECRET_DB_URL}",
         "REDIS_URL": "${SECRET_REDIS_URL}",
         "JWT_SECRET": "${SECRET_JWT_SECRET}",
+        "TOKEN_HASH_PEPPER": "${SECRET_TOKEN_HASH_PEPPER}",
         "PORT": "8081",
         "EMBEDDING_BACKEND": "bedrock",
         "BEDROCK_ACCESS_KEY_ID": "${SECRET_BEDROCK_ACCESS_KEY_ID}",

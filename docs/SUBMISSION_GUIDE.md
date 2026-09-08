@@ -5,16 +5,16 @@
 
 **Critical naming facts grounded in the actual repo:**
 - Go module: `github.com/tombstone/flag-api` (does NOT match GitHub repo path `sairam0424/Tombstone` — this is a blocker for pkg.go.dev and awesome-go)
-- npm packages: `@tombstone/core`, `@tombstone/react`, `@tombstone/edge`, `@tombstone/browser`, `@tombstone/eval`, `@tombstone/cli`, `@tombstone/mcp`
+- npm packages: `@tomb-stone/core`, `@tomb-stone/react`, `@tomb-stone/edge`, `@tombstone/eval`, `@tomb-stone/cli`, `@tomb-stone/mcp` (no `browser` package was ever built, despite older docs naming one)
 - PyPI SDK name in pyproject.toml: `tombstone` (taken on PyPI by an unrelated debug tool — must rename before publishing)
 - Ruby gem name in gemspec: `tombstone` (taken on RubyGems)
-- Java group: `io.tombstone`, artifact: unnamed (needs artifactId)
+- Java group: `io.tombstone`, artifactId: `tombstone-java-sdk` (already set in `build.gradle`)
 - .NET package: `Tombstone.Client`
 - JetBrains plugin: `Tombstone Feature Flags`, group `io.tombstone`
 - VS Code extension: publisher `tombstone`, name `tombstone-vscode`
 - Helm chart: name `tombstone`, keywords include `feature-flags`, `circuit-breaker`, `blast-radius`
 - Docker: no custom images pushed yet (compose uses upstream images for dependencies)
-- MCP server: `@tombstone/mcp` v0.1.0, 8 tools, Streamable HTTP transport
+- MCP server: `@tomb-stone/mcp` v0.1.0, 9 tools, Streamable HTTP transport
 
 ---
 
@@ -188,23 +188,24 @@ Images to build: `tombstone-flag-api`, `tombstone-gateway`, `tombstone-evaluator
 
 **URL:** https://www.npmjs.com/signup
 
-**Exact packages to publish (all at v0.1.0):**
-- `@tombstone/core` — Node.js SDK
-- `@tombstone/react` — React hooks
-- `@tombstone/edge` — Cloudflare Workers SDK
-- `@tombstone/browser` — browser bundle
-- `@tombstone/eval` — WASM eval engine
-- `@tombstone/cli` — Commander CLI
-- `@tombstone/mcp` — MCP server
+**Exact packages to publish:**
+- `@tomb-stone/core` (dir: `packages/sdks/@flagmind/core`) — Node.js SDK
+- `@tomb-stone/react` (dir: `packages/sdks/@flagmind/react`) — React hooks
+- `@tomb-stone/edge` (dir: `packages/sdks/@flagmind/edge`) — Cloudflare Workers SDK
+- `@tombstone/eval` (dir: `packages/sdk-wasm`) — WASM eval engine (this one package correctly kept the unhyphenated scope)
+- `@tomb-stone/cli` (dir: `workspace-cli`) — Commander CLI
+- `@tomb-stone/mcp` (dir: `workspace-mcp`) — MCP server
+
+No `browser` package exists — an earlier version of this doc named one that was never actually built.
 
 **Steps:**
 1. Register at https://www.npmjs.com/signup. Enable 2FA (mandatory for publishing).
-2. Create the `@tombstone` org scope at https://www.npmjs.com/org/create (if not already created).
+2. Create the `@tomb-stone` org scope at https://www.npmjs.com/org/create (if not already created) — note the hyphen; `@tombstone` was unavailable, which is why every package except `@tombstone/eval` uses the hyphenated scope.
 3. Generate a granular access token: Account Settings → Access Tokens → Generate New Token → Granular → scope to each package → `read and write` permissions.
-4. For each package: `cd packages/sdks/@tombstone/<name> && npm run build && npm publish --access public`
+4. For core/react/edge: `cd packages/sdks/@flagmind/<name> && npm run build && npm publish --access public`
 5. For `@tombstone/eval`: `cd packages/sdk-wasm && npm run build && npm publish --access public`
-6. For `@tombstone/cli`: `cd workspace-cli && npm run build && npm publish --access public`
-7. For `@tombstone/mcp`: `cd workspace-mcp && npm run build && npm publish --access public`
+6. For `@tomb-stone/cli`: `cd workspace-cli && npm run build && npm publish --access public`
+7. For `@tomb-stone/mcp`: `cd workspace-mcp && npm run build && npm publish --access public`
 
 **package.json fields to add/verify in each package before publishing:**
 ```json
@@ -226,7 +227,7 @@ Images to build: `tombstone-flag-api`, `tombstone-gateway`, `tombstone-evaluator
 
 **URL:** https://github.com/open-feature/openfeature.dev
 
-**What to do:** This is the single highest-credibility submission this week. The TypeScript provider already exists at `packages/sdks/@tombstone/core/src/provider.ts`.
+**What to do:** This is the single highest-credibility submission this week. The TypeScript provider already exists at `packages/sdks/@flagmind/core/src/provider.ts` (npm package `@tomb-stone/core`).
 
 **Steps:**
 
@@ -243,13 +244,13 @@ export const Tombstone: Provider = {
     {
       technology: 'JavaScript',
       vendorOfficial: true,
-      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/@tombstone/core',
+      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/@flagmind/core',
       category: ['Server'],
     },
     {
       technology: 'JavaScript',
       vendorOfficial: true,
-      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/@tombstone/react',
+      href: 'https://github.com/sairam0424/Tombstone/tree/main/packages/sdks/@flagmind/react',
       category: ['Client'],
     },
     {
@@ -281,7 +282,7 @@ export const Tombstone: Provider = {
 
 **Steps:**
 
-1. First, publish `@tombstone/mcp` to npm (step 2.2 above must complete first).
+1. First, publish `@tomb-stone/mcp` to npm (step 2.2 above must complete first).
 2. Add `mcpName` to `workspace-mcp/package.json`:
 ```json
 {
@@ -818,14 +819,14 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 
 **URL:** https://central.sonatype.com/register
 
-**Current state:** `packages/sdks/tombstone-java-sdk/build.gradle` has `group = "io.tombstone"` but no `artifactId` explicitly named.
+**Current state:** `packages/sdks/tombstone-java-sdk/build.gradle` has `group = "io.tombstone"` and `artifactId = 'tombstone-java-sdk'` already set.
 
 **Steps when ready:**
 1. Register at https://central.sonatype.com (new Central Portal, not deprecated OSSRH).
 2. Verify namespace `io.tombstone` via DNS TXT record on the `tombstone.io` domain, or via GitHub proof if switching to `io.github.sairam0424`.
 3. Generate and upload a GPG key to `keyserver.ubuntu.com`.
 4. Add `central-publishing-gradle-plugin` to `tombstone-java-sdk/build.gradle`.
-5. Add explicit `artifactId`: `flagmind-java`.
+5. ~~Add explicit `artifactId`~~ — already done: `build.gradle` sets `artifactId = 'tombstone-java-sdk'`.
 6. Run `./gradlew publishToCentralPortal`.
 
 **Estimated time:** 3–4 hours (the GPG + namespace verification steps are the slow part).
@@ -850,14 +851,14 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 
 ### 4.10 RubyGems (Ruby SDK)
 
-**BLOCKER:** `packages/sdks/tombstone-ruby-sdk/flagmind.gemspec` has `s.name = "tombstone"` — this name is taken on RubyGems. Rename to `flagmind-ruby` before publishing.
+~~**BLOCKER:**~~ Already resolved — `packages/sdks/tombstone-ruby-sdk/flagmind.gemspec` (the gemspec FILE is still named `flagmind.gemspec`, but `s.name` inside it is already `"tombstone-ruby-sdk"`, not plain `"tombstone"`, which was taken on RubyGems).
 
-**Steps after renaming:**
+**Steps:**
 1. Register at https://rubygems.org/users/new.
-2. Build: `cd packages/sdks/tombstone-ruby-sdk && gem build flagmind.gemspec` → produces `flagmind-ruby-0.1.0.gem`
-3. Push: `gem push flagmind-ruby-0.1.0.gem`
+2. Build: `cd packages/sdks/tombstone-ruby-sdk && gem build flagmind.gemspec` → produces `tombstone-ruby-sdk-0.2.0.gem` (named from `s.name`/`s.version`, not the `.gemspec` filename — check the gemspec for the current version)
+3. Push: `gem push tombstone-ruby-sdk-0.2.0.gem`
 
-**Estimated time:** 1 hour after the rename is done.
+**Estimated time:** 1 hour.
 
 ---
 
@@ -873,7 +874,7 @@ The `services/marketplace/` integration with Datadog is already built. The PR wo
 > I built Tombstone: a self-hosted alternative to LaunchDarkly/Unleash that adds blast-radius gates, circuit-breaker auto-rollback, and causal incident correlation. The core idea: treat 5,000 active flags as a causal graph of production behavior so you can answer "which flag caused this incident?" rather than "what's the flag value?"
 >
 > - MIT licensed, self-hostable via Docker Compose (`make dev`)
-> - CLI (`@tombstone/cli`), REST API, MCP server (8 tools), VS Code + JetBrains plugins
+> - CLI (`@tomb-stone/cli`), REST API, MCP server (9 tools), VS Code + JetBrains plugins
 > - Dashboard with dark mode at localhost:3000
 > - Go + Python + TypeScript, v2.2.0
 > - GitHub: https://github.com/sairam0424/Tombstone
@@ -957,7 +958,7 @@ This section collects all naming conflicts identified in the repo files that mus
 | Registry | Current name in repo | Conflict? | Recommended name |
 |----------|---------------------|-----------|-----------------|
 | PyPI (SDK) | `tombstone` (`tombstone-python-sdk/pyproject.toml`) | YES — taken | `flagmind` |
-| RubyGems | `tombstone` (`flagmind.gemspec`) | YES — taken | `flagmind-ruby` |
+| RubyGems | `tombstone` (`flagmind.gemspec`) | YES — taken, resolved | `tombstone-ruby-sdk` |
 | Go module | `github.com/tombstone/flag-api` | YES — mismatches GitHub path | `github.com/sairam0424/Tombstone/services/flag-api` or transfer repo to `tombstone` org |
 | npm | `@tombstone/*` | Unverified — check `npmjs.com/org/tombstone` | `@tombstone/*` if scope unclaimed |
 | NuGet | `Tombstone.Client` | Unverified | `Tombstone.Client` (check nuget.org) |

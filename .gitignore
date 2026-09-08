@@ -31,6 +31,10 @@ services/**/main
 # Compiled class output. Only ever contained generated .class files here — the
 # pre-existing `services/*/bin/` rule above covers Go binaries.
 **/bin/
+# .NET's intermediate build directory (project.assets.json, generated .dll,
+# etc.) -- **/bin/ above already covers .NET's final output dir, but never
+# covered this one.
+**/obj/
 
 # IDE
 .idea/
@@ -66,3 +70,12 @@ docs/superpowers/plans/.gitignore
 # TypeScript build cache
 **/*.tsbuildinfo
 .gstack/
+
+# workspace-dashboard's src/ is 100% .ts/.tsx (ESM `.js` import specifiers
+# resolve to them via moduleResolution bundler) -- there is no legitimate
+# .js source here. A stray `tsc` invocation that doesn't respect this
+# project's `noEmit: true` can leave compiled .js twins sitting next to
+# their .tsx/.ts sources; Vitest then silently discovers and runs both,
+# doubling every test count with no signal that half the run is against a
+# dead compiled snapshot instead of live source.
+workspace-dashboard/src/**/*.js

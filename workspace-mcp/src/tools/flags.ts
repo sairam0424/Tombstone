@@ -32,7 +32,8 @@ export const killSwitchTool: Tool = {
       },
       reason: {
         type: "string",
-        description: "Human-readable reason for killing the flag (min 10 chars)",
+        description:
+          "Human-readable reason for killing the flag (min 10 chars)",
         minLength: 10,
       },
     },
@@ -54,7 +55,12 @@ export const blastRadiusTool: Tool = {
       },
       targetState: {
         type: "boolean",
-        description: "The state you intend to flip the flag to (true = enable, false = disable)",
+        description:
+          "The state you intend to flip the flag to (true = enable, false = disable). Kept for API compatibility, but does NOT change the computed risk: the risk being measured is the magnitude of traffic currently exposed to the flag's configured rollout_pct, which is the same population regardless of flip direction (the % who would stop seeing it on a disable is the same % who would start seeing it on an enable).",
+      },
+      environment: {
+        type: "string",
+        description: "Environment (default 'production')",
       },
     },
     required: ["key", "targetState"],
@@ -71,7 +77,8 @@ export const listStaleFlagsTool: Tool = {
     properties: {
       days: {
         type: "number",
-        description: "Flags untouched for more than this many days are considered stale (default 30)",
+        description:
+          "Flags untouched for more than this many days are considered stale (default 30)",
         minimum: 1,
       },
       limit: {
@@ -95,7 +102,8 @@ export const createFlagTool: Tool = {
     properties: {
       key: {
         type: "string",
-        description: "Unique dot-notation key for the flag (e.g. billing.new-invoices.enabled)",
+        description:
+          "Unique dot-notation key for the flag (e.g. billing.new-invoices.enabled)",
         pattern: "^[a-z0-9]+(?:\\.[a-z0-9_-]+)+$",
       },
       description: {
@@ -130,7 +138,8 @@ export const generateCleanupPRTool: Tool = {
     properties: {
       flag_key: {
         type: "string",
-        description: "The flag key to generate a cleanup PR for (e.g. payments.checkout.v2)",
+        description:
+          "The flag key to generate a cleanup PR for (e.g. payments.checkout.v2)",
       },
       flag_name: {
         type: "string",
@@ -170,7 +179,8 @@ export const searchFlagsTool: Tool = {
     properties: {
       q: {
         type: "string",
-        description: "Free-text query (e.g. 'payment flags disabled last week')",
+        description:
+          "Free-text query (e.g. 'payment flags disabled last week')",
       },
       limit: {
         type: "number",
@@ -189,7 +199,7 @@ export const searchFlagsTool: Tool = {
 async function apiFetch(
   url: string,
   apiToken: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
 ): Promise<unknown> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -221,7 +231,7 @@ async function apiFetch(
 export async function handleGetFlag(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
   const key = args.key as string;
   const url = `${apiUrl}/api/v1/flags/${encodeURIComponent(key)}`;
@@ -231,7 +241,7 @@ export async function handleGetFlag(
 export async function handleKillSwitch(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
   const key = args.key as string;
   const reason = args.reason as string;
@@ -250,23 +260,82 @@ export async function handleKillSwitch(
 export async function handleBlastRadius(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
+  // Previously broken against the real backend two independent ways: (1)
+  // this sent the request to flag-api, but /api/v1/blast-radius only
+  // exists on the evaluator service (a different port entirely, same
+  // fix as handleGetDependencyGraph's own port rewrite below); (2) even
+  // pointed at the right service, the real handler reads flag_key/
+  // environment/rollout_pct query params — key/targetState aren't
+  // recognized at all, so every call computed blast radius for an EMPTY
+  // flag_key at the evaluator's own default 100% rollout, silently
+  // ignoring the flag the caller actually asked about.
   const key = args.key as string;
-  const targetState = args.targetState as boolean;
+  const environment = (args.environment as string | undefined) ?? "production";
+
+  // The evaluator's rollout_pct is "the % of traffic that will see the
+  // NEW configuration" — for a flip in either direction, that's the
+  // flag's CURRENT configured rollout_pct for this env (the % who are
+  // either already seeing it, and would stop, or would start seeing it
+  // once enabled). Passing the caller's intended on/off boolean directly
+  // as 0/100 would make the BLOCKED/HIGH traffic-based risk tiers
+  // mathematically unreachable for a disable at any partial rollout —
+  // the identical bug found and fixed in workspace-dashboard's own
+  // kill-switch blast-radius integration.
+  let snapshot: { flags?: Array<{ flag_key: string; rollout_pct: number }> };
+  try {
+    const snapUrl = `${apiUrl}/api/v1/environments/snapshot?environment=${encodeURIComponent(environment)}`;
+    snapshot = (await apiFetch(snapUrl, apiToken)) as typeof snapshot;
+  } catch (e) {
+    throw new Error(
+      `blast-radius: fetching current rollout state failed: ${(e as Error).message}`,
+    );
+  }
+
+  // GetSnapshot returns 200 with an empty flags array for BOTH a
+  // nonexistent environment and a real environment with no matching flag
+  // — there is no "not found" signal to distinguish from "found, 0%
+  // rollout." Treating either case as a silent 100%-rollout fallback (an
+  // earlier version of this fix did) would send a maximally-alarming,
+  // confidently WRONG query to the evaluator for a flag key that simply
+  // doesn't exist or was mistyped: RecentEvaluationCount would be 0 (a
+  // nonexistent flag has no telemetry either), Confidence downgrades to
+  // LOW, and TrafficPctAffected=100 + Confidence=LOW satisfies BLOCKED's
+  // own gate — the single most severe risk tier, for bad input, with no
+  // error ever surfaced (found by adversarial review). Fail loudly
+  // instead: the pre-fix behavior at least 404'd clearly.
+  const match = snapshot.flags?.find((f) => f.flag_key === key);
+  if (!match) {
+    throw new Error(
+      `blast-radius: flag "${key}" not found in environment "${environment}" — check the flag key and environment name`,
+    );
+  }
+  const currentRolloutPct = match.rollout_pct;
 
   const params = new URLSearchParams({
-    key,
-    targetState: String(targetState),
+    flag_key: key,
+    environment,
+    rollout_pct: String(currentRolloutPct),
   });
-  const url = `${apiUrl}/api/v1/blast-radius?${params.toString()}`;
-  return apiFetch(url, apiToken);
+  // Blast radius is computed by the evaluator service (port 8082), not
+  // flag-api (port 8081) — same rewrite pattern as
+  // handleGetDependencyGraph's own intelligence-service (8083) rewrite.
+  const evalUrl = apiUrl.replace(":8081", ":8082").replace("8081", "8082");
+  const url = `${evalUrl}/api/v1/blast-radius?${params.toString()}`;
+  try {
+    return await apiFetch(url, apiToken);
+  } catch (e) {
+    throw new Error(
+      `blast-radius: evaluator computation failed: ${(e as Error).message}`,
+    );
+  }
 }
 
 export async function handleListStaleFlags(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
   const params = new URLSearchParams();
   if (args.days !== undefined) params.set("days", String(args.days));
@@ -280,9 +349,15 @@ export async function handleListStaleFlags(
 export async function handleCreateFlag(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
-  const { key, description, enabled = false, tags, owner } = args as {
+  const {
+    key,
+    description,
+    enabled = false,
+    tags,
+    owner,
+  } = args as {
     key: string;
     description: string;
     enabled?: boolean;
@@ -293,7 +368,7 @@ export async function handleCreateFlag(
   // Validate dot-notation key
   if (!/^[a-z0-9]+(?:\.[a-z0-9_-]+)+$/.test(key)) {
     throw new Error(
-      "Flag key must use dot-notation (e.g. payments.checkout.v2). Only lowercase letters, digits, hyphens, and underscores are allowed in each segment."
+      "Flag key must use dot-notation (e.g. payments.checkout.v2). Only lowercase letters, digits, hyphens, and underscores are allowed in each segment.",
     );
   }
 
@@ -311,7 +386,7 @@ export async function handleCreateFlag(
 export async function handleSearchFlags(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
   const q = args.q as string;
   const limit = args.limit as number | undefined;
@@ -326,7 +401,7 @@ export async function handleSearchFlags(
 export async function handleGenerateCleanupPR(
   args: Record<string, unknown>,
   apiUrl: string,
-  _apiToken: string
+  _apiToken: string,
 ): Promise<unknown> {
   const intelUrl = apiUrl.replace(":8081", ":8083").replace("8081", "8083");
   const body = {
@@ -361,6 +436,55 @@ export const openFeatureSetupTool: Tool = {
   },
 };
 
+export const proposeChangeRequestTool: Tool = {
+  name: "tombstone_propose_change_request",
+  description:
+    "Propose a governed change to a flag's enabled state and/or rollout percentage, routed through Tombstone's four-eyes approval queue instead of writing directly. Use this instead of tombstone_kill_switch or a direct write when you want a human to review a risky change before it takes effect — pairs naturally with tombstone_blast_radius (compute risk, then propose a gated change instead of applying it unilaterally). This tool deliberately omits approve/reject — the backend independently enforces self-approval rejection and admin-only approval permissions regardless of what MCP exposes, so this omission is least-privilege UX, not the actual security boundary.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      flag_key: {
+        type: "string",
+        description: "Dot-notation flag key (e.g. payments.checkout.v2)",
+      },
+      environment: {
+        type: "string",
+        description: "Environment the change applies to",
+      },
+      enabled: {
+        type: "boolean",
+        description: "Proposed enabled state for this environment",
+      },
+      rollout_pct: {
+        type: "number",
+        description: "Proposed rollout percentage (0-100)",
+        minimum: 0,
+        maximum: 100,
+      },
+    },
+    required: ["flag_key", "environment", "enabled", "rollout_pct"],
+    additionalProperties: false,
+  },
+};
+
+export const listChangeRequestsTool: Tool = {
+  name: "tombstone_list_change_requests",
+  description:
+    "List change requests in Tombstone's four-eyes approval queue, optionally filtered by status.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      status: {
+        type: "string",
+        description:
+          "Filter by status (default 'PENDING'; also PENDING/APPROVED/REJECTED/APPLIED)",
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+};
+
 export const getDependencyGraphTool: Tool = {
   name: "tombstone_get_dependency_graph",
   description:
@@ -390,22 +514,21 @@ export const getDependencyGraphTool: Tool = {
 
 // ─── OpenFeature setup handler ────────────────────────────────────────────────
 
-export function handleOpenFeatureSetup(
-  args: Record<string, unknown>
-): unknown {
+export function handleOpenFeatureSetup(args: Record<string, unknown>): unknown {
   const language = args.language as string;
 
   if (language === "typescript") {
     return {
       language: "typescript",
-      package: "@tombstone/core",
-      peer_dependency: "@openfeature/server-sdk (optional — interfaces are bundled inline)",
+      package: "@tomb-stone/core",
+      peer_dependency:
+        "@openfeature/server-sdk (optional — interfaces are bundled inline)",
       instructions: `
 // 1. Install
-npm install @tombstone/core
+npm install @tomb-stone/core
 
 // 2. Create the client and provider
-import { TombstoneClient, TombstoneProvider } from '@tombstone/core';
+import { TombstoneClient, TombstoneProvider } from '@tomb-stone/core';
 
 const tombstoneClient = new TombstoneClient({
   sdkKey: process.env.TOMBSTONE_SDK_KEY!,
@@ -449,13 +572,15 @@ const enabled = await client.getBooleanValue('payments.new-flow', false, {
   if (language === "python") {
     return {
       language: "python",
-      package: "tombstone",
-      peer_dependency: "openfeature-sdk (optional — interfaces are bundled inline)",
+      package: "tombstone-sdk",
+      peer_dependency:
+        "openfeature-sdk (optional — interfaces are bundled inline)",
       instructions: `
-# 1. Install
-pip install tombstone
+# 1. Install (PyPI distribution name is tombstone-sdk; plain "tombstone" is
+# an unrelated package taken by a different debug tool)
+pip install tombstone-sdk
 # or with openfeature-sdk peer dep:
-pip install tombstone openfeature-sdk
+pip install tombstone-sdk openfeature-sdk
 
 # 2. Create the client and provider
 from tombstone import TombstoneClient, TombstoneProvider
@@ -494,13 +619,15 @@ enabled = of_client.get_boolean_value("payments.new-flow", False, of_ctx)
     };
   }
 
-  throw new Error(`Unsupported language: ${language}. Must be "typescript" or "python".`);
+  throw new Error(
+    `Unsupported language: ${language}. Must be "typescript" or "python".`,
+  );
 }
 
 export async function handleGetDependencyGraph(
   args: Record<string, unknown>,
   apiUrl: string,
-  apiToken: string
+  apiToken: string,
 ): Promise<unknown> {
   const flag_key = args.flag_key as string;
   const depth = (args.depth as number | undefined) ?? 1;
@@ -518,6 +645,38 @@ export async function handleGetDependencyGraph(
   return apiFetch(url, apiToken);
 }
 
+export async function handleProposeChangeRequest(
+  args: Record<string, unknown>,
+  apiUrl: string,
+  apiToken: string,
+): Promise<unknown> {
+  const { flag_key, environment, enabled, rollout_pct } = args as {
+    flag_key: string;
+    environment: string;
+    enabled: boolean;
+    rollout_pct: number;
+  };
+
+  const url = `${apiUrl}/api/v1/change-requests`;
+  return apiFetch(url, apiToken, {
+    method: "POST",
+    body: JSON.stringify({ flag_key, environment, enabled, rollout_pct }),
+  });
+}
+
+export async function handleListChangeRequests(
+  args: Record<string, unknown>,
+  apiUrl: string,
+  apiToken: string,
+): Promise<unknown> {
+  const params = new URLSearchParams();
+  if (args.status !== undefined) params.set("status", String(args.status));
+
+  const query = params.toString();
+  const url = `${apiUrl}/api/v1/change-requests${query ? `?${query}` : ""}`;
+  return apiFetch(url, apiToken);
+}
+
 // ─── All tools array (for ListTools response) ────────────────────────────────
 
 export const allTools: Tool[] = [
@@ -530,4 +689,6 @@ export const allTools: Tool[] = [
   generateCleanupPRTool,
   openFeatureSetupTool,
   getDependencyGraphTool,
+  proposeChangeRequestTool,
+  listChangeRequestsTool,
 ];

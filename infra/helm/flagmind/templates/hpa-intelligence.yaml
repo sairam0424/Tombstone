@@ -1,0 +1,28 @@
+{{- if and .Values.intelligence.enabled .Values.intelligence.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tombstone.fullname" . }}-intelligence
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tombstone.fullname" . }}-intelligence
+  minReplicas: {{ .Values.intelligence.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.intelligence.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.intelligence.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.intelligence.autoscaling.targetMemoryUtilizationPercentage }}
+{{- end }}

@@ -29,3 +29,36 @@ data:
   # silently drops the alert's one-click CTA on this Helm/k8s deployment
   # path, the same class of gap INT-4 found for CONSUMER_BACKEND above.
   DASHBOARD_URL: {{ .Values.dashboardUrl | default "" | quote }}
+  # AUD-1: non-secret retention window; flag-api's main.go defaults to 365
+  # if unset, so this is safe to omit, but making it explicit here matches
+  # the DATA-2 pool-tuning vars below and infra/.env.example's own default.
+  AUDIT_LOG_RETENTION_DAYS: {{ .Values.auditLogRetentionDays | default 365 | quote }}
+  # AUD-1b: fail-open when false or when true with no rekorSigningKey
+  # configured in secret.yaml -- never blocks startup either way.
+  REKOR_ENABLED: {{ .Values.rekorEnabled | default false | quote }}
+  # SEC-5: empty means unrestricted login (see main.go's own startup warning
+  # if this folds to zero usable domains) -- matches infra/.env.example's
+  # own default and disclosed tradeoff, not silently overridden here.
+  SSO_ALLOWED_DOMAINS: {{ .Values.ssoAllowedDomains | default "" | quote }}
+  # marketplace's flag-lifecycle webhook receiver -- unset means
+  # notifyMarketplace's dispatch is a no-op (async, fail-open), matching
+  # DASHBOARD_URL/SLACK_WEBHOOK_URL's own "third-party integration is
+  # optional" posture. Defaults to this chart's own in-cluster marketplace
+  # service when enabled, the same pattern FLAG_API_URL above uses.
+  MARKETPLACE_URL: {{ .Values.marketplace.enabled | ternary (printf "http://%s-marketplace:%v" (include "tombstone.fullname" .) .Values.marketplace.service.port) "" | quote }}
+  # INFRA-1: MTLS_ENABLED defaults to false everywhere in this chart (never
+  # set), so this is inert today -- but if it's ever flipped on, flag-api's
+  # cert-generation path (cmd/main.go's WriteCerts) would otherwise write
+  # to the real default /certs, which doesn't exist and isn't mounted on
+  # this chart's now-read-only-root-filesystem Deployments, guaranteeing a
+  # logger.Fatal crash-loop the moment mTLS is enabled (found by
+  # adversarial review of the securityContext hardening in this same PR).
+  # Point it at the /tmp emptyDir every Deployment already mounts instead.
+  CERTS_DIR: "/tmp/certs"
+  # INFRA-1 follow-up: intelligence's Argos rule-generation endpoint
+  # (app/main.py's generate-rule handler) writes pending-approval signal
+  # files under this dir -- the code's own default ("signals", relative to
+  # /app) isn't writable once the intelligence Deployment's root
+  # filesystem is read-only. Points it at the /tmp emptyDir that
+  # Deployment already mounts instead.
+  SIGNALS_DIR: "/tmp/signals"

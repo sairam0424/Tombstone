@@ -7,7 +7,9 @@ metadata:
     {{- include "tombstone.labels" . | nindent 4 }}
     app.kubernetes.io/component: intelligence
 spec:
+  {{- if not .Values.intelligence.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "tombstone.selectorLabels" . | nindent 6 }}
@@ -20,14 +22,29 @@ spec:
     spec:
       serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
       terminationGracePeriodSeconds: 60
+      securityContext:
+        {{- include "tombstone.podSecurityContext" . | nindent 8 }}
+      {{- include "tombstone.topologySpreadConstraints" (dict "component" "intelligence" "context" $) | nindent 6 }}
       containers:
         - name: intelligence
           image: "{{ .Values.global.imageRegistry }}{{ .Values.intelligence.image.repository }}:{{ .Values.intelligence.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "tombstone.containerSecurityContextBase" . | nindent 12 }}
+            readOnlyRootFilesystem: {{ .Values.intelligence.readOnlyRootFilesystem }}
           ports:
             - name: http
               containerPort: {{ .Values.intelligence.service.port }}
               protocol: TCP
+          # Longer tolerance than the 4 Go services -- this image bundles
+          # BAAI/bge-m3 (~400MB) for NLP search, which loads into memory
+          # at process startup, not just at image build time.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.intelligence.service.port }}
+            periodSeconds: 10
+            failureThreshold: 18
           livenessProbe:
             httpGet:
               path: /health
@@ -57,4 +74,10 @@ spec:
             limits:
               cpu: {{ .Values.intelligence.resources.limits.cpu }}
               memory: {{ .Values.intelligence.resources.limits.memory }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

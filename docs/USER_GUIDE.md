@@ -45,7 +45,7 @@ function renderCheckout(cart: Cart) {
 You ship both versions. The flag decides at runtime which one a user gets. Rollout is instant. Rollback is one toggle in a dashboard — no deploy required.
 
 ```typescript
-import { useFlag } from "@tombstone/react";
+import { useFlag } from "@tomb-stone/react";
 
 function renderCheckout(cart: Cart) {
   const useNewCheckout = useFlag("checkout-v2", false);
@@ -675,13 +675,13 @@ The key now appears in `/tombstones`. It can never be used again. Future flag cr
 **Install:**
 
 ```bash
-npm install @tombstone/core
+npm install @tomb-stone/core
 ```
 
 **Basic setup:**
 
 ```typescript
-import { TombstoneClient } from "@tombstone/core";
+import { TombstoneClient } from "@tomb-stone/core";
 
 const client = new TombstoneClient({
   apiUrl: "http://localhost:8081",
@@ -740,7 +740,7 @@ const config = await client.getJsonValue("pricing-config", { tier: "default" });
 
 ```typescript
 import express from "express";
-import { TombstoneClient } from "@tombstone/core";
+import { TombstoneClient } from "@tomb-stone/core";
 
 const app = express();
 const tombstone = new TombstoneClient({
@@ -878,14 +878,14 @@ async def new_checkout():
 **Install:**
 
 ```bash
-npm install @tombstone/react @tombstone/core
+npm install @tomb-stone/react @tomb-stone/core
 ```
 
 **Wrap your app with TombstoneProvider:**
 
 ```tsx
 import React from "react";
-import { TombstoneProvider } from "@tombstone/react";
+import { TombstoneProvider } from "@tomb-stone/react";
 
 function App() {
   return (
@@ -911,7 +911,7 @@ function App() {
 **useFlag hook — the simplest way:**
 
 ```tsx
-import { useFlag } from "@tombstone/react";
+import { useFlag } from "@tomb-stone/react";
 
 function CheckoutPage() {
   // Second argument is the safe default
@@ -930,7 +930,7 @@ function CheckoutPage() {
 While the SDK initializes (first render before flags are fetched), show a skeleton instead of flashing the wrong content.
 
 ```tsx
-import { useFlag, useFlagsReady } from "@tombstone/react";
+import { useFlag, useFlagsReady } from "@tomb-stone/react";
 
 function CheckoutPage() {
   const ready = useFlagsReady();
@@ -948,7 +948,7 @@ function CheckoutPage() {
 **Multivariate flag (A/B test variant):**
 
 ```tsx
-import { useStringFlag } from "@tombstone/react";
+import { useStringFlag } from "@tomb-stone/react";
 
 function HeroBanner() {
   // Returns "control", "headline-a", "headline-b", or the safe default
@@ -973,7 +973,7 @@ Never connect your unit tests to a real flag-api. Tests must be deterministic �
 Use `TombstoneTestClient` instead:
 
 ```typescript
-import { TombstoneTestClient } from "@tombstone/core/testing";
+import { TombstoneTestClient } from "@tomb-stone/core/testing";
 import { renderCheckout } from "./checkout";
 
 describe("Checkout rendering", () => {

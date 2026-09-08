@@ -6,24 +6,23 @@ import io.tombstone.types.TargetingRule;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
-// Disclosed, pre-existing, NOT introduced or fixed by the SDK-4
-// cache-wiping fix (confirmed via git diff -- this get/build/set skeleton
-// is byte-identical before and after): applyEvent and loadSnapshot both
-// do a non-atomic read-modify-write on `state` (get() -> build a new
-// CacheState from that snapshot -> set()) instead of a CAS loop. Two
-// concurrent mutations -- e.g. the SSE listener's applyEvent racing a
-// lag-recovery loadSnapshot -- can both read the same `current`, and
-// whichever set() lands second silently discards the OTHER's entire
-// state, not just the key it touched. Concretely: if a lag-triggered
-// loadSnapshot recovers several dropped flag updates but a concurrent
-// applyEvent (reading the stale pre-recovery snapshot) sets() after it,
-// the whole recovered snapshot is clobbered -- defeating the very
-// lag-recovery mechanism this exists for. Found by adversarial review of
-// the SDK-4 cache-wiping PR; left unfixed here since it's a separate,
-// latent concurrency bug, not something that PR's own change touches or
-// makes newly reachable -- a real fix needs a CAS loop
-// (AtomicReference.updateAndGet or compareAndSet) and is its own,
-// independent piece of work.
+// Every mutator below goes through state.updateAndGet(...), not a plain
+// get()-then-set() pair: AtomicReference.updateAndGet retries the whole
+// compute-next-state function against the LATEST value whenever a
+// concurrent writer's compareAndSet lands first, so two racing mutations
+// (e.g. the SSE listener's applyEvent racing a lag-recovery loadSnapshot)
+// can never silently discard one another's update -- each is folded into
+// whatever state was actually current at the moment it commits, not the
+// value each happened to read at call time. Previously this class used a
+// plain read-modify-write (get() -> build a new CacheState from that
+// snapshot -> set()), disclosed here as a real "lost update" bug: whichever
+// set() landed second would discard the OTHER's entire state, not just the
+// key it touched -- e.g. a lag-triggered loadSnapshot recovering several
+// dropped flag updates could be silently clobbered by a concurrent
+// applyEvent that had read the stale pre-recovery snapshot, defeating the
+// very lag-recovery mechanism this exists for. Found by adversarial review
+// of the SDK-4 cache-wiping PR; fixed here as its own, independent piece of
+// work.
 public class FlagCache {
     // Combines the flag map, BOTH live-event-provenance maps (prerequisites
     // and targetingRules), and the last-applied-snapshot ts into ONE object
@@ -86,88 +85,89 @@ public class FlagCache {
     // last one actually applied prevents that older response from silently
     // clobbering fresher state for every flag, not just prerequisites.
     public void loadSnapshot(List<FlagEnvironmentState> flags, long snapshotTs) {
-        CacheState currentState = state.get();
-        if (currentState.lastSnapshotTs() != NO_SNAPSHOT_YET && snapshotTs < currentState.lastSnapshotTs()) {
-            return;
-        }
-        Map<String, FlagEnvironmentState> current = currentState.flags();
-        Map<String, Boolean> currentFromLiveEvent = currentState.prerequisitesFromLiveEvent();
-        Map<String, Boolean> currentTargetingRulesFromLiveEvent = currentState.targetingRulesFromLiveEvent();
-        Map<String, FlagEnvironmentState> m = new HashMap<>();
-        Map<String, Boolean> nextFromLiveEvent = new HashMap<>();
-        Map<String, Boolean> nextTargetingRulesFromLiveEvent = new HashMap<>();
-        for (FlagEnvironmentState f : flags) {
-            FlagEnvironmentState existing = current.get(f.flagKey());
-            // A live prerequisites_updated event may have already advanced
-            // this flag's prerequisitesUpdatedAt to OR PAST this snapshot's
-            // own ts if the snapshot fetch was still in flight when the live
-            // event arrived and applied -- in that case the snapshot
-            // reflects an OLDER (or, on an exact-tie second, no LATER)
-            // point in time for THIS flag specifically, even though the
-            // snapshot as a whole passed the monotonicity check above
-            // (which only compares against the last *snapshot's* ts, not
-            // any per-flag live update). Uses >=, not >: flag-api's
-            // snapshot endpoint and its prerequisites-event publisher both
-            // derive ts from time.Now().Unix() (1-second resolution), so a
-            // live event and a racing snapshot fetch landing in the same
-            // wall-clock second get an IDENTICAL ts even though the
-            // snapshot's DB read can predate the event's own commit --
-            // applyPrerequisitesEvent's own staleness guard (strict "<")
-            // already treats a tie as "fresh enough to apply", so this
-            // preservation check must treat the SAME tie as "fresh enough
-            // to keep", or the two guards disagree on who wins a tie and
-            // this one silently loses (found by adversarial review of the
-            // Ruby SDK's identical fix, PR #238).
-            //
-            // Also requires prerequisitesFromLiveEvent to be true: without
-            // it, a SECOND snapshot sharing the exact same ts as a FIRST
-            // snapshot (no live event involved at all) would incorrectly
-            // take this same "preserve" branch and freeze prerequisites on
-            // the first snapshot's value forever (found by adversarial
-            // review of this fix's own first draft).
-            boolean keepLivePrerequisites =
-                existing != null &&
-                Boolean.TRUE.equals(currentFromLiveEvent.get(f.flagKey())) &&
-                existing.prerequisitesUpdatedAt() >= snapshotTs;
-            // Identical reasoning to keepLivePrerequisites above, applied
-            // to targetingRules against services/flag-api/internal/api/v1/
-            // targeting_rules.go's TargetingRulesEvent -- see
-            // applyTargetingRulesEvent's own doc comment.
-            boolean keepLiveTargetingRules =
-                existing != null &&
-                Boolean.TRUE.equals(currentTargetingRulesFromLiveEvent.get(f.flagKey())) &&
-                existing.targetingRulesUpdatedAt() >= snapshotTs;
-            m.put(f.flagKey(), new FlagEnvironmentState(
-                f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
-                f.safeDefault(), f.updatedAt(),
-                keepLivePrerequisites ? existing.prerequisites() : f.prerequisites(),
-                keepLiveTargetingRules ? existing.targetingRules() : f.targetingRules(),
-                f.targetList(), f.hashVersion(),
-                keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs,
-                keepLiveTargetingRules ? existing.targetingRulesUpdatedAt() : snapshotTs
-            ));
-            // ONE-SHOT consumption, always false here (never
-            // keepLivePrerequisites/keepLiveTargetingRules): this
-            // loadSnapshot call has now fully resolved the race between
-            // the live event and ITS OWN specific in-flight snapshot.
-            // Re-propagating true would make the protection "sticky",
-            // vetoing a later, independent snapshot that merely happens to
-            // tie the same coarse-resolution second too (found by a second
-            // round of adversarial review of this same fix). Residual,
-            // accepted limitation: two snapshot fetches that were BOTH
-            // already in flight when the SAME live event fired will only
-            // have the first-arriving one correctly blocked; solving that
-            // fully would require a signal finer than flag-api's
-            // 1-second-resolution wall-clock ts.
-            nextFromLiveEvent.put(f.flagKey(), false);
-            nextTargetingRulesFromLiveEvent.put(f.flagKey(), false);
-        }
-        state.set(new CacheState(
-            Collections.unmodifiableMap(m),
-            Collections.unmodifiableMap(nextFromLiveEvent),
-            Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
-            snapshotTs
-        ));
+        state.updateAndGet(currentState -> {
+            if (currentState.lastSnapshotTs() != NO_SNAPSHOT_YET && snapshotTs < currentState.lastSnapshotTs()) {
+                return currentState;
+            }
+            Map<String, FlagEnvironmentState> current = currentState.flags();
+            Map<String, Boolean> currentFromLiveEvent = currentState.prerequisitesFromLiveEvent();
+            Map<String, Boolean> currentTargetingRulesFromLiveEvent = currentState.targetingRulesFromLiveEvent();
+            Map<String, FlagEnvironmentState> m = new HashMap<>();
+            Map<String, Boolean> nextFromLiveEvent = new HashMap<>();
+            Map<String, Boolean> nextTargetingRulesFromLiveEvent = new HashMap<>();
+            for (FlagEnvironmentState f : flags) {
+                FlagEnvironmentState existing = current.get(f.flagKey());
+                // A live prerequisites_updated event may have already advanced
+                // this flag's prerequisitesUpdatedAt to OR PAST this snapshot's
+                // own ts if the snapshot fetch was still in flight when the live
+                // event arrived and applied -- in that case the snapshot
+                // reflects an OLDER (or, on an exact-tie second, no LATER)
+                // point in time for THIS flag specifically, even though the
+                // snapshot as a whole passed the monotonicity check above
+                // (which only compares against the last *snapshot's* ts, not
+                // any per-flag live update). Uses >=, not >: flag-api's
+                // snapshot endpoint and its prerequisites-event publisher both
+                // derive ts from time.Now().Unix() (1-second resolution), so a
+                // live event and a racing snapshot fetch landing in the same
+                // wall-clock second get an IDENTICAL ts even though the
+                // snapshot's DB read can predate the event's own commit --
+                // applyPrerequisitesEvent's own staleness guard (strict "<")
+                // already treats a tie as "fresh enough to apply", so this
+                // preservation check must treat the SAME tie as "fresh enough
+                // to keep", or the two guards disagree on who wins a tie and
+                // this one silently loses (found by adversarial review of the
+                // Ruby SDK's identical fix, PR #238).
+                //
+                // Also requires prerequisitesFromLiveEvent to be true: without
+                // it, a SECOND snapshot sharing the exact same ts as a FIRST
+                // snapshot (no live event involved at all) would incorrectly
+                // take this same "preserve" branch and freeze prerequisites on
+                // the first snapshot's value forever (found by adversarial
+                // review of this fix's own first draft).
+                boolean keepLivePrerequisites =
+                    existing != null &&
+                    Boolean.TRUE.equals(currentFromLiveEvent.get(f.flagKey())) &&
+                    existing.prerequisitesUpdatedAt() >= snapshotTs;
+                // Identical reasoning to keepLivePrerequisites above, applied
+                // to targetingRules against services/flag-api/internal/api/v1/
+                // targeting_rules.go's TargetingRulesEvent -- see
+                // applyTargetingRulesEvent's own doc comment.
+                boolean keepLiveTargetingRules =
+                    existing != null &&
+                    Boolean.TRUE.equals(currentTargetingRulesFromLiveEvent.get(f.flagKey())) &&
+                    existing.targetingRulesUpdatedAt() >= snapshotTs;
+                m.put(f.flagKey(), new FlagEnvironmentState(
+                    f.flagId(), f.flagKey(), f.environment(), f.enabled(), f.rolloutPct(),
+                    f.safeDefault(), f.updatedAt(),
+                    keepLivePrerequisites ? existing.prerequisites() : f.prerequisites(),
+                    keepLiveTargetingRules ? existing.targetingRules() : f.targetingRules(),
+                    f.targetList(), f.hashVersion(),
+                    keepLivePrerequisites ? existing.prerequisitesUpdatedAt() : snapshotTs,
+                    keepLiveTargetingRules ? existing.targetingRulesUpdatedAt() : snapshotTs
+                ));
+                // ONE-SHOT consumption, always false here (never
+                // keepLivePrerequisites/keepLiveTargetingRules): this
+                // loadSnapshot call has now fully resolved the race between
+                // the live event and ITS OWN specific in-flight snapshot.
+                // Re-propagating true would make the protection "sticky",
+                // vetoing a later, independent snapshot that merely happens to
+                // tie the same coarse-resolution second too (found by a second
+                // round of adversarial review of this same fix). Residual,
+                // accepted limitation: two snapshot fetches that were BOTH
+                // already in flight when the SAME live event fired will only
+                // have the first-arriving one correctly blocked; solving that
+                // fully would require a signal finer than flag-api's
+                // 1-second-resolution wall-clock ts.
+                nextFromLiveEvent.put(f.flagKey(), false);
+                nextTargetingRulesFromLiveEvent.put(f.flagKey(), false);
+            }
+            return new CacheState(
+                Collections.unmodifiableMap(m),
+                Collections.unmodifiableMap(nextFromLiveEvent),
+                Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
+                snapshotTs
+            );
+        });
     }
 
     // Immutable update — never mutates existing map. Threads existing's
@@ -181,24 +181,25 @@ public class FlagCache {
     // the next full snapshot refetch restored them (the same bug class
     // found and fixed in the Python SDK's client.py _apply_event).
     public void applyEvent(String flagKey, boolean enabled, int rolloutPct, long ts) {
-        CacheState currentState = state.get();
-        Map<String, FlagEnvironmentState> current = currentState.flags();
-        FlagEnvironmentState existing = current.get(flagKey);
-        if (existing == null) return;
-        FlagEnvironmentState updated = new FlagEnvironmentState(
-            existing.flagId(), existing.flagKey(), existing.environment(),
-            enabled, rolloutPct, existing.safeDefault(), ts,
-            existing.prerequisites(), existing.targetingRules(), existing.targetList(),
-            existing.hashVersion(), existing.prerequisitesUpdatedAt(), existing.targetingRulesUpdatedAt()
-        );
-        Map<String, FlagEnvironmentState> next = new HashMap<>(current);
-        next.put(flagKey, updated);
-        state.set(new CacheState(
-            Collections.unmodifiableMap(next),
-            currentState.prerequisitesFromLiveEvent(),
-            currentState.targetingRulesFromLiveEvent(),
-            currentState.lastSnapshotTs()
-        ));
+        state.updateAndGet(currentState -> {
+            Map<String, FlagEnvironmentState> current = currentState.flags();
+            FlagEnvironmentState existing = current.get(flagKey);
+            if (existing == null) return currentState;
+            FlagEnvironmentState updated = new FlagEnvironmentState(
+                existing.flagId(), existing.flagKey(), existing.environment(),
+                enabled, rolloutPct, existing.safeDefault(), ts,
+                existing.prerequisites(), existing.targetingRules(), existing.targetList(),
+                existing.hashVersion(), existing.prerequisitesUpdatedAt(), existing.targetingRulesUpdatedAt()
+            );
+            Map<String, FlagEnvironmentState> next = new HashMap<>(current);
+            next.put(flagKey, updated);
+            return new CacheState(
+                Collections.unmodifiableMap(next),
+                currentState.prerequisitesFromLiveEvent(),
+                currentState.targetingRulesFromLiveEvent(),
+                currentState.lastSnapshotTs()
+            );
+        });
     }
 
     /**
@@ -219,34 +220,35 @@ public class FlagCache {
      * gap at the point where staleness actually matters.
      */
     public void applyPrerequisitesEvent(String flagKey, List<FlagPrerequisite> prerequisites, long ts) {
-        CacheState currentState = state.get();
-        Map<String, FlagEnvironmentState> current = currentState.flags();
-        FlagEnvironmentState existing = current.get(flagKey);
-        if (existing == null) return;
-        if (ts < existing.prerequisitesUpdatedAt()) return;
-        FlagEnvironmentState updated = new FlagEnvironmentState(
-            existing.flagId(), existing.flagKey(), existing.environment(),
-            existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
-            List.copyOf(prerequisites), existing.targetingRules(), existing.targetList(),
-            existing.hashVersion(), ts, existing.targetingRulesUpdatedAt()
-        );
-        Map<String, FlagEnvironmentState> next = new HashMap<>(current);
-        next.put(flagKey, updated);
-        // Marks this flag's prerequisites as LIVE-sourced -- see
-        // prerequisitesFromLiveEvent's own field comment (on CacheState's
-        // declaration above) for why loadSnapshot needs this distinction,
-        // not just a ts comparison, to decide whether a tied-or-older
-        // incoming snapshot should be allowed to overwrite it. Committed to
-        // `state` in the SAME set() call as the cache update, so a
-        // concurrent reader can never observe one without the other.
-        Map<String, Boolean> nextFromLiveEvent = new HashMap<>(currentState.prerequisitesFromLiveEvent());
-        nextFromLiveEvent.put(flagKey, true);
-        state.set(new CacheState(
-            Collections.unmodifiableMap(next),
-            Collections.unmodifiableMap(nextFromLiveEvent),
-            currentState.targetingRulesFromLiveEvent(),
-            currentState.lastSnapshotTs()
-        ));
+        state.updateAndGet(currentState -> {
+            Map<String, FlagEnvironmentState> current = currentState.flags();
+            FlagEnvironmentState existing = current.get(flagKey);
+            if (existing == null) return currentState;
+            if (ts < existing.prerequisitesUpdatedAt()) return currentState;
+            FlagEnvironmentState updated = new FlagEnvironmentState(
+                existing.flagId(), existing.flagKey(), existing.environment(),
+                existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
+                List.copyOf(prerequisites), existing.targetingRules(), existing.targetList(),
+                existing.hashVersion(), ts, existing.targetingRulesUpdatedAt()
+            );
+            Map<String, FlagEnvironmentState> next = new HashMap<>(current);
+            next.put(flagKey, updated);
+            // Marks this flag's prerequisites as LIVE-sourced -- see
+            // prerequisitesFromLiveEvent's own field comment (on CacheState's
+            // declaration above) for why loadSnapshot needs this distinction,
+            // not just a ts comparison, to decide whether a tied-or-older
+            // incoming snapshot should be allowed to overwrite it. Committed
+            // to `state` in the SAME returned CacheState as the cache update,
+            // so a concurrent reader can never observe one without the other.
+            Map<String, Boolean> nextFromLiveEvent = new HashMap<>(currentState.prerequisitesFromLiveEvent());
+            nextFromLiveEvent.put(flagKey, true);
+            return new CacheState(
+                Collections.unmodifiableMap(next),
+                Collections.unmodifiableMap(nextFromLiveEvent),
+                currentState.targetingRulesFromLiveEvent(),
+                currentState.lastSnapshotTs()
+            );
+        });
     }
 
     /**
@@ -259,31 +261,32 @@ public class FlagCache {
      * comparing against targetingRulesUpdatedAt).
      */
     public void applyTargetingRulesEvent(String flagKey, List<TargetingRule> targetingRules, long ts) {
-        CacheState currentState = state.get();
-        Map<String, FlagEnvironmentState> current = currentState.flags();
-        FlagEnvironmentState existing = current.get(flagKey);
-        if (existing == null) return;
-        if (ts < existing.targetingRulesUpdatedAt()) return;
-        FlagEnvironmentState updated = new FlagEnvironmentState(
-            existing.flagId(), existing.flagKey(), existing.environment(),
-            existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
-            existing.prerequisites(), List.copyOf(targetingRules), existing.targetList(),
-            existing.hashVersion(), existing.prerequisitesUpdatedAt(), ts
-        );
-        Map<String, FlagEnvironmentState> next = new HashMap<>(current);
-        next.put(flagKey, updated);
-        // Marks this flag's targetingRules as LIVE-sourced -- see
-        // targetingRulesFromLiveEvent's own field comment (on CacheState's
-        // declaration above).
-        Map<String, Boolean> nextTargetingRulesFromLiveEvent =
-            new HashMap<>(currentState.targetingRulesFromLiveEvent());
-        nextTargetingRulesFromLiveEvent.put(flagKey, true);
-        state.set(new CacheState(
-            Collections.unmodifiableMap(next),
-            currentState.prerequisitesFromLiveEvent(),
-            Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
-            currentState.lastSnapshotTs()
-        ));
+        state.updateAndGet(currentState -> {
+            Map<String, FlagEnvironmentState> current = currentState.flags();
+            FlagEnvironmentState existing = current.get(flagKey);
+            if (existing == null) return currentState;
+            if (ts < existing.targetingRulesUpdatedAt()) return currentState;
+            FlagEnvironmentState updated = new FlagEnvironmentState(
+                existing.flagId(), existing.flagKey(), existing.environment(),
+                existing.enabled(), existing.rolloutPct(), existing.safeDefault(), existing.updatedAt(),
+                existing.prerequisites(), List.copyOf(targetingRules), existing.targetList(),
+                existing.hashVersion(), existing.prerequisitesUpdatedAt(), ts
+            );
+            Map<String, FlagEnvironmentState> next = new HashMap<>(current);
+            next.put(flagKey, updated);
+            // Marks this flag's targetingRules as LIVE-sourced -- see
+            // targetingRulesFromLiveEvent's own field comment (on CacheState's
+            // declaration above).
+            Map<String, Boolean> nextTargetingRulesFromLiveEvent =
+                new HashMap<>(currentState.targetingRulesFromLiveEvent());
+            nextTargetingRulesFromLiveEvent.put(flagKey, true);
+            return new CacheState(
+                Collections.unmodifiableMap(next),
+                currentState.prerequisitesFromLiveEvent(),
+                Collections.unmodifiableMap(nextTargetingRulesFromLiveEvent),
+                currentState.lastSnapshotTs()
+            );
+        });
     }
 
     public Optional<FlagEnvironmentState> get(String flagKey) {

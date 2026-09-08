@@ -7,7 +7,9 @@ metadata:
     {{- include "tombstone.labels" . | nindent 4 }}
     app.kubernetes.io/component: flag-api
 spec:
+  {{- if not .Values.flagApi.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "tombstone.selectorLabels" . | nindent 6 }}
@@ -20,14 +22,26 @@ spec:
     spec:
       serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
       terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "tombstone.podSecurityContext" . | nindent 8 }}
+      {{- include "tombstone.topologySpreadConstraints" (dict "component" "flag-api" "context" $) | nindent 6 }}
       containers:
         - name: flag-api
           image: "{{ .Values.global.imageRegistry }}{{ .Values.flagApi.image.repository }}:{{ .Values.flagApi.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "tombstone.containerSecurityContextBase" . | nindent 12 }}
+            readOnlyRootFilesystem: {{ .Values.flagApi.readOnlyRootFilesystem }}
           ports:
             - name: http
               containerPort: {{ .Values.flagApi.service.port }}
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.flagApi.service.port }}
+            periodSeconds: 5
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
@@ -54,4 +68,10 @@ spec:
             limits:
               cpu: {{ .Values.flagApi.resources.limits.cpu }}
               memory: {{ .Values.flagApi.resources.limits.memory }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

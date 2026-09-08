@@ -23,6 +23,21 @@ flagApi:
   service:
     type: ClusterIP
     port: 8081
+  # INFRA-1: on by default, matching the plan's "CPU/mem HPAs on by
+  # default" -- minReplicas matches the chart's own replicaCount default
+  # so enabling this doesn't itself change steady-state capacity.
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # INFRA-1: Go binary, no known runtime disk writes outside /tmp (which
+  # every deployment template mounts as an emptyDir regardless).
+  readOnlyRootFilesystem: true
 
 gateway:
   enabled: true
@@ -39,6 +54,29 @@ gateway:
   service:
     type: ClusterIP
     port: 8080
+  # INFRA-1: standard CPU/mem HPA only -- the plan's own "connection-based
+  # HPA (KEDA)" item is deliberately NOT implemented here. gateway's real
+  # /api/v1/gateway/metrics endpoint returns plain JSON (services/gateway/
+  # internal/api/v1/metrics.go), not a Prometheus-scrapeable /metrics
+  # endpoint, and no Prometheus/KEDA operator exists anywhere in this
+  # chart or infra/ -- OBS-1 (a separate, still-open Phase-1 backlog item)
+  # is the real prerequisite for wiring genuine connection-count-based
+  # autoscaling. Shipping a KEDA ScaledObject against the JSON endpoint
+  # now (technically possible via KEDA's generic metrics-api trigger)
+  # would be new scaffolding that looks real but is unverified against
+  # any actual cluster -- the exact anti-pattern this plan exists to
+  # eliminate. CPU/mem HPA is a genuine, if cruder, stopgap until OBS-1
+  # lands real metrics.
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 evaluator:
   enabled: true
@@ -56,10 +94,15 @@ evaluator:
     type: ClusterIP
     port: 8082
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 intelligence:
   enabled: true
@@ -77,6 +120,26 @@ intelligence:
   service:
     type: ClusterIP
     port: 8083
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # INFRA-1 follow-up: the intelligence image now sets HF_HOME to a
+  # world-readable path baked at build time and creates /app/signals
+  # world-writable, but /app/signals isn't reachable once the root
+  # filesystem is actually read-only (chmod bits are irrelevant once the
+  # mount itself is read-only) -- SIGNALS_DIR (configmap.yaml) points the
+  # real runtime write target at the /tmp emptyDir every Deployment
+  # already mounts instead. Verified locally via `docker build` + `docker
+  # run --user 65532:65532 --read-only --tmpfs /tmp` against the real
+  # image (no Kubernetes cluster available, but this is a genuine,
+  # reproducible container-runtime test, not a guess).
+  readOnlyRootFilesystem: true
 
 marketplace:
   enabled: true
@@ -93,6 +156,16 @@ marketplace:
   service:
     type: ClusterIP
     port: 8086
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 secrets:
   dbUrl: ""
@@ -105,6 +178,49 @@ secrets:
   # this codebase's existing posture of treating third-party notification
   # config as optional (see infra/.env.example's own SLACK_WEBHOOK_URL).
   slackWebhookUrl: ""
+  # SEC-4: `required` in secret.yaml, same as dbUrl/redisUrl/jwtToken/apiToken
+  # above -- flag-api's own main.go treats a missing pepper as fatal
+  # (logger.Fatal, secrets.ErrNoPepper) since service/break-glass tokens are
+  # stored only as HMAC(pepper, token); without it no service token can be
+  # authenticated at all. Found missing from this chart entirely -- helm
+  # install as written before this fix would deploy a crash-looping
+  # flag-api on every real cluster.
+  tokenHashPepper: ""
+  # AUD-1/SEC-4: optional -- flag-api's main.go only logs a warning and
+  # disables audit-chain writes/verification (GET /api/v1/audit/verify
+  # returns 503) when unset. Not fatal because a deployment that doesn't
+  # need the audit trail yet should still boot.
+  auditHmacKey: ""
+  # SEC-4: optional -- unset only disables GET /api/v1/compliance/export
+  # (503), matching complianceSigner's own non-fatal treatment in main.go.
+  complianceSigningKey: ""
+  # SEC-5: optional -- SCIM fails closed (503) rather than open when unset,
+  # so this being blank is safe, just leaves SCIM provisioning unusable.
+  scimToken: ""
+  # AUD-1b: optional -- gated by REKOR_ENABLED below; NewRekorClient itself
+  # warns and disables submission rather than submitting signature-less
+  # entries if REKOR_ENABLED=true but this is unset.
+  rekorSigningKey: ""
+
+# SEC-4: key ID tag included alongside each compliance export signature so a
+# future key rotation can be distinguished. Non-secret (not the key material
+# itself), matches infra/.env.example's own default.
+complianceSigningKeyId: "v1"
+
+# AUD-1: retention window (days) the audit-log pruning loop is allowed to
+# archive past. Non-secret; matches infra/.env.example's own default.
+auditLogRetentionDays: 365
+
+# AUD-1b: gates Rekor transparency-log submission; fail-open when false (the
+# default) or when true with no rekorSigningKey configured above.
+rekorEnabled: false
+
+# SEC-5: without this, any user your IdP successfully authenticates is
+# allowed to log in regardless of email domain (see main.go's own startup
+# warning if this is set but folds to zero usable domains). Comma-separated,
+# e.g. "example.com,corp.example.com". Empty means unrestricted -- matches
+# infra/.env.example's own default and disclosed tradeoff.
+ssoAllowedDomains: ""
 
 # EVAL-2: base URL of workspace-dashboard, used by evaluator to build the
 # "View in Dashboard" link in the Slack auto-rollback alert above. Optional --

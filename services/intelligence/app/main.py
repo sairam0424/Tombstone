@@ -738,8 +738,15 @@ async def generate_anomaly_rule(flag_key: str, request: Request):
         )
 
     error_rates = list(metrics.error_rates)
-    signals_dir = (
-        "signals"  # relative to repo root; service runs from repo root in Docker
+    # Overridable via SIGNALS_DIR so a deployment with a read-only root
+    # filesystem (INFRA-1's securityContext hardening) can point this at a
+    # real writable volume (e.g. /tmp) instead of the relative "signals"
+    # path, which resolves under /app -- not writable once the image's
+    # own filesystem is read-only. Default unchanged for existing
+    # deployments that don't set this.
+    signals_dir = os.environ.get(
+        "SIGNALS_DIR",
+        "signals",  # relative to repo root; service runs from repo root in Docker
     )
 
     result = await generate_rule(flag_key, error_rates, signals_dir)

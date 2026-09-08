@@ -57,6 +57,37 @@ in one direction — they do not match either TS or Python exactly on every poin
 design rationale and decision matrix are documented in the v1.5.0 design specification
 (available on branch `docs/v1.5.0-upgrade-design`).
 
+## Live Streaming (`prerequisites_updated` / `targeting_rules_updated`)
+
+Added after v1.5.0 — all 5 SDKs (TypeScript, Python, Java, Ruby, .NET) consume both events;
+not yet reflected in the Parity Matrix's own historical framing below, which predates this
+work.
+
+flag-api publishes a dedicated SSE event (a `"kind"` discriminator on the wire, never
+colliding with a free-text `FlagEvent.Reason`) whenever a mutation commits:
+- `prerequisites_updated` on `AddPrerequisite`/`DeletePrerequisite`, carrying the flag's
+  current FULL prerequisite list (not a delta).
+- `targeting_rules_updated` on the targeting-rules CRUD endpoints
+  (`POST/GET/DELETE /flags/{key}/environments/{env}/rules[/{id}]`), same full-list shape.
+
+Both fan out through gateway's live SSE path, the reconnect XRANGE replay path, and the DLQ
+reclaim path identically. Every SDK applies the identical design, independent of language:
+
+- A `>=` staleness guard comparing the cached `*_updated_at` timestamp against the event's
+  `ts` — rejects a strictly-older event (`<`, not `<=`).
+- A one-shot live-event-provenance flag per flag+field, reset to `false` on every subsequent
+  snapshot load — lets a live event be trusted over a *stale* snapshot without pinning that
+  trust forever (a snapshot with a genuinely newer `ts` still wins the next time).
+- Malformed/non-object SSE payloads are swallowed, not raised — one bad event must not crash
+  the whole streaming connection.
+- An event for a `flag_key` not present in the local cache is a no-op.
+
+**Known, disclosed, shared limitation across all 5 SDKs**: the one-shot provenance guard
+only protects the FIRST snapshot received after a live event. A SECOND independent snapshot
+whose own `ts` is still older than the live event's can regress `*_updated_at` backward —
+this needs a signal finer than flag-api's 1-second wall-clock `ts` to close fully, and is
+accepted as a shared limitation, not a per-SDK bug, until that signal exists.
+
 ## Parity Matrix (updated after v1.5.0)
 
 | Capability | TypeScript | Python | Java | Ruby | .NET |
@@ -68,10 +99,14 @@ design rationale and decision matrix are documented in the v1.5.0 design specifi
 | Hash v1 (MurmurHash3) | Yes | Yes | Yes | Yes | Yes |
 | Hash v2 (FNV-1a) | Yes | Yes | Yes (canonical) | Yes (canonical) | Yes (canonical) |
 | Semver/date operators | No | Yes | Yes (canonical) | Yes (canonical) | Yes (canonical) |
-| GEO operators | Yes | No | Yes (canonical) | Yes (canonical) | Yes (canonical) |
-| Regex operator | No | No | No | No | No |
+| GEO operators | Yes | Yes (added post-v1.5.0, targeting_rules streaming work) | Yes (canonical) | Yes (canonical) | Yes (canonical) |
+| Regex operator | No (declared, returns `false`) | No (declared, returns `false`) | No (declared, returns `false`) | No (declared, returns `false`) | No (declared, returns `false`) |
 | Cross-language contract vectors | Hash-only | Hash-only | Full (v1.2 vectors) | Full (v1.2 vectors) | Full (v1.2 vectors) |
+| Live `prerequisites_updated` streaming | Yes | Yes | Yes | Yes | Yes |
+| Live `targeting_rules_updated` streaming | Yes | Yes | Yes | Yes | Yes |
 
-*(This table is illustrative of the target end-state after Phases 2-4 of the v1.5.0 plan
-complete — update the Java/Ruby/.NET "Yes (canonical)" cells to reflect actual merged state
-as each SDK's PR lands, per this project's read-the-actual-code verification discipline.)*
+*(The v1.5.0 plan's own Phases 2-4 completed some time ago — every "Yes (canonical)" cell
+above reflects actually-merged, live-code-verified state as of the live-streaming rows'
+addition, not a target end-state anymore. Keep it that way: update this table when a real
+PR changes the underlying behavior, per this project's read-the-actual-code verification
+discipline — don't let it drift back into aspirational language.)*

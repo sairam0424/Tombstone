@@ -11,8 +11,8 @@ All `v2-phase/*` branches have been merged and closed. All v2.1.0 phases are
 complete. The v2.1.0 release ships the full platform: 8 services (flag-api,
 gateway, evaluator, intelligence, gitops-sync, ast-rewriter, marketplace,
 tombstone-operator), the v2 5-step evaluation engine, ensemble anomaly
-detection, the MCP server, all SDKs (@tombstone/core, @tombstone/react,
-@tombstone/edge, @tombstone/eval, Python, Ruby, Java, .NET), Kubernetes
+detection, the MCP server, all SDKs (@tomb-stone/core, @tomb-stone/react,
+@tomb-stone/edge, @tombstone/eval, Python, Ruby, Java, .NET), Kubernetes
 operator, Helm multi-region charts, SLSA Level 2 supply-chain hardening, and
 the Loop-Engineer governance harness (flag-cleanup, incident-response,
 rollout-advisor, governance loops).

@@ -27,9 +27,9 @@ Every GitHub Release includes CycloneDX SBOMs for all SDK packages and the flag-
 
 | Artifact | File attached to release |
 |----------|--------------------------|
-| `@tombstone/core` (Node SDK) | `tombstone-core-sbom.json` |
-| `@tombstone/react` (React SDK) | `tombstone-react-sbom.json` |
-| `@tombstone/edge` (Edge SDK) | `tombstone-edge-sbom.json` |
+| `@tomb-stone/core` (Node SDK) | `tombstone-core-sbom.json` |
+| `@tomb-stone/react` (React SDK) | `tombstone-react-sbom.json` |
+| `@tomb-stone/edge` (Edge SDK) | `tombstone-edge-sbom.json` |
 | `tombstone-flag-api` (Go service) | `tombstone-flag-api-sbom.json` |
 
 Each SBOM is signed with [cosign](https://github.com/sigstore/cosign) using keyless signing via GitHub OIDC. The corresponding `.bundle` file (e.g. `tombstone-core-sbom.bundle`) is also attached to the release.

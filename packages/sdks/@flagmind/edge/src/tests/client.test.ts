@@ -269,3 +269,119 @@ describe("@tomb-stone/edge — EdgeFlagClient prerequisite parsing + evaluation"
     );
   });
 });
+
+describe("@tomb-stone/edge — EdgeFlagClient targeting_rules parsing + evaluation", () => {
+  it("parses a real snake_case snapshot's targeting_rules and RULE_MATCHes on it end-to-end", async () => {
+    const kv = new FakeKV();
+    kv.seed("production", {
+      environment: "production",
+      hash: "h1",
+      ts: 1,
+      flags: [
+        {
+          flag_key: "f",
+          enabled: true,
+          rollout_pct: 0, // 0: proves RULE_MATCH wins over FALLTHROUGH, not the other way around
+          safe_default: "false",
+          environment: "production",
+          targeting_rules: [
+            {
+              id: "rule-pro",
+              rule_type: "USER",
+              attribute: "plan",
+              operator: "IN",
+              values: ["pro", "enterprise"],
+              variation: "v2",
+              priority: 10,
+            },
+          ],
+        },
+      ],
+    });
+    const client = new EdgeFlagClient({
+      kv: kv as never,
+      environment: "production",
+    });
+
+    const result = await client.evaluate<string>("f", {
+      userId: "u",
+      attrs: { plan: "pro" },
+    });
+    assert.strictEqual(result.reason, "RULE_MATCH");
+    assert.strictEqual(result.value, "v2");
+    assert.strictEqual(result.ruleId, "rule-pro");
+  });
+
+  it("a malformed (null) targeting_rules entry on one flag does not poison parsing of the ENTIRE snapshot", async () => {
+    const kv = new FakeKV();
+    kv.seed("production", {
+      environment: "production",
+      hash: "h1",
+      ts: 1,
+      flags: [
+        {
+          flag_key: "unaffected-flag",
+          enabled: true,
+          rollout_pct: 100,
+          safe_default: "false",
+          environment: "production",
+          // No targeting_rules at all -- must be completely unaffected by
+          // the OTHER flag's malformed entry below.
+        },
+        {
+          flag_key: "malformed-flag",
+          enabled: true,
+          rollout_pct: 0,
+          safe_default: "false",
+          environment: "production",
+          targeting_rules: [null],
+        },
+      ],
+    });
+    const client = new EdgeFlagClient({
+      kv: kv as never,
+      environment: "production",
+    });
+
+    const unaffected = await client.evaluate<boolean>("unaffected-flag", {
+      userId: "u",
+    });
+    assert.strictEqual(unaffected.reason, "FALLTHROUGH");
+    assert.strictEqual(unaffected.value, true);
+
+    const malformed = await client.evaluate<boolean>("malformed-flag", {
+      userId: "u",
+    });
+    assert.strictEqual(
+      malformed.reason,
+      "FALLTHROUGH",
+      "a null rule entry must be filtered out, not thrown on",
+    );
+  });
+
+  it("flags with no targeting_rules field at all evaluate normally (backward compatible)", async () => {
+    const kv = new FakeKV();
+    kv.seed("production", {
+      environment: "production",
+      hash: "h1",
+      ts: 1,
+      flags: [
+        {
+          flag_key: "f",
+          enabled: true,
+          rollout_pct: 100,
+          safe_default: "false",
+          environment: "production",
+        },
+      ],
+    });
+    const client = new EdgeFlagClient({
+      kv: kv as never,
+      environment: "production",
+    });
+
+    const result = await client.evaluate<boolean>("f", { userId: "u" });
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+});

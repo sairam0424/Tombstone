@@ -1,4 +1,4 @@
-{{- if .Values.evaluator.autoscaling.enabled }}
+{{- if and .Values.evaluator.enabled .Values.evaluator.autoscaling.enabled }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -19,4 +19,10 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.evaluator.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.evaluator.autoscaling.targetMemoryUtilizationPercentage }}
 {{- end }}
