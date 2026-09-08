@@ -1,11 +1,11 @@
-# @tombstone/cli
+# @tomb-stone/cli
 
 CLI for Tombstone feature flag management. Supports listing, inspecting, enabling, disabling, and rolling out flags across environments.
 
 ## Install
 
 ```bash
-npm install -g @tombstone/cli
+npm install -g @tomb-stone/cli
 ```
 
 ## Authentication

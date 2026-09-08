@@ -85,7 +85,7 @@ GitHub shows the social preview on link unfurls in Slack, Twitter, LinkedIn, Dis
 
 ### 5. npm Package Keywords
 
-`@tombstone/core` on npm is indexed for keyword search. Add keywords to `workspace-dashboard/src/../packages/sdks/@tombstone/core/package.json`:
+`@tomb-stone/core` on npm is indexed for keyword search. Add keywords to `packages/sdks/@flagmind/core/package.json`:
 
 ```json
 "keywords": [
@@ -101,7 +101,7 @@ GitHub shows the social preview on link unfurls in Slack, Twitter, LinkedIn, Dis
 ]
 ```
 
-Same for `@tombstone/react`, `@tombstone/edge`, `@tombstone/eval`. npm search indexes title + description + keywords — the README weight is confirmed but undocumented in rank order, so keywords field is the safe bet.
+Same for `@tomb-stone/react`, `@tomb-stone/edge`, `@tombstone/eval`. npm search indexes title + description + keywords — the README weight is confirmed but undocumented in rank order, so keywords field is the safe bet.
 
 ---
 
@@ -210,9 +210,9 @@ CNCF Sandbox is the cloud-native equivalent of being listed on a prestigious ind
 
 Beyond just interested-parties.md, registering Tombstone as an official OpenFeature provider puts it in the OpenFeature ecosystem index — surfaced at `openfeature.dev/ecosystem`.
 
-**Requirements:** Implement the OpenFeature Provider interface (already done in `@tombstone/core`), pass the OpenFeature conformance test suite, submit PR to `open-feature/openfeature.dev`.
+**Requirements:** Implement the OpenFeature Provider interface (already done in `@tomb-stone/core`), pass the OpenFeature conformance test suite, submit PR to `open-feature/openfeature.dev`.
 
-**Tombstone already has:** `TombstoneProvider` in `packages/sdks/@tombstone/core/src/provider.ts` — verify it passes the conformance suite, then register.
+**Tombstone already has:** `TombstoneProvider` in `packages/sdks/@flagmind/core/src/provider.ts` — verify it passes the conformance suite, then register.
 
 ---
 
@@ -312,7 +312,7 @@ LinkedIn's algorithm distributes technical articles to non-followers via interes
 | Signal | Tool | Target |
 |--------|------|--------|
 | GitHub stars | `star-history.com` | 100 in first month |
-| npm weekly downloads | npmjs.com/@tombstone/core | 500/week by month 3 |
+| npm weekly downloads | npmjs.com/@tomb-stone/core | 500/week by month 3 |
 | Go Report Card grade | goreportcard.com | A+ before awesome-go PR |
 | Google Search impressions | Google Search Console | Index within 2 weeks |
 | HN Show HN points | Hacker News | >100 points = front page |

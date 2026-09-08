@@ -68,7 +68,7 @@ The core idea: treat 5,000 active flags as a causal graph of production behavior
 so you can answer "which flag caused this incident?" rather than "what's the flag value?"
 
 - MIT licensed, self-hostable via Docker Compose (`make dev` — zero config for local dev)
-- CLI (@tombstone/cli), REST API, MCP server (8 tools), VS Code + JetBrains plugins
+- CLI (@tomb-stone/cli), REST API, MCP server (9 tools), VS Code + JetBrains plugins
 - Dashboard with dark mode at localhost:3000
 - Go + Python + TypeScript, v1.0.0
 - GitHub: https://github.com/sairam0424/Tombstone
@@ -88,7 +88,7 @@ Let me know if it's a fit for the newsletter.
 Hey everyone — I wanted to share Tombstone, a self-hosted feature flag intelligence
 platform that ships a fully spec-compliant OpenFeature provider out of the box.
 
-The OpenFeature provider is in `packages/sdks/@tombstone/core/src/provider.ts` and
+The OpenFeature provider is in `packages/sdks/@flagmind/core/src/provider.ts` and
 implements the full evaluation lifecycle (BEFORE/AFTER/ERROR/FINALLY hooks, typed
 ResolutionDetails, ProviderEvents). Drop-in with `OpenFeature.setProvider(new TombstoneProvider(client))`.
 

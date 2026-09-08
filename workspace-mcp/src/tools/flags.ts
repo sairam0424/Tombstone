@@ -520,15 +520,15 @@ export function handleOpenFeatureSetup(args: Record<string, unknown>): unknown {
   if (language === "typescript") {
     return {
       language: "typescript",
-      package: "@tombstone/core",
+      package: "@tomb-stone/core",
       peer_dependency:
         "@openfeature/server-sdk (optional — interfaces are bundled inline)",
       instructions: `
 // 1. Install
-npm install @tombstone/core
+npm install @tomb-stone/core
 
 // 2. Create the client and provider
-import { TombstoneClient, TombstoneProvider } from '@tombstone/core';
+import { TombstoneClient, TombstoneProvider } from '@tomb-stone/core';
 
 const tombstoneClient = new TombstoneClient({
   sdkKey: process.env.TOMBSTONE_SDK_KEY!,
@@ -572,14 +572,15 @@ const enabled = await client.getBooleanValue('payments.new-flow', false, {
   if (language === "python") {
     return {
       language: "python",
-      package: "tombstone",
+      package: "tombstone-sdk",
       peer_dependency:
         "openfeature-sdk (optional — interfaces are bundled inline)",
       instructions: `
-# 1. Install
-pip install tombstone
+# 1. Install (PyPI distribution name is tombstone-sdk; plain "tombstone" is
+# an unrelated package taken by a different debug tool)
+pip install tombstone-sdk
 # or with openfeature-sdk peer dep:
-pip install tombstone openfeature-sdk
+pip install tombstone-sdk openfeature-sdk
 
 # 2. Create the client and provider
 from tombstone import TombstoneClient, TombstoneProvider
