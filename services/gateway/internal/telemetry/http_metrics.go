@@ -102,3 +102,25 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }
+
+// Flush makes *statusRecorder itself satisfy http.Flusher.
+//
+// Embedding http.ResponseWriter (the field above) only promotes methods
+// that are part of THAT INTERFACE's own method set (Header/Write/
+// WriteHeader) -- it does NOT promote Flush, even when the concrete writer
+// actually assigned to the field also implements http.Flusher, because Go's
+// method promotion through an embedded interface is bounded by the
+// interface's declared type, not the dynamic value underneath it. Without
+// this, internal/api/v1.SSEHandler.Stream's own `w.(http.Flusher)` type
+// assertion silently fails and every SSE connection gets "streaming not
+// supported" (500) the moment this middleware is registered ahead of
+// it -- which cmd/main.go's `r.Use(httpMetrics)` always does, globally, for
+// every route. Found by actually connecting a real SDK to this gateway
+// through its real middleware chain end to end, something no existing
+// test does (every handler test here calls Stream directly, bypassing
+// this middleware entirely).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

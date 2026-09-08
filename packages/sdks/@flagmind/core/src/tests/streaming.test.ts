@@ -75,6 +75,81 @@ const baseConfig: TombstoneClientConfig = {
   maxReconnectMs: 5,
 };
 
+describe("SSEStreamClient — auth header injection (eventsource v3)", () => {
+  // Regression test for a real bug found by actually authenticating this SDK
+  // against a live gateway end to end (not this file's own FakeEventSource,
+  // which stubs the whole EventSource global and so could never catch this):
+  // openConnection() used to pass `{ headers: { Authorization: ... } }` as
+  // EventSource's second constructor argument. The npm `eventsource` v3
+  // package's real EventSourceInit type only reads `withCredentials` and
+  // `fetch` from that argument (confirmed against its own dist/index.cjs —
+  // `_fetch` is set from `eventSourceInitDict?.fetch`, and its internal
+  // getRequestOptions_fn builds the actual request's headers as only
+  // `{Accept, Last-Event-ID}`) — `headers` was silently ignored, so no
+  // Authorization header was EVER sent and gateway's auth middleware
+  // correctly 401'd every real connection this SDK ever made. eventsource
+  // v3's supported mechanism for custom headers is a caller-supplied `fetch`
+  // override instead.
+  beforeEach(() => {
+    (globalThis as unknown as { EventSource: unknown }).EventSource =
+      FakeEventSource;
+    FakeEventSource.instances = [];
+  });
+
+  it("injects the Authorization bearer header via the `fetch` override, not the ignored `headers` init option", async () => {
+    const client = new SSEStreamClient(
+      { ...baseConfig, sdkKey: "secret-bearer-value" },
+      (_e: FlagEvent) => {},
+    );
+    client.connect();
+
+    const es = FakeEventSource.instances[0];
+    const opts = es.opts as {
+      fetch?: (input: unknown, init?: unknown) => unknown;
+      headers?: unknown;
+    };
+
+    assert.equal(
+      opts.headers,
+      undefined,
+      "must not rely on the plain `headers` init option -- eventsource v3 never reads it, so it would be silently ignored and no Authorization header would ever be sent",
+    );
+    assert.equal(
+      typeof opts.fetch,
+      "function",
+      "must supply a fetch override to inject the Authorization header (eventsource v3's only supported mechanism for custom headers)",
+    );
+
+    let capturedInit: { headers?: Record<string, string> } | undefined;
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = ((
+      _input: unknown,
+      init?: { headers?: Record<string, string> },
+    ) => {
+      capturedInit = init;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as typeof fetch;
+
+    try {
+      await opts.fetch!("http://example.test/stream", {
+        headers: { Accept: "text/event-stream" },
+      });
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+
+    assert.equal(
+      capturedInit?.headers?.Authorization,
+      "Bearer secret-bearer-value",
+    );
+    // The request's own existing headers (built internally by eventsource,
+    // e.g. Accept/Last-Event-ID) must survive the merge, not be clobbered.
+    assert.equal(capturedInit?.headers?.Accept, "text/event-stream");
+
+    client.disconnect();
+  });
+});
+
 describe("SSEStreamClient — onReconnect callback", () => {
   beforeEach(() => {
     // Re-assert THIS file's own EventSource stub -- mocha requires every

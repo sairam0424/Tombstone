@@ -312,3 +312,48 @@ func TestHTTPMetrics_PanicRecordedAndRePanicked(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPMetrics_WrappedWriterSatisfiesHTTPFlusher is a regression test for
+// a real bug found by actually running gateway's SSE endpoint through its
+// real middleware chain end to end (not calling the handler directly, which
+// every OTHER test in this file/package does): statusRecorder embeds
+// http.ResponseWriter (the narrow interface), so Go only promotes methods
+// declared on THAT interface (Header/Write/WriteHeader) -- Flush is not
+// one of them, even though the concrete writer underneath almost always
+// implements it too. Any downstream handler that does `w.(http.Flusher)`
+// (internal/api/v1.SSEHandler.Stream does exactly this) got a false "not
+// supported" and returned 500 for every single SSE connection, since
+// HTTPMetrics is registered globally (cmd/main.go's `r.Use(httpMetrics)`)
+// ahead of every route.
+func TestHTTPMetrics_WrappedWriterSatisfiesHTTPFlusher(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := provider.Meter("test")
+
+	mw, err := HTTPMetrics(meter)
+	if err != nil {
+		t.Fatalf("HTTPMetrics: %v", err)
+	}
+
+	var sawFlusher bool
+	r := chi.NewRouter()
+	r.Use(mw)
+	r.Get("/api/v1/stream", func(w http.ResponseWriter, req *http.Request) {
+		f, ok := w.(http.Flusher)
+		sawFlusher = ok
+		if ok {
+			f.Flush()
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	r.ServeHTTP(rec, req)
+
+	if !sawFlusher {
+		t.Fatal("the ResponseWriter passed to a handler behind HTTPMetrics does not satisfy http.Flusher -- every SSE/streaming handler that type-asserts on this would get \"streaming not supported\" and 500 instead of ever streaming")
+	}
+	if !rec.Flushed {
+		t.Fatal("statusRecorder.Flush() did not forward to the underlying ResponseWriter's real Flush()")
+	}
+}
