@@ -72,7 +72,7 @@ Or use `npx` after publishing to npm:
   "mcpServers": {
     "tombstone": {
       "command": "npx",
-      "args": ["-y", "@tombstone/mcp"],
+      "args": ["-y", "@tomb-stone/mcp"],
       "env": {
         "TOMBSTONE_API_URL": "http://localhost:8081",
         "TOMBSTONE_TOKEN": "your-api-token-here"

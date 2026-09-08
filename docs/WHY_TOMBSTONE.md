@@ -256,7 +256,7 @@ Every flag change, approval, rejection, rollback, kill switch activation, and to
 
 **Fit: High.**
 
-`@tombstone/edge` is a Cloudflare Workers SDK backed by KV snapshot storage. Evaluation happens at the edge — no origin round-trip for flag resolution. A Cron Trigger syncs the snapshot on a configurable schedule. The WASM engine (`@tombstone/eval`) is zero-dependency and works in any WASM runtime.
+`@tomb-stone/edge` is a Cloudflare Workers SDK backed by KV snapshot storage. Evaluation happens at the edge — no origin round-trip for flag resolution. A Cron Trigger syncs the snapshot on a configurable schedule. The WASM engine (`@tombstone/eval`) is zero-dependency and works in any WASM runtime.
 
 ---
 

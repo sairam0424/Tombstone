@@ -61,7 +61,7 @@ All examples below use the local flag-api at `http://localhost:8081` with the de
 ### TypeScript (Node.js)
 
 ```typescript
-import { TombstoneClient } from "@tombstone/core";
+import { TombstoneClient } from "@tomb-stone/core";
 
 const client = new TombstoneClient({
   apiUrl: "http://localhost:8081",
@@ -92,7 +92,7 @@ print("my-first-flag:", result["value"])  # True
 ### React
 
 ```tsx
-import { TombstoneProvider, useFlag } from "@tombstone/react";
+import { TombstoneProvider, useFlag } from "@tomb-stone/react";
 
 function App() {
   return (
@@ -229,5 +229,5 @@ curl http://localhost:8082/api/v1/blast-radius/my-first-flag
 
 - **[GLOSSARY.md](./GLOSSARY.md)** — definitions for every term used in Tombstone (Blast Radius, Circuit Breaker, Tombstoning, etc.)
 - **Architecture deep-dive** — read `ARCHITECTURE.md` in the repo root for the full causal graph model and service interaction patterns
-- **SDK reference** — `packages/sdks/@tombstone/core/README.md` for the full TypeScript SDK API including `TombstoneTestClient` for deterministic tests
+- **SDK reference** — `packages/sdks/@flagmind/core/README.md` (npm package `@tomb-stone/core`) for the full TypeScript SDK API including `TombstoneTestClient` for deterministic tests
 - **Production setup** — `infra/` for Helm charts and Terraform modules when you are ready to deploy beyond local dev

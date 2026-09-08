@@ -119,10 +119,10 @@ jobs:
       - name: npm install
         run: npm install
 
-      - name: build @tombstone/core
+      - name: build @tomb-stone/core
         run: npm run build
 
-      - name: test @tombstone/core (evaluation + contract + streaming/lag)
+      - name: test @tomb-stone/core (evaluation + contract + streaming/lag)
         run: npm test
 
   wasm-eval-engine:

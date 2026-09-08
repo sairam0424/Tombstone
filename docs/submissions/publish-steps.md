@@ -161,10 +161,12 @@ dotnet nuget push Tombstone.Client.0.1.0.nupkg \
 ```bash
 cd packages/sdks/tombstone-ruby-sdk
 
-# Build gem (name is now flagmind-ruby — tombstone was taken)
+# Build gem (gemspec file is still named flagmind.gemspec, but s.name inside
+# it is "tombstone-ruby-sdk" — plain "tombstone" was taken on RubyGems)
 gem build flagmind.gemspec
-# Produces: flagmind-ruby-0.1.0.gem
+# Produces: tombstone-ruby-sdk-0.2.0.gem (named from s.name + s.version, not
+# from the .gemspec filename — check the gemspec for the current version)
 
 # Register at rubygems.org
-gem push flagmind-ruby-0.1.0.gem
+gem push tombstone-ruby-sdk-0.2.0.gem
 ```

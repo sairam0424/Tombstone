@@ -8,12 +8,12 @@ Runs in: **Node.js**, **browser**, **Deno**, **Bun**, **Cloudflare Workers**, an
 
 ## Why @tombstone/eval?
 
-`@tombstone/core` depends on `murmurhash` and `eventsource` — npm packages that
+`@tomb-stone/core` depends on `murmurhash` and `eventsource` — npm packages that
 do not run in all JavaScript runtimes. `@tombstone/eval` eliminates both
 dependencies by inlining:
 
 - **MurmurHash3 x86 32-bit** — exact port of the `murmurhash` npm `v3()` method,
-  producing identical bucket assignments to `@tombstone/core`
+  producing identical bucket assignments to `@tomb-stone/core`
 - **FNV-32a** — used as the building block for hash v2
 
 The result is a single TypeScript file with no external imports that runs
@@ -67,7 +67,7 @@ const result: EvalResult = evaluate(flag, context, false);
 
 ### `evaluate(flag, context, defaultValue)`
 
-Runs 3 of `@tombstone/core`'s 5 evaluation-pipeline steps on a single
+Runs 3 of `@tomb-stone/core`'s 5 evaluation-pipeline steps on a single
 `FlagState` (see "Evaluation Pipeline" below for which 3, and what's not
 yet implemented).
 
@@ -99,7 +99,7 @@ function isInRollout(
 
 ## Evaluation Pipeline
 
-`evaluate()` implements 3 of `@tombstone/core`'s 5 pipeline steps — Core's
+`evaluate()` implements 3 of `@tomb-stone/core`'s 5 pipeline steps — Core's
 step 2 (prerequisites) and step 3 (individual target list) are **not yet
 implemented** here, since they require looking up other flags via a
 cache/lookup abstraction this zero-dependency engine doesn't yet expose
@@ -108,9 +108,9 @@ cache/lookup abstraction this zero-dependency engine doesn't yet expose
 1. **Guard** — flag must be defined (returns `ERROR` if missing)
 2. **OFF check** — `flag.enabled` must be `true` (returns `OFF` with
    `flag.safeDefault`, converted to `defaultValue`'s type — NOT the
-   caller's `defaultValue` verbatim, matching `@tombstone/core` exactly)
+   caller's `defaultValue` verbatim, matching `@tomb-stone/core` exactly)
 3. **Targeting rules** — rules sorted by `priority` ascending (`0` =
-   highest priority, matching `@tombstone/core`); first match returns
+   highest priority, matching `@tomb-stone/core`); first match returns
    `RULE_MATCH`
 4. **Rollout hash check** — `isInRollout()` with `flag.hashVersion`
 5. **Default fallthrough** — returns `defaultValue` with reason `FALLTHROUGH`
@@ -122,7 +122,7 @@ Both hash algorithms are inlined — no external packages.
 | `hashVersion` | Algorithm | Notes |
 |---|---|---|
 | `1` (default) | MurmurHash3 x86 32-bit | Identical to `murmurhash` npm `v3()` |
-| `2` | Double-FNV32a, 10,000-bucket | `inner = fnv32a(flagKey+userId)`, `outer = fnv32a(String(inner))`, `bucket = (outer % 10000) / 10000` — same algorithm as `@tombstone/core`'s `isInRollout` hashVersion===2 branch |
+| `2` | Double-FNV32a, 10,000-bucket | `inner = fnv32a(flagKey+userId)`, `outer = fnv32a(String(inner))`, `bucket = (outer % 10000) / 10000` — same algorithm as `@tomb-stone/core`'s `isInRollout` hashVersion===2 branch |
 
 ```typescript
 // Hash v1 (MurmurHash3)
@@ -132,7 +132,7 @@ isInRollout('my_flag', 'u123', 50, 1);
 isInRollout('my_flag', 'u123', 50, 2);
 ```
 
-Both hash algorithms produce bucket assignments that match `@tombstone/core`
+Both hash algorithms produce bucket assignments that match `@tomb-stone/core`
 for the same inputs, byte-for-byte, verified against the real cross-SDK
 contract vectors in `packages/sdks/test-contract/vectors.json` (not a
 hand-copied fixture).
@@ -210,9 +210,9 @@ import { evaluate, isInRollout } from 'npm:@tombstone/eval';
 import { evaluate, isInRollout } from '@tombstone/eval';
 ```
 
-## Relationship to @tombstone/core
+## Relationship to @tomb-stone/core
 
-| Feature | `@tombstone/eval` | `@tombstone/core` |
+| Feature | `@tombstone/eval` | `@tomb-stone/core` |
 |---|---|---|
 | Dependencies | None | `murmurhash`, `eventsource` |
 | SSE streaming | No | Yes |
@@ -231,7 +231,7 @@ Use `@tombstone/eval` when you need evaluation without a persistent SSE
 connection — edge functions, browser bundles, serverless cold starts, or any
 non-Node runtime, **and your flags don't rely on prerequisites or individual
 user targeting** (not yet supported here — see the pipeline gap above). Use
-`@tombstone/core` for long-lived server processes, or any flag that needs the
+`@tomb-stone/core` for long-lived server processes, or any flag that needs the
 full 5-step pipeline.
 
 ## Tests

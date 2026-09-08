@@ -1,5 +1,5 @@
-import type { TombstoneClient } from './client.js';
-import type { EvaluationContext } from './types.js';
+import type { TombstoneClient } from "./client.js";
+import type { EvaluationContext } from "./types.js";
 
 // ─── OpenFeature interface definitions (inline — no peer dep required) ────────
 
@@ -19,26 +19,26 @@ export interface OpenFeatureEvaluationContext {
 // ─── Reason mapping ───────────────────────────────────────────────────────────
 
 const REASON_MAP: Record<string, string> = {
-  OFF: 'DISABLED',
-  FALLTHROUGH: 'DEFAULT',
-  TARGET_MATCH: 'TARGETING_MATCH',
-  RULE_MATCH: 'TARGETING_MATCH',
-  PREREQUISITE_FAILED: 'DEFAULT',
-  ERROR: 'ERROR',
+  OFF: "DISABLED",
+  FALLTHROUGH: "DEFAULT",
+  TARGET_MATCH: "TARGETING_MATCH",
+  RULE_MATCH: "TARGETING_MATCH",
+  PREREQUISITE_FAILED: "DEFAULT",
+  ERROR: "ERROR",
 };
 
 function mapReason(flagMindReason: string): string {
-  return REASON_MAP[flagMindReason] ?? 'UNKNOWN';
+  return REASON_MAP[flagMindReason] ?? "UNKNOWN";
 }
 
 function buildEvaluationContext(
-  context: OpenFeatureEvaluationContext | undefined
+  context: OpenFeatureEvaluationContext | undefined,
 ): EvaluationContext {
   const { targetingKey, ...rest } = context ?? {};
   const attrs: Record<string, string> = {};
 
   for (const [k, v] of Object.entries(rest)) {
-    if (typeof v === 'string') {
+    if (typeof v === "string") {
       attrs[k] = v;
     } else if (v !== undefined && v !== null) {
       attrs[k] = String(v);
@@ -46,7 +46,7 @@ function buildEvaluationContext(
   }
 
   return {
-    userId: targetingKey ?? 'anonymous',
+    userId: targetingKey ?? "anonymous",
     ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
   };
 }
@@ -57,8 +57,8 @@ function buildEvaluationContext(
  * OpenFeature Provider for Tombstone.
  *
  * Usage:
- *   import { TombstoneClient } from '@tombstone/core';
- *   import { TombstoneProvider } from '@tombstone/core';
+ *   import { TombstoneClient } from '@tomb-stone/core';
+ *   import { TombstoneProvider } from '@tomb-stone/core';
  *   import { OpenFeature } from '@openfeature/server-sdk';
  *
  *   const client = new TombstoneClient({ sdkKey: '...', environment: 'production', defaults: {} });
@@ -66,7 +66,7 @@ function buildEvaluationContext(
  *   await OpenFeature.setProviderAndWait(provider);
  */
 export class TombstoneProvider {
-  readonly metadata = { name: 'flagmind' };
+  readonly metadata = { name: "flagmind" };
 
   constructor(private readonly client: TombstoneClient) {}
 
@@ -79,20 +79,20 @@ export class TombstoneProvider {
   async resolveBooleanEvaluation(
     flagKey: string,
     defaultValue: boolean,
-    context?: OpenFeatureEvaluationContext
+    context?: OpenFeatureEvaluationContext,
   ): Promise<ResolutionDetails<boolean>> {
     try {
       const ctx = buildEvaluationContext(context);
       const result = this.client.evaluate<boolean>(flagKey, ctx);
       return {
-        value: typeof result.value === 'boolean' ? result.value : defaultValue,
+        value: typeof result.value === "boolean" ? result.value : defaultValue,
         reason: mapReason(result.reason),
       };
     } catch (e: unknown) {
       return {
         value: defaultValue,
-        reason: 'ERROR',
-        errorCode: 'GENERAL',
+        reason: "ERROR",
+        errorCode: "GENERAL",
         errorMessage: e instanceof Error ? e.message : String(e),
       };
     }
@@ -101,20 +101,20 @@ export class TombstoneProvider {
   async resolveStringEvaluation(
     flagKey: string,
     defaultValue: string,
-    context?: OpenFeatureEvaluationContext
+    context?: OpenFeatureEvaluationContext,
   ): Promise<ResolutionDetails<string>> {
     try {
       const ctx = buildEvaluationContext(context);
       const result = this.client.evaluate<string>(flagKey, ctx);
       return {
-        value: typeof result.value === 'string' ? result.value : defaultValue,
+        value: typeof result.value === "string" ? result.value : defaultValue,
         reason: mapReason(result.reason),
       };
     } catch (e: unknown) {
       return {
         value: defaultValue,
-        reason: 'ERROR',
-        errorCode: 'GENERAL',
+        reason: "ERROR",
+        errorCode: "GENERAL",
         errorMessage: e instanceof Error ? e.message : String(e),
       };
     }
@@ -123,20 +123,20 @@ export class TombstoneProvider {
   async resolveNumberEvaluation(
     flagKey: string,
     defaultValue: number,
-    context?: OpenFeatureEvaluationContext
+    context?: OpenFeatureEvaluationContext,
   ): Promise<ResolutionDetails<number>> {
     try {
       const ctx = buildEvaluationContext(context);
       const result = this.client.evaluate<number>(flagKey, ctx);
       return {
-        value: typeof result.value === 'number' ? result.value : defaultValue,
+        value: typeof result.value === "number" ? result.value : defaultValue,
         reason: mapReason(result.reason),
       };
     } catch (e: unknown) {
       return {
         value: defaultValue,
-        reason: 'ERROR',
-        errorCode: 'GENERAL',
+        reason: "ERROR",
+        errorCode: "GENERAL",
         errorMessage: e instanceof Error ? e.message : String(e),
       };
     }
@@ -145,13 +145,13 @@ export class TombstoneProvider {
   async resolveObjectEvaluation<T extends object>(
     flagKey: string,
     defaultValue: T,
-    context?: OpenFeatureEvaluationContext
+    context?: OpenFeatureEvaluationContext,
   ): Promise<ResolutionDetails<T>> {
     try {
       const ctx = buildEvaluationContext(context);
       const result = this.client.evaluate<T>(flagKey, ctx);
       const isObject =
-        typeof result.value === 'object' &&
+        typeof result.value === "object" &&
         result.value !== null &&
         !Array.isArray(result.value);
       return {
@@ -161,8 +161,8 @@ export class TombstoneProvider {
     } catch (e: unknown) {
       return {
         value: defaultValue,
-        reason: 'ERROR',
-        errorCode: 'GENERAL',
+        reason: "ERROR",
+        errorCode: "GENERAL",
         errorMessage: e instanceof Error ? e.message : String(e),
       };
     }

@@ -1,4 +1,4 @@
-# @tombstone/core
+# @tomb-stone/core
 
 Node.js SDK for Tombstone — in-process flag evaluation with SSE streaming.
 
@@ -7,13 +7,13 @@ Node.js SDK for Tombstone — in-process flag evaluation with SSE streaming.
 ## Installation
 
 ```bash
-npm install @tombstone/core
+npm install @tomb-stone/core
 ```
 
 ## Quick Start
 
 ```typescript
-import { TombstoneClient } from '@tombstone/core';
+import { TombstoneClient } from '@tomb-stone/core';
 
 const client = new TombstoneClient({
   sdkKey: process.env.TOMBSTONE_SDK_KEY!,
@@ -100,7 +100,7 @@ Every flag evaluation runs through five sequential steps:
 ### EvaluationContext with Geo and Device
 
 ```typescript
-import type { EvaluationContext } from '@tombstone/core';
+import type { EvaluationContext } from '@tomb-stone/core';
 
 const context: EvaluationContext = {
   userId: 'u_abc123',        // opaque hash — never raw PII
@@ -164,7 +164,7 @@ evaluation if they fail.
 
 ## OpenFeature Provider
 
-`@tombstone/core` ships a native OpenFeature server-side provider. Install the
+`@tomb-stone/core` ships a native OpenFeature server-side provider. Install the
 OpenFeature SDK as a peer dependency:
 
 ```bash
@@ -173,8 +173,8 @@ npm install @openfeature/server-sdk
 
 ```typescript
 import { OpenFeature } from '@openfeature/server-sdk';
-import { TombstoneProvider } from '@tombstone/core';
-import { TombstoneClient } from '@tombstone/core';
+import { TombstoneProvider } from '@tomb-stone/core';
+import { TombstoneClient } from '@tomb-stone/core';
 
 const client = new TombstoneClient({
   sdkKey: process.env.TOMBSTONE_SDK_KEY!,
@@ -200,7 +200,7 @@ Use `TombstoneTestClient` in tests — it requires no network connection and
 gives fully deterministic, override-driven evaluation.
 
 ```typescript
-import { TombstoneTestClient } from '@tombstone/core';
+import { TombstoneTestClient } from '@tomb-stone/core';
 
 // Create an isolated client (all flags return their default)
 const client = TombstoneTestClient.createIsolated();
@@ -255,10 +255,10 @@ evaluation.
 The package exposes four entry points:
 
 ```typescript
-import { TombstoneClient, TombstoneTestClient } from '@tombstone/core';
-import { EvaluationEngine } from '@tombstone/core/evaluation';
-import { SSEStreamClient } from '@tombstone/core/streaming';
-import { /* admin types */ } from '@tombstone/core/admin';
+import { TombstoneClient, TombstoneTestClient } from '@tomb-stone/core';
+import { EvaluationEngine } from '@tomb-stone/core/evaluation';
+import { SSEStreamClient } from '@tomb-stone/core/streaming';
+import { /* admin types */ } from '@tomb-stone/core/admin';
 ```
 
 ## TypeScript
