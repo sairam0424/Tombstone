@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { INTEL_URL } from '../config.js';
+import { useState, useEffect, useRef } from "react";
+import { INTEL_URL, ENABLE_INTELLIGENCE } from "../config.js";
 
 interface PosteriorData {
   alpha: number;
@@ -25,9 +25,15 @@ interface Props {
   currentRolloutPct: number;
 }
 
-export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPct }: Props) {
+export function AutonomousRolloutToggle({
+  flagKey,
+  environment,
+  currentRolloutPct,
+}: Props) {
   const [posterior, setPosterior] = useState<PosteriorData | null>(null);
-  const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
+  const [recommendation, setRecommendation] = useState<Recommendation | null>(
+    null,
+  );
   const [toggling, setToggling] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +42,7 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
   const fetchPosterior = async () => {
     try {
       const res = await fetch(
-        `${INTEL_URL}/api/v1/rollout/posterior/${flagKey}?environment=${environment}`
+        `${INTEL_URL}/api/v1/rollout/posterior/${flagKey}?environment=${environment}`,
       );
       if (!res.ok) return;
       const data = (await res.json()) as PosteriorData;
@@ -52,7 +58,7 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
       if (!res.ok) return;
       const data = (await res.json()) as { recommendations?: Recommendation[] };
       const match = data.recommendations?.find(
-        r => r.flag_key === flagKey && r.environment === environment
+        (r) => r.flag_key === flagKey && r.environment === environment,
       );
       setRecommendation(match ?? null);
     } catch {
@@ -61,6 +67,17 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
   };
 
   useEffect(() => {
+    // Experiments/index.tsx and GovernanceDash/index.tsx both gate their
+    // INTEL_URL calls on this flag ("services are hidden until explicitly
+    // enabled," per config.ts's own comment) -- this component never did,
+    // so every FlagDetail page load fired a real network request against
+    // the intelligence service regardless, producing a console error (and,
+    // locally, a connection-refused) on every single load whenever
+    // intelligence isn't running -- found by actually loading this page in
+    // a real browser end to end. The component already renders nothing
+    // when `posterior` stays null, so this only removes the noise, not a
+    // visible regression.
+    if (!ENABLE_INTELLIGENCE) return;
     void fetchPosterior();
   }, [flagKey, environment]);
 
@@ -90,12 +107,12 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
     setToggling(true);
     setError(null);
     const endpoint = posterior.autonomous_enabled
-      ? '/api/v1/rollout/disable'
-      : '/api/v1/rollout/enable';
+      ? "/api/v1/rollout/disable"
+      : "/api/v1/rollout/enable";
     try {
       const res = await fetch(`${INTEL_URL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ flag_key: flagKey, environment }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -113,8 +130,8 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
     setError(null);
     try {
       const res = await fetch(`${INTEL_URL}/api/v1/rollout/update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           flag_key: flagKey,
           environment,
@@ -135,135 +152,136 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
   if (currentRolloutPct >= 100) return null;
   if (!posterior) return null;
 
-  const confidencePct = posterior.total_observations > 0
-    ? Math.round((posterior.alpha / (posterior.alpha + posterior.beta)) * 100)
-    : 0;
+  const confidencePct =
+    posterior.total_observations > 0
+      ? Math.round((posterior.alpha / (posterior.alpha + posterior.beta)) * 100)
+      : 0;
 
   const styles = {
     container: {
-      background: '#0d1117',
-      border: '1px solid #21262d',
-      borderRadius: '8px',
-      padding: '16px',
-      marginTop: '16px',
+      background: "#0d1117",
+      border: "1px solid #21262d",
+      borderRadius: "8px",
+      padding: "16px",
+      marginTop: "16px",
     } as React.CSSProperties,
     toggleRow: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
     } as React.CSSProperties,
     label: {
-      color: '#e6edf3',
-      fontSize: '13px',
+      color: "#e6edf3",
+      fontSize: "13px",
       fontWeight: 600,
-      display: 'flex',
-      alignItems: 'center',
-      gap: '8px',
+      display: "flex",
+      alignItems: "center",
+      gap: "8px",
     } as React.CSSProperties,
     badge: {
-      display: 'inline-block',
-      padding: '2px 8px',
-      borderRadius: '4px',
-      fontSize: '11px',
+      display: "inline-block",
+      padding: "2px 8px",
+      borderRadius: "4px",
+      fontSize: "11px",
       fontWeight: 600,
     } as React.CSSProperties,
     badgeEnabled: {
-      background: '#1a3a1a',
-      color: '#3fb950',
-      border: '1px solid #2ea043',
+      background: "#1a3a1a",
+      color: "#3fb950",
+      border: "1px solid #2ea043",
     } as React.CSSProperties,
     badgeDisabled: {
-      background: '#1c1c1c',
-      color: '#8b949e',
-      border: '1px solid #30363d',
+      background: "#1c1c1c",
+      color: "#8b949e",
+      border: "1px solid #30363d",
     } as React.CSSProperties,
     button: {
-      padding: '6px 14px',
-      borderRadius: '6px',
-      fontSize: '12px',
+      padding: "6px 14px",
+      borderRadius: "6px",
+      fontSize: "12px",
       fontWeight: 600,
-      cursor: 'pointer',
-      border: 'none',
-      transition: 'background 0.15s',
+      cursor: "pointer",
+      border: "none",
+      transition: "background 0.15s",
     } as React.CSSProperties,
     enableButton: {
-      background: '#238636',
-      color: '#e6edf3',
+      background: "#238636",
+      color: "#e6edf3",
     } as React.CSSProperties,
     disableButton: {
-      background: '#21262d',
-      color: '#8b949e',
+      background: "#21262d",
+      color: "#8b949e",
     } as React.CSSProperties,
     disabledButton: {
       opacity: 0.5,
-      cursor: 'not-allowed',
+      cursor: "not-allowed",
     } as React.CSSProperties,
     recommendationCard: {
-      background: '#161b22',
-      border: '1px solid #21262d',
-      borderRadius: '6px',
-      padding: '12px',
-      marginTop: '12px',
+      background: "#161b22",
+      border: "1px solid #21262d",
+      borderRadius: "6px",
+      padding: "12px",
+      marginTop: "12px",
     } as React.CSSProperties,
     recTitle: {
-      color: '#8b949e',
-      fontSize: '11px',
+      color: "#8b949e",
+      fontSize: "11px",
       fontWeight: 600,
-      letterSpacing: '0.05em',
-      textTransform: 'uppercase' as const,
-      marginBottom: '8px',
+      letterSpacing: "0.05em",
+      textTransform: "uppercase" as const,
+      marginBottom: "8px",
     } as React.CSSProperties,
     recGrid: {
-      display: 'grid',
-      gridTemplateColumns: '1fr 1fr 1fr',
-      gap: '8px',
-      marginBottom: '10px',
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: "8px",
+      marginBottom: "10px",
     } as React.CSSProperties,
     recCell: {
-      background: '#0d1117',
-      borderRadius: '4px',
-      padding: '8px 10px',
+      background: "#0d1117",
+      borderRadius: "4px",
+      padding: "8px 10px",
     } as React.CSSProperties,
     recCellLabel: {
-      color: '#6e7681',
-      fontSize: '10px',
-      marginBottom: '2px',
+      color: "#6e7681",
+      fontSize: "10px",
+      marginBottom: "2px",
     } as React.CSSProperties,
     recCellValue: {
-      color: '#e6edf3',
-      fontSize: '14px',
+      color: "#e6edf3",
+      fontSize: "14px",
       fontWeight: 700,
     } as React.CSSProperties,
     reasonText: {
-      color: '#8b949e',
-      fontSize: '12px',
-      marginBottom: '10px',
-      lineHeight: '1.5',
+      color: "#8b949e",
+      fontSize: "12px",
+      marginBottom: "10px",
+      lineHeight: "1.5",
     } as React.CSSProperties,
     applyButton: {
-      background: '#1f6feb',
-      color: '#e6edf3',
-      padding: '6px 14px',
-      borderRadius: '6px',
-      fontSize: '12px',
+      background: "#1f6feb",
+      color: "#e6edf3",
+      padding: "6px 14px",
+      borderRadius: "6px",
+      fontSize: "12px",
       fontWeight: 600,
-      cursor: 'pointer',
-      border: 'none',
+      cursor: "pointer",
+      border: "none",
     } as React.CSSProperties,
     errorText: {
-      color: '#f85149',
-      fontSize: '11px',
-      marginTop: '8px',
+      color: "#f85149",
+      fontSize: "11px",
+      marginTop: "8px",
     } as React.CSSProperties,
     divider: {
-      borderTop: '1px solid #21262d',
-      marginTop: '12px',
-      paddingTop: '12px',
+      borderTop: "1px solid #21262d",
+      marginTop: "12px",
+      paddingTop: "12px",
     } as React.CSSProperties,
     observationsText: {
-      color: '#6e7681',
-      fontSize: '11px',
-      marginTop: '8px',
+      color: "#6e7681",
+      fontSize: "11px",
+      marginTop: "8px",
     } as React.CSSProperties,
   };
 
@@ -272,8 +290,15 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
       <div style={styles.toggleRow}>
         <span style={styles.label}>
           Autonomous Rollout
-          <span style={{ ...styles.badge, ...(posterior.autonomous_enabled ? styles.badgeEnabled : styles.badgeDisabled) }}>
-            {posterior.autonomous_enabled ? 'ENABLED' : 'DISABLED'}
+          <span
+            style={{
+              ...styles.badge,
+              ...(posterior.autonomous_enabled
+                ? styles.badgeEnabled
+                : styles.badgeDisabled),
+            }}
+          >
+            {posterior.autonomous_enabled ? "ENABLED" : "DISABLED"}
           </span>
         </span>
         <button
@@ -281,20 +306,23 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
           disabled={toggling}
           style={{
             ...styles.button,
-            ...(posterior.autonomous_enabled ? styles.disableButton : styles.enableButton),
+            ...(posterior.autonomous_enabled
+              ? styles.disableButton
+              : styles.enableButton),
             ...(toggling ? styles.disabledButton : {}),
           }}
         >
           {toggling
-            ? 'Updating…'
+            ? "Updating…"
             : posterior.autonomous_enabled
-            ? 'Disable'
-            : 'Enable'}
+              ? "Disable"
+              : "Enable"}
         </button>
       </div>
 
       <div style={styles.observationsText}>
-        {posterior.total_observations} observations · alpha {posterior.alpha.toFixed(2)} · beta {posterior.beta.toFixed(2)}
+        {posterior.total_observations} observations · alpha{" "}
+        {posterior.alpha.toFixed(2)} · beta {posterior.beta.toFixed(2)}
       </div>
 
       {posterior.autonomous_enabled && (
@@ -305,17 +333,31 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
               <div style={styles.recGrid}>
                 <div style={styles.recCell}>
                   <div style={styles.recCellLabel}>Confidence</div>
-                  <div style={{ ...styles.recCellValue, color: confidencePct >= 80 ? '#3fb950' : confidencePct >= 60 ? '#d29922' : '#f85149' }}>
+                  <div
+                    style={{
+                      ...styles.recCellValue,
+                      color:
+                        confidencePct >= 80
+                          ? "#3fb950"
+                          : confidencePct >= 60
+                            ? "#d29922"
+                            : "#f85149",
+                    }}
+                  >
                     {confidencePct}%
                   </div>
                 </div>
                 <div style={styles.recCell}>
                   <div style={styles.recCellLabel}>Current %</div>
-                  <div style={styles.recCellValue}>{recommendation.current_pct}%</div>
+                  <div style={styles.recCellValue}>
+                    {recommendation.current_pct}%
+                  </div>
                 </div>
                 <div style={styles.recCell}>
                   <div style={styles.recCellLabel}>Suggested %</div>
-                  <div style={{ ...styles.recCellValue, color: '#58a6ff' }}>{recommendation.recommended_pct}%</div>
+                  <div style={{ ...styles.recCellValue, color: "#58a6ff" }}>
+                    {recommendation.recommended_pct}%
+                  </div>
                 </div>
               </div>
               {recommendation.reason && (
@@ -330,17 +372,17 @@ export function AutonomousRolloutToggle({ flagKey, environment, currentRolloutPc
                     ...(applying ? styles.disabledButton : {}),
                   }}
                 >
-                  {applying ? 'Applying…' : 'Apply Recommendation'}
+                  {applying ? "Applying…" : "Apply Recommendation"}
                 </button>
               )}
               {!recommendation.should_advance && (
-                <div style={{ color: '#6e7681', fontSize: '11px' }}>
+                <div style={{ color: "#6e7681", fontSize: "11px" }}>
                   No advance recommended at this time.
                 </div>
               )}
             </div>
           ) : (
-            <div style={{ color: '#6e7681', fontSize: '12px' }}>
+            <div style={{ color: "#6e7681", fontSize: "12px" }}>
               Fetching recommendation…
             </div>
           )}

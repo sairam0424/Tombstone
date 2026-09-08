@@ -20,13 +20,32 @@ services:
   # Postgres's own connection limit — mirrors what production does via
   # Neon's built-in pooler ("-pooler" connection string), letting the same
   # pooled-vs-direct split be exercised locally without real Neon creds.
-  # Transaction pooling mode: safe for flag-api/intelligence's own traffic
-  # (nothing in their hot path holds a session-scoped Postgres feature —
-  # internal/audit's advisory lock is pg_advisory_XACT_lock, transaction-
-  # scoped, which transaction pooling supports fine). NOT safe for
-  # cmd/migrate, which uses the session-scoped pg_advisory_lock/unlock pair
-  # pinned to one physical connection for the whole run — that's exactly
-  # why migrations keep using DB_URL_DIRECT, straight to postgres, below.
+  #
+  # pool_mode: session, NOT transaction. This used to be transaction mode
+  # with a comment claiming it was "safe for flag-api/intelligence's own
+  # traffic" -- that was wrong, and empirically disproven by actually firing
+  # concurrent requests at a live stack (10 parallel `curl` calls to the SAME
+  # /api/v1/environments/snapshot endpoint reproduced it 100% of the time:
+  # a random mix of 200/401/500 on every run, with flag-api logging real
+  # postgres wire-protocol errors -- "unnamed prepared statement does not
+  # exist", "bind message has N result formats but query has M columns",
+  # "supplies N parameters but prepared statement requires M"). Root cause:
+  # lib/pq (flag-api's driver) always uses the wire protocol's extended
+  # query flow (Parse/Bind/Execute) for parameterized queries via the
+  # UNNAMED prepared statement -- there is no simple-protocol opt-out in
+  # lib/pq. Setting MAX_PREPARED_STATEMENTS (PgBouncer 1.21+'s official
+  # mitigation for exactly this, present and left set below as defense in
+  # depth) did NOT fully eliminate it under real concurrent load -- only
+  # switching pool_mode to session did (30/30 clean runs across 3 rounds of
+  # 10 concurrent requests, vs. consistent failures under transaction mode).
+  # flag-api caps its own pool at SetMaxOpenConns(5) (cmd/main.go), so
+  # session mode's one-dedicated-backend-per-client-connection cost is
+  # bounded and well within DEFAULT_POOL_SIZE below.
+  #
+  # cmd/migrate ALSO never used transaction pooling (its session-scoped
+  # pg_advisory_lock/unlock pair needs one pinned physical connection for
+  # the whole run) -- it already used DB_URL_DIRECT, straight to postgres,
+  # for that reason, unaffected by this change either way.
   pgbouncer:
     image: edoburu/pgbouncer:latest
     depends_on:
@@ -37,9 +56,10 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_HOST: postgres
       DB_NAME: ${POSTGRES_DB:-tombstone}
-      POOL_MODE: transaction
+      POOL_MODE: session
       MAX_CLIENT_CONN: "100"
       DEFAULT_POOL_SIZE: "20"
+      MAX_PREPARED_STATEMENTS: "200"
       # Postgres 16 (the postgres service's image) defaults password_encryption
       # to scram-sha-256, not md5 (this image's own default AUTH_TYPE) — a
       # mismatch here fails every login with "wrong password type".

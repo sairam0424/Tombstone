@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -193,6 +194,19 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(httpMetrics)
+	// Matches flag-api's own cmd/main.go CORS config exactly. Without this,
+	// every browser call this service ever receives is blocked before the
+	// request even reaches a handler -- found by actually loading the
+	// dashboard's FlagDetail page in a real browser end to end, where
+	// CircuitBreakerStatus/AutonomousRolloutToggle's calls to /api/v1/circuit
+	// and /api/v1/rollout/posterior failed with "No 'Access-Control-Allow-
+	// Origin' header is present," something no existing test (none of which
+	// drive a real browser against this service) could ever catch.
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{"Authorization", "Content-Type"},
+	}))
 	r.Use(rateMw.RateLimit)
 	// Load shedding runs AFTER rate limiting: rate limiting rejects
 	// over-quota callers first, regardless of system load; load shedding
