@@ -1,6 +1,6 @@
 # Kubernetes Deployment Guide
 
-This guide covers deploying Tombstone to Kubernetes: single-region via Helm, multi-region, the tombstone-operator, and manual deployment for services not yet in the Helm chart.
+This guide covers deploying Tombstone to Kubernetes: single-region via Helm (the only topology actually proven end-to-end today), a multi-region design sketch (roadmap, not yet functional — see that section's own status note), the tombstone-operator, and manual deployment for services not yet in the Helm chart.
 
 ## GitOps Deployment (Recommended) — Flux CD
 
@@ -198,7 +198,13 @@ Apply similar manifests for `marketplace` (port 8086) and `intelligence` (port 8
 
 ## Multi-Region Deployment
 
-Tombstone supports active-primary / passive-secondary multi-region via two separate values files.
+**Status: roadmap / non-functional scaffolding, not a working feature today.** The Helm values files and manifests below exist and will deploy real pods, but the primary/secondary distinction they're meant to express is not actually enforced anywhere at runtime, verified directly against the live code (not assumed):
+
+- `IS_PRIMARY_REGION` is passed into the intelligence deployment's container env (`deployment-intelligence.yaml`), but `services/intelligence`'s own Python code never reads it — a "secondary" region deployed today runs the exact same LinUCB/anomaly-detection analytics as primary, not the documented reduced/read-only behavior.
+- `region-config.yaml`'s ConfigMap values (`region`, `is-primary`) are likewise never read by any service — no log tag, OTel resource attribute, or code path consults them.
+- The Terraform `tombstone_region` resource (`infra/terraform/provider/`) calls `POST /api/v1/regions` against flag-api to register a region — that route does not exist on flag-api at all. `terraform apply` with this resource fails with a 404, not a successful provisioning.
+
+Single-region deployment (the rest of this guide) is the only topology actually proven end-to-end. Treat everything below as a design sketch for a future release, not an instruction set to follow for a real multi-region rollout.
 
 ### Primary Region
 

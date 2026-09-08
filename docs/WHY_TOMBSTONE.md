@@ -296,9 +296,9 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 - A session recording or analytics tool (use PostHog, Mixpanel, etc.)
 - A deployment orchestrator (use ArgoCD, Flux, etc. for that)
 
-### Current version scope (v1.0.0 self-hosted)
+### Current version scope (v1.5.0 self-hosted — last tagged release; `develop`/`main` are ahead working toward v2.0.0)
 
-| In v1.0.0 | Planned (v1.1+) |
+| In v1.5.0 | Planned |
 |-----------|-----------------|
 | All 8 services via `make dev` | Managed cloud option |
 | Circuit breaker + auto-rollback | Multi-region active-active |
@@ -324,7 +324,7 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 
 **The intelligence service is large.** The Docker image bundles BAAI/bge-m3 (~400MB) for NLP search. First build takes 3–5 minutes. Subsequent builds use the cached layer.
 
-**Cloud deployment is v1.1.** v1.0.0 is self-hosted only. Northflank, Fly.io, and Kubernetes manifests exist in `infra/`, but managed cloud hosting is not yet available.
+**Managed cloud hosting status is unverified in this doc pass** — `infra/.env.example` documents a real Northflank + Oracle + Cloudflare Pages production topology, which may mean this is now further along than "not yet available" implies. Not independently re-verified here (out of scope for this pass); don't treat either this doc's older claim or that inference as settled without checking the actual deployment.
 
 ---
 
