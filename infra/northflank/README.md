@@ -19,6 +19,12 @@ Northflank Sandbox (free) hosts the two always-on services.
    - gateway.json → tombstone-gateway (Sandbox plan)
    - intelligence.json → tombstone-intelligence (Sandbox plan)
 
+   (`flag-api.json` also exists in this directory from an earlier topology
+   where flag-api ran on Northflank too — not part of this setup. In the
+   current architecture flag-api runs on the Oracle Cloud VM instead; see
+   `SECRET_FLAG_API_URL` above and `infra/oracle/docker-compose.prod.yml`.
+   Kept for reference, not deployed by this guide.)
+
 6. Deploy both — they will build from Dockerfile automatically on push to main.
 
 ## After deploy
