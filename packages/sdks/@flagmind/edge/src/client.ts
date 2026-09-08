@@ -6,6 +6,7 @@ import type {
   FlagEnvironmentState,
   FlagPrerequisite,
   FlagSnapshot,
+  TargetingRule,
 } from "./types.js";
 
 /** Builds a FlagLookup from a snapshot's flat flags array — O(1) per prerequisite lookup, no extra fetch. */
@@ -319,6 +320,34 @@ function normalizePrerequisites(raw: unknown): FlagPrerequisite[] {
     );
 }
 
+// Mirrors normalizePrerequisites's own defensive filtering exactly (same
+// reasoning: this whole function must never throw on one flag's malformed
+// rule data and silently degrade every OTHER flag in the snapshot).
+// Priority NaN-guards the same way @tombstone/core's parseFlagEnvironmentState
+// does — a malformed/missing priority must sort deterministically (as 0),
+// not poison Array.prototype.sort's comparator with NaN.
+function normalizeTargetingRules(raw: unknown): TargetingRule[] {
+  const rawRules = Array.isArray(raw) ? raw : [];
+  return rawRules
+    .filter(
+      (r): r is Record<string, unknown> => r !== null && typeof r === "object",
+    )
+    .map((r) => {
+      const priority = Number(r["priority"]);
+      return {
+        id: String(r["id"] ?? ""),
+        ruleType: (r["rule_type"] ??
+          r["ruleType"] ??
+          "CUSTOM") as TargetingRule["ruleType"],
+        attribute: String(r["attribute"] ?? ""),
+        operator: String(r["operator"] ?? ""),
+        values: Array.isArray(r["values"]) ? r["values"] : [],
+        variation: String(r["variation"] ?? ""),
+        priority: Number.isFinite(priority) ? priority : 0,
+      } satisfies TargetingRule;
+    });
+}
+
 function normalizeSnapshot(raw: unknown): FlagSnapshot {
   const r = raw as Record<string, unknown>;
   const flags = ((r["flags"] as unknown[]) ?? []).map((f) => {
@@ -330,6 +359,9 @@ function normalizeSnapshot(raw: unknown): FlagSnapshot {
       safeDefault: String(fl["safe_default"] ?? fl["safeDefault"] ?? "false"),
       environment: String(fl["environment"] ?? ""),
       prerequisites: normalizePrerequisites(fl["prerequisites"]),
+      targetingRules: normalizeTargetingRules(
+        fl["targeting_rules"] ?? fl["targetingRules"],
+      ),
     } satisfies FlagEnvironmentState;
   });
   return {

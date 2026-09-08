@@ -3,6 +3,7 @@ import type {
   EvaluationResult,
   FlagEnvironmentState,
   FlagPrerequisite,
+  TargetingRule,
 } from "./types.js";
 
 /**
@@ -233,6 +234,108 @@ function checkPrerequisites<T>(
   return null;
 }
 
+// ─── Step 4: rule matching — exact port of @tombstone/core's matchesRule/
+// resolveAttribute/applyOperator (evaluation.ts). Kept in sync deliberately:
+// this SDK has zero runtime dependencies and can't import Core directly.
+
+function matchesRule(rule: TargetingRule, context: EvaluationContext): boolean {
+  // GEO operators resolve values from context.geo, not the generic attribute path.
+  if (rule.operator === "GEO_COUNTRY") {
+    const country = (context.geo?.country ?? "").toUpperCase();
+    return (rule.values as string[])
+      .map((v) => String(v).toUpperCase())
+      .includes(country);
+  }
+  if (rule.operator === "GEO_REGION") {
+    const region = (context.geo?.region ?? "").toUpperCase();
+    return (rule.values as string[])
+      .map((v) => String(v).toUpperCase())
+      .includes(region);
+  }
+
+  const raw = resolveAttribute(rule.attribute, context);
+  if (raw === undefined || raw === null) return false;
+  return applyOperator(rule.operator, raw, rule.values);
+}
+
+function resolveAttribute(path: string, context: EvaluationContext): unknown {
+  const segments = path.split(".");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let current: any = context;
+  for (const seg of segments) {
+    if (current == null || typeof current !== "object") {
+      current = undefined;
+      break;
+    }
+    current = (current as Record<string, unknown>)[seg];
+  }
+  if (current !== undefined) return current;
+  if (segments.length === 1 && context.attrs !== undefined)
+    return context.attrs[path];
+  return undefined;
+}
+
+function applyOperator(
+  operator: string,
+  value: unknown,
+  ruleValues: unknown[],
+): boolean {
+  const strValue = String(value);
+  switch (operator) {
+    case "IN":
+      return ruleValues.some((v) => String(v) === strValue);
+    // NOT_IN with an EMPTY ruleValues must NOT match — see @tombstone/core's
+    // identical guard (found by adversarial review of PR #246): an empty/
+    // missing "values" list must mean "excludes nothing", not "matches
+    // everything" (Array.prototype.every is vacuously true on []).
+    case "NOT_IN":
+      return (
+        ruleValues.length > 0 && ruleValues.every((v) => String(v) !== strValue)
+      );
+    case "EQ":
+      return strValue === String(ruleValues[0] ?? "");
+    case "NEQ":
+      return strValue !== String(ruleValues[0] ?? "");
+    case "CONTAINS":
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.includes(String(v)))
+      );
+    case "PREFIX":
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.startsWith(String(v)))
+      );
+    case "SUFFIX":
+      return (
+        typeof value === "string" &&
+        ruleValues.some((v) => value.endsWith(String(v)))
+      );
+    case "LT": {
+      const n = Number(value);
+      return Number.isFinite(n) && n < Number(ruleValues[0] ?? 0);
+    }
+    case "LTE": {
+      const n = Number(value);
+      return Number.isFinite(n) && n <= Number(ruleValues[0] ?? 0);
+    }
+    case "GT": {
+      const n = Number(value);
+      return Number.isFinite(n) && n > Number(ruleValues[0] ?? 0);
+    }
+    case "GTE": {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= Number(ruleValues[0] ?? 0);
+    }
+    // REGEX/SEMVER_GTE/SEMVER_LTE/DATE_BEFORE/DATE_AFTER intentionally fall
+    // through to false — matches @tombstone/core's own applyOperator
+    // exactly (a shared TypeScript-wide parity gap, not Edge-specific; see
+    // TargetingRule's own doc comment).
+    default:
+      return false;
+  }
+}
+
 export function evaluate<T = boolean>(
   flagState: FlagEnvironmentState | undefined,
   context: EvaluationContext,
@@ -270,6 +373,22 @@ export function evaluate<T = boolean>(
       safeDepth,
     );
     if (blocked !== null) return blocked;
+  }
+  // Step 4: rule matching — ascending priority (0 = highest), mirroring
+  // @tombstone/core's evaluateInternal exactly.
+  const sortedRules = [...(flagState.targetingRules ?? [])].sort(
+    (a, b) => a.priority - b.priority,
+  );
+  for (const rule of sortedRules) {
+    if (matchesRule(rule, context)) {
+      return {
+        value: rule.variation as unknown as T,
+        reason: "RULE_MATCH",
+        fromCache: true,
+        flagKey,
+        ruleId: rule.id,
+      };
+    }
   }
   if (flagState.rolloutPct >= 100) {
     return {
