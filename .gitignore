@@ -31,6 +31,10 @@ services/**/main
 # Compiled class output. Only ever contained generated .class files here — the
 # pre-existing `services/*/bin/` rule above covers Go binaries.
 **/bin/
+# .NET's intermediate build directory (project.assets.json, generated .dll,
+# etc.) -- **/bin/ above already covers .NET's final output dir, but never
+# covered this one.
+**/obj/
 
 # IDE
 .idea/
