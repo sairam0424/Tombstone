@@ -158,15 +158,22 @@ func main() {
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
-	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher)
+	// MARKETPLACE_URL: base URL of services/marketplace, used to fire
+	// flag-lifecycle events at its webhook dispatcher (Slack/Datadog/
+	// PagerDuty/OpsGenie/Jira/Linear/OpenTelemetry). Optional and fail-open,
+	// matching REKOR_ENABLED/SLACK_WEBHOOK_URL's own opt-in convention --
+	// unset means notifyMarketplace is a permanent no-op, not an error.
+	marketplaceURL := os.Getenv("MARKETPLACE_URL")
+	flagH := v1.NewFlagHandler(db, rdb, logger, rekorClient, auditWriter, tokenHasher, marketplaceURL)
 	snapH := v1.NewSnapshotHandler(db, logger)
 	auditH := v1.NewAuditHandler(db, logger, auditWriter)
 	retentionH := v1.NewRetentionHandler(logger, auditRetention, auditRetentionDays)
 	complianceH := v1.NewComplianceHandler(db, logger, complianceSigner, auditWriter, rbacMw.PolicySource)
-	prereqH := v1.NewPrerequisiteHandler(db, logger)
+	prereqH := v1.NewPrerequisiteHandler(db, rdb, logger)
+	targetingRuleH := v1.NewTargetingRuleHandler(db, rdb, logger)
 	scheduledH := v1.NewScheduledHandler(db, rdb, logger, auditWriter)
 	breakGlassH := v1.NewBreakGlassHandler(db, rdb, logger, tokenHasher, auditWriter)
-	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter)
+	crH := v1.NewChangeRequestHandler(db, rdb, logger, auditWriter, marketplaceURL)
 
 	// Background workers — all share the same cancellable root context.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -265,6 +272,25 @@ func main() {
 			With(idempotencyMw.Handle("POST /flags/{key}/kill")).
 			Post("/flags/{key}/kill", flagH.KillSwitch)
 
+		// EVAL-4: automated graduated rollback, restricted to
+		// flags:circuit_breaker (RoleCircuitBreaker -- assignable only via
+		// service_tokens.role, never a human project-membership grant).
+		// Deliberately a SEPARATE permission from flags:kill_switch above,
+		// so no OWNER/ADMIN gets this capability for free -- see PR #220's
+		// adversarial review and RollbackStep's own doc comment.
+		r.With(rbacMw.RequirePermission("flags", "circuit_breaker")).
+			With(idempotencyMw.Handle("POST /flags/{key}/rollback-step")).
+			Post("/flags/{key}/rollback-step", flagH.RollbackStep)
+
+		// EVAL-4: the mirror image of rollback-step above, for the
+		// HALF_OPEN recovery ladder's ascent direction -- SAME permission,
+		// opposite invariant (can only increase, never decrease). See
+		// RecoveryStep's own doc comment for why this is a separate
+		// endpoint rather than relaxing rollback-step's own guard.
+		r.With(rbacMw.RequirePermission("flags", "circuit_breaker")).
+			With(idempotencyMw.Handle("POST /flags/{key}/recovery-step")).
+			Post("/flags/{key}/recovery-step", flagH.RecoveryStep)
+
 		// Flag prerequisites (GrowthBook ParentConditions pattern).
 		// Prerequisites gate whether a flag evaluates at all, so mutating them
 		// is a flag-state change -> flags:write.
@@ -274,6 +300,18 @@ func main() {
 			Get("/flags/{key}/prerequisites", prereqH.ListPrerequisites)
 		r.With(rbacMw.RequirePermission("flags", "write")).
 			Delete("/flags/{key}/prerequisites/{id}", prereqH.DeletePrerequisite)
+
+		// Per-environment targeting rules -- unlike prerequisites, these are
+		// scoped to a specific environment (targeting_rules has its own
+		// environment column, matching flag_environments' granularity), so
+		// they're gated the same way UpdateEnvironment is (environments:write/
+		// environments:read), not flags:write/flags:read.
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			Post("/flags/{key}/environments/{env}/rules", targetingRuleH.AddTargetingRule)
+		r.With(rbacMw.RequirePermission("environments", "read")).
+			Get("/flags/{key}/environments/{env}/rules", targetingRuleH.ListTargetingRules)
+		r.With(rbacMw.RequirePermission("environments", "write")).
+			Delete("/flags/{key}/environments/{env}/rules/{id}", targetingRuleH.DeleteTargetingRule)
 
 		// Scheduled changes — a scheduled write is still a write, gated at
 		// schedule time (the scheduler itself runs in-process, not via HTTP).

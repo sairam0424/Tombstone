@@ -22,3 +22,10 @@ data:
   # deployment that also mounts it.
   CONSUMER_BACKEND: "redis"
   TOMBSTONE_ENVIRONMENTS: "production"
+  # EVAL-2: without this, evaluator's auto-rollback Slack alert (see
+  # secret.yaml's SLACK_WEBHOOK_URL) links to a bare relative "/flags/{key}"
+  # path -- NotifyRollback omits the button entirely rather than ship a
+  # non-functional one, so this being unset doesn't break anything, it just
+  # silently drops the alert's one-click CTA on this Helm/k8s deployment
+  # path, the same class of gap INT-4 found for CONSUMER_BACKEND above.
+  DASHBOARD_URL: {{ .Values.dashboardUrl | default "" | quote }}

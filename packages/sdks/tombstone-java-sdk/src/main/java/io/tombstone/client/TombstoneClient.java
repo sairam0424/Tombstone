@@ -61,7 +61,25 @@ public class TombstoneClient implements Closeable {
     public <T> EvaluationResult<T> evaluate(String flagKey, EvaluationContext context) {
         Optional<FlagEnvironmentState> state = cache.get(flagKey);
         T def = (T) defaults.getOrDefault(flagKey, Boolean.FALSE);
-        return engine.evaluate(state.orElse(null), context, def, flagKey);
+        // Passes a real flagLookup backed by this.cache, NOT the 4-arg
+        // convenience overload used before (which hardcodes flagLookup to
+        // `key -> null`, documented on that overload as being for "callers
+        // with no snapshot access"). This client DOES have snapshot access
+        // via cache -- before parseSnapshotResponse() populated real
+        // prerequisites (this same PR's other fix), Step 2 never actually
+        // ran against real data, so this null-returning lookup was dead
+        // code from this call path specifically. Once prerequisites are
+        // real, calling the 4-arg overload here would make ANY hard-gated
+        // prerequisite permanently PREREQUISITE_FAILED regardless of the
+        // real dependency's state (a null lookup result never equals a
+        // real requiredVariation string) -- swapping "prerequisites
+        // silently ignored" for "every gated flag permanently blocked",
+        // which is worse. Found by adversarial review of this PR.
+        return engine.evaluate(
+            state.orElse(null), context, def, flagKey,
+            key -> cache.get(key).orElse(null),
+            new HashMap<>(), new HashSet<>()
+        );
     }
 
     public boolean isEnabled(String flagKey, EvaluationContext context) {
@@ -71,6 +89,29 @@ public class TombstoneClient implements Closeable {
 
     public boolean isConnected() { return connected.get(); }
     public Set<String> flagKeys() { return cache.flagKeys(); }
+
+    // Package-private test seam: processSseLines's own while loop is gated
+    // on connected.get() (so a real listener stops promptly on close()) --
+    // a test driving processSseLines directly, without a real connect(),
+    // needs a way to satisfy that gate.
+    void setConnectedForTesting(boolean value) {
+        connected.set(value);
+    }
+
+    // Package-private test seam: lets a same-package test populate the
+    // cache directly with hand-built FlagEnvironmentStates, so evaluate()'s
+    // real prerequisite-lookup wiring (cache::get, not a null-returning
+    // stub) can be exercised end to end without a mock HTTP server.
+    void loadSnapshotForTesting(List<FlagEnvironmentState> states) {
+        cache.loadSnapshot(states);
+    }
+
+    // Overload letting a test control the snapshot's own "as of" ts, needed
+    // to exercise FlagCache.loadSnapshot's monotonicity/staleness-preserving
+    // behavior deterministically.
+    void loadSnapshotForTesting(List<FlagEnvironmentState> states, long ts) {
+        cache.loadSnapshot(states, ts);
+    }
 
     // Package-private (not private) so the SSE-recovery unit test can override it
     // to observe refetch calls without touching the network. connect(), reconnect,
@@ -82,21 +123,119 @@ public class TombstoneClient implements Closeable {
             .get().build();
         try (Response resp = http.newCall(req).execute()) {
             if (!resp.isSuccessful() || resp.body() == null) return;
-            Map<?, ?> data = mapper.readValue(resp.body().string(), Map.class);
-            List<?> flags = (List<?>) data.get("flags");
-            if (flags == null) return;
-            List<FlagEnvironmentState> states = new ArrayList<>();
-            for (Object f : flags) {
-                Map<?, ?> fm = (Map<?, ?>) f;
-                states.add(FlagEnvironmentState.simple(
-                    str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
-                    Boolean.TRUE.equals(fm.get("enabled")),
-                    fm.get("rollout_pct") instanceof Number n ? n.intValue() : 0,
-                    str(fm, "safe_default"), 0L
-                ));
-            }
-            cache.loadSnapshot(states);
+            ParsedSnapshot parsed = parseSnapshotResponse(resp.body().string());
+            cache.loadSnapshot(parsed.flags(), parsed.ts());
         }
+    }
+
+    // Package-private so a test can exercise the real wire-parsing logic
+    // directly with a hand-built JSON string, without standing up a mock
+    // HTTP server -- mirrors fetchSnapshot()'s own package-private
+    // visibility, which exists for the identical reason (see its comment).
+    // Returns the snapshot's own top-level ts alongside the parsed flags
+    // (flag-api's environments.go: Ts: time.Now().Unix()) -- FlagCache.
+    // loadSnapshot needs it to compare against any live prerequisites_updated
+    // event that may have already advanced a flag's own prerequisitesUpdatedAt
+    // further than this snapshot itself reflects.
+    ParsedSnapshot parseSnapshotResponse(String rawJson) throws IOException {
+        Map<?, ?> data = mapper.readValue(rawJson, Map.class);
+        long snapshotTs = data.get("ts") instanceof Number n ? n.longValue() : 0L;
+        List<?> flags = (List<?>) data.get("flags");
+        if (flags == null) return new ParsedSnapshot(List.of(), snapshotTs);
+        List<FlagEnvironmentState> states = new ArrayList<>();
+        for (Object f : flags) {
+            Map<?, ?> fm = (Map<?, ?>) f;
+            // FlagEnvironmentState.simple() hardcoded prerequisites/
+            // targetingRules/targetList to List.of() and hashVersion to 1
+            // regardless of what the wire actually sent -- the "simple"
+            // factory is for hand-built test fixtures, not a real
+            // snapshot response, but this was the ONLY place a real
+            // FlagEnvironmentState was ever constructed from wire data,
+            // so this client's own prerequisite gating never worked
+            // against a real backend at all (found while investigating
+            // SDK-4's prerequisites-streaming follow-up). targeting_rules
+            // is now sent by the real snapshot endpoint (services/flag-api/
+            // internal/api/v1/environments.go's FlagEnvironmentStateWithPrereqs.
+            // TargetingRules, added by PR #245) and parsed below via
+            // parseTargetingRules; target_list/hash_version are still not
+            // sent, so those stay empty/default 1. prerequisitesUpdatedAt
+            // and targetingRulesUpdatedAt are both set to a placeholder here
+            // (0L) -- FlagCache.loadSnapshot is the authoritative place that
+            // fills in the real value (either this snapshot's own ts, or a
+            // preserved fresher live-updated value), mirroring the
+            // TypeScript SDK's identical parser/cache split of concerns.
+            states.add(new FlagEnvironmentState(
+                str(fm, "flag_id"), str(fm, "flag_key"), str(fm, "environment"),
+                Boolean.TRUE.equals(fm.get("enabled")),
+                fm.get("rollout_pct") instanceof Number n ? n.intValue() : 0,
+                str(fm, "safe_default"),
+                fm.get("updated_at") instanceof Number n ? n.longValue() : 0L,
+                parsePrerequisites(fm.get("prerequisites")),
+                parseTargetingRules(fm.get("targeting_rules")),
+                List.of(), 1, 0L, 0L
+            ));
+        }
+        return new ParsedSnapshot(states, snapshotTs);
+    }
+
+    // Package-private wrapper pairing the parsed flags with the snapshot's
+    // own top-level ts -- see parseSnapshotResponse's doc comment for why
+    // FlagCache.loadSnapshot needs both together.
+    record ParsedSnapshot(List<FlagEnvironmentState> flags, long ts) {}
+
+    // flag-api's real wire shape (services/flag-api/internal/api/v1/
+    // environments.go's SnapshotPrerequisite): {"id", "flag_key",
+    // "required_variation", "gate", "priority"} -- "flag_key", NOT
+    // "prereq_flag_key" (that's only flag_prerequisites' own DB column
+    // name, matching proto's ParentCondition message). "gate" defaults to
+    // true (hard-blocking) when the wire omits it, matching flag-api's own
+    // AddPrerequisite default.
+    private static List<FlagPrerequisite> parsePrerequisites(Object raw) {
+        if (!(raw instanceof List<?> rawList)) return List.of();
+        List<FlagPrerequisite> result = new ArrayList<>(rawList.size());
+        for (Object p : rawList) {
+            if (!(p instanceof Map<?, ?> pm)) continue;
+            result.add(new FlagPrerequisite(
+                str(pm, "flag_key"),
+                str(pm, "required_variation"),
+                !Boolean.FALSE.equals(pm.get("gate"))
+            ));
+        }
+        return result;
+    }
+
+    // flag-api's real wire shape (services/flag-api/internal/api/v1/
+    // targeting_rules.go's SnapshotTargetingRule/TargetingRule structs):
+    // {"id", "rule_type", "attribute", "operator", "values", "variation",
+    // "priority"} -- ONE condition per rule row, unlike this SDK's own
+    // TargetingRule type (a List<PropertyCondition> plus a per-rule
+    // rolloutPct, a richer GrowthBook-style model that predates the real
+    // backend wire format existing at all). Adapts the flat wire shape into
+    // that richer model with a single-element conditions list and
+    // rolloutPct=100 -- the backend has no per-rule rollout concept, so 100
+    // means "always apply once matched", which is exactly what the flat
+    // wire model intends (flag-level rollout is a SEPARATE, later step in
+    // RuleMatcher.matchRules/EvaluationEngine, not per-rule).
+    private static List<TargetingRule> parseTargetingRules(Object raw) {
+        if (!(raw instanceof List<?> rawList)) return List.of();
+        List<TargetingRule> result = new ArrayList<>(rawList.size());
+        for (Object r : rawList) {
+            if (!(r instanceof Map<?, ?> rm)) continue;
+            List<Object> rawValues = rm.get("values") instanceof List<?> vl ? new ArrayList<>(vl) : List.of();
+            List<String> values = new ArrayList<>(rawValues.size());
+            for (Object v : rawValues) values.add(v != null ? v.toString() : "");
+            PropertyCondition condition = new PropertyCondition(
+                str(rm, "attribute"), str(rm, "operator"), values, false
+            );
+            result.add(new TargetingRule(
+                str(rm, "id"),
+                List.of(condition),
+                100.0,
+                str(rm, "variation"),
+                rm.get("priority") instanceof Number n ? n.intValue() : 0
+            ));
+        }
+        return result;
     }
 
     private void startSseListener() {
@@ -111,25 +250,7 @@ public class TombstoneClient implements Closeable {
                     try (Response resp = http.newCall(req).execute()) {
                         if (resp.body() == null) continue;
                         BufferedReader reader = new BufferedReader(new InputStreamReader(resp.body().byteStream()));
-                        String line;
-                        String eventType = "message";
-                        while ((line = reader.readLine()) != null && connected.get()) {
-                            if (line.isEmpty()) {
-                                eventType = "message"; // blank line ends the SSE frame — reset
-                            } else if (line.startsWith("event:")) {
-                                eventType = line.substring(6).trim();
-                            } else if (line.startsWith("data:")) {
-                                String json = line.substring(5).trim();
-                                if ("lag".equals(eventType)) {
-                                    // Gateway dropped a buffered flag update for this slow client
-                                    // (its 64-slot buffer was full). Recover the lost update by
-                                    // refetching the full snapshot, debounced to coalesce bursts.
-                                    scheduleLagRefetch();
-                                } else {
-                                    applyEvent(json);
-                                }
-                            }
-                        }
+                        processSseLines(reader);
                     }
                 } catch (Exception e) {
                     if (!connected.get()) break;
@@ -141,6 +262,54 @@ public class TombstoneClient implements Closeable {
         sseThread.start();
     }
 
+    // Package-private (not private) so a test can drive the REAL event-type
+    // dispatch logic (the "event:"/"data:" line parsing, the blank-line
+    // eventType reset, and the string match against "lag"/
+    // "prerequisites_updated") directly with a hand-built BufferedReader,
+    // without standing up a mock HTTP server or SSE connection -- found by
+    // adversarial review of this PR: every existing test previously drove
+    // applyPrerequisitesEvent(String)/scheduleLagRefetch() directly,
+    // bypassing this dispatch logic entirely, so a typo in an eventType
+    // literal or a broken blank-line reset would have gone completely
+    // uncaught.
+    void processSseLines(BufferedReader reader) throws IOException {
+        String line;
+        String eventType = "message";
+        while ((line = reader.readLine()) != null && connected.get()) {
+            if (line.isEmpty()) {
+                eventType = "message"; // blank line ends the SSE frame — reset
+            } else if (line.startsWith("event:")) {
+                eventType = line.substring(6).trim();
+            } else if (line.startsWith("data:")) {
+                String json = line.substring(5).trim();
+                if ("lag".equals(eventType)) {
+                    // Gateway dropped a buffered flag update for this slow client
+                    // (its 64-slot buffer was full). Recover the lost update by
+                    // refetching the full snapshot, debounced to coalesce bursts.
+                    scheduleLagRefetch();
+                } else if ("prerequisites_updated".equals(eventType)) {
+                    // services/flag-api/internal/api/v1/prerequisites.go's
+                    // PrerequisitesEvent -- a distinct payload shape (flag_key/
+                    // environment/prerequisites/ts, no enabled/rollout_pct/reason
+                    // at all) from a real flag event, so it gets its own handler
+                    // rather than being routed through applyEvent, which would
+                    // otherwise coerce those missing keys into false/0 defaults
+                    // for a flag that was never actually disabled.
+                    applyPrerequisitesEvent(json);
+                } else if ("targeting_rules_updated".equals(eventType)) {
+                    // services/flag-api/internal/api/v1/targeting_rules.go's
+                    // TargetingRulesEvent -- same reasoning as
+                    // prerequisites_updated above: a distinct payload shape
+                    // (flag_key/environment/targeting_rules/ts), so it gets
+                    // its own handler.
+                    applyTargetingRulesEvent(json);
+                } else {
+                    applyEvent(json);
+                }
+            }
+        }
+    }
+
     private void applyEvent(String json) {
         try {
             Map<?, ?> m = mapper.readValue(json, Map.class);
@@ -149,6 +318,35 @@ public class TombstoneClient implements Closeable {
             int pct = m.get("rollout_pct") instanceof Number n ? n.intValue() : 0;
             long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
             cache.applyEvent(flagKey, enabled, pct, ts);
+        } catch (Exception ignored) {}
+    }
+
+    // Package-private (not private) so a test can exercise the real
+    // prerequisites_updated JSON-parsing/dispatch path directly with a
+    // hand-built wire string, without standing up a mock SSE server --
+    // mirrors fetchSnapshot()/parseSnapshotResponse()'s own package-private
+    // visibility, for the identical reason.
+    void applyPrerequisitesEvent(String json) {
+        try {
+            Map<?, ?> m = mapper.readValue(json, Map.class);
+            String flagKey = (String) m.get("flag_key");
+            if (flagKey == null) return;
+            long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
+            cache.applyPrerequisitesEvent(flagKey, parsePrerequisites(m.get("prerequisites")), ts);
+        } catch (Exception ignored) {}
+    }
+
+    // Package-private (not private) so a test can exercise the real
+    // targeting_rules_updated JSON-parsing/dispatch path directly with a
+    // hand-built wire string, mirroring applyPrerequisitesEvent(String)'s
+    // own package-private visibility, for the identical reason.
+    void applyTargetingRulesEvent(String json) {
+        try {
+            Map<?, ?> m = mapper.readValue(json, Map.class);
+            String flagKey = (String) m.get("flag_key");
+            if (flagKey == null) return;
+            long ts = m.get("ts") instanceof Number n ? n.longValue() : 0L;
+            cache.applyTargetingRulesEvent(flagKey, parseTargetingRules(m.get("targeting_rules")), ts);
         } catch (Exception ignored) {}
     }
 

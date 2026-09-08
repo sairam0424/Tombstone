@@ -24,25 +24,37 @@ func NewSnapshotHandler(db *sql.DB, logger *zap.Logger) *SnapshotHandler {
 
 // SnapshotPrerequisite is a lightweight prerequisite record embedded in the snapshot.
 // SDKs use this to evaluate prerequisite gates in-process without extra API calls.
+//
+// FlagKey's wire tag is "flag_key", matching proto/v1/flags/flags.proto's
+// ParentCondition message and every SDK's FlagPrerequisite type -- NOT
+// "prereq_flag_key" (that's only flag_prerequisites' own DB column name).
+// Before this fix this struct's wire tag was "prereq_flag_key", silently
+// diverging from the proto contract every SDK was written against: every
+// SDK's prerequisite dependency lookup read the wrong key against a real
+// snapshot response (found while investigating SDK-4's prerequisites-
+// streaming follow-up).
 type SnapshotPrerequisite struct {
 	ID                string `json:"id"`
-	PrereqFlagKey     string `json:"prereq_flag_key"`
+	FlagKey           string `json:"flag_key"`
 	RequiredVariation string `json:"required_variation"`
 	Gate              bool   `json:"gate"`
 	Priority          int    `json:"priority"`
 }
 
-// FlagEnvironmentStateWithPrereqs extends FlagEnvironmentState with the prerequisites
-// slice required for in-process evaluation.
+// FlagEnvironmentStateWithPrereqs extends FlagEnvironmentState with the
+// prerequisites and targeting_rules slices required for in-process
+// evaluation. TargetingRules omits flag_id/environment (redundant — see
+// SnapshotTargetingRule's own doc comment).
 type FlagEnvironmentStateWithPrereqs struct {
-	FlagID        string                 `json:"flag_id"`
-	FlagKey       string                 `json:"flag_key"`
-	Environment   string                 `json:"environment"`
-	Enabled       bool                   `json:"enabled"`
-	RolloutPct    int                    `json:"rollout_pct"`
-	SafeDefault   string                 `json:"safe_default"`
-	UpdatedAt     int64                  `json:"updated_at"`
-	Prerequisites []SnapshotPrerequisite `json:"prerequisites"`
+	FlagID         string                  `json:"flag_id"`
+	FlagKey        string                  `json:"flag_key"`
+	Environment    string                  `json:"environment"`
+	Enabled        bool                    `json:"enabled"`
+	RolloutPct     int                     `json:"rollout_pct"`
+	SafeDefault    string                  `json:"safe_default"`
+	UpdatedAt      int64                   `json:"updated_at"`
+	Prerequisites  []SnapshotPrerequisite  `json:"prerequisites"`
+	TargetingRules []SnapshotTargetingRule `json:"targeting_rules"`
 }
 
 type Snapshot struct {
@@ -54,8 +66,9 @@ type Snapshot struct {
 
 // GetSnapshot handles GET /api/v1/environments/{env}/snapshot
 // Used by SDKs on initialization to load full flag state into memory.
-// Each flag entry includes its prerequisites array so SDKs can evaluate
-// prerequisite gates in-process without additional API round-trips.
+// Each flag entry includes its prerequisites and targeting_rules arrays so
+// SDKs can evaluate prerequisite gates and individual-target/rule-matching
+// in-process without additional API round-trips.
 //
 // TEN-1a: this is the primary SDK hot path — before this fix, NEITHER query
 // below filtered by project at all, so any service token (any project) could
@@ -91,14 +104,15 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	for _, row := range snapRows {
 		s := FlagEnvironmentStateWithPrereqs{
-			FlagID:        row.FlagID,
-			FlagKey:       row.Key,
-			Environment:   row.Environment,
-			Enabled:       row.Enabled,
-			RolloutPct:    int(row.RolloutPct),
-			SafeDefault:   row.SafeDefault,
-			UpdatedAt:     row.UpdatedAt,
-			Prerequisites: []SnapshotPrerequisite{}, // always a JSON array, never null
+			FlagID:         row.FlagID,
+			FlagKey:        row.Key,
+			Environment:    row.Environment,
+			Enabled:        row.Enabled,
+			RolloutPct:     int(row.RolloutPct),
+			SafeDefault:    row.SafeDefault,
+			UpdatedAt:      row.UpdatedAt,
+			Prerequisites:  []SnapshotPrerequisite{},  // always a JSON array, never null
+			TargetingRules: []SnapshotTargetingRule{}, // always a JSON array, never null
 		}
 		flagIndexByID[s.FlagID] = len(flags)
 		flags = append(flags, s)
@@ -118,7 +132,7 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		for _, pr := range prereqRows {
 			p := SnapshotPrerequisite{
 				ID:                pr.ID,
-				PrereqFlagKey:     pr.PrereqFlagKey,
+				FlagKey:           pr.PrereqFlagKey,
 				RequiredVariation: pr.RequiredVariation,
 				Gate:              pr.Gate,
 				Priority:          int(pr.Priority),
@@ -129,8 +143,35 @@ func (h *SnapshotHandler) GetSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Load all targeting rules for flags in this environment in a single
+	// query and attach them to the corresponding flag entries — same
+	// fail-soft, index-lookup pattern as prerequisites above.
+	ruleRows, err := q.GetEnvironmentSnapshotTargetingRules(r.Context(), sqlcgen.GetEnvironmentSnapshotTargetingRulesParams{
+		Environment: env,
+		ProjectID:   projectID,
+	})
+	if err != nil {
+		h.logger.Warn("targeting rules query failed; returning snapshot without targeting_rules",
+			zap.Error(err))
+	} else {
+		for _, tr := range ruleRows {
+			rule := SnapshotTargetingRule{
+				ID:        tr.ID,
+				RuleType:  tr.RuleType,
+				Attribute: tr.Attribute,
+				Operator:  tr.Operator,
+				Values:    tr.Values,
+				Variation: tr.Variation,
+				Priority:  int(tr.Priority),
+			}
+			if idx, ok := flagIndexByID[tr.FlagID]; ok {
+				flags[idx].TargetingRules = append(flags[idx].TargetingRules, rule)
+			}
+		}
+	}
+
 	// Compute deterministic snapshot hash for change detection.
-	// Hash covers the full state including prerequisites.
+	// Hash covers the full state including prerequisites and targeting_rules.
 	raw, _ := json.Marshal(flags)
 	hashBytes := sha256.Sum256(raw)
 	hash := fmt.Sprintf("%x", hashBytes)

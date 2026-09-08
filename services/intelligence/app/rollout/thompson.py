@@ -61,11 +61,55 @@ class ThompsonSamplingEngine:
 
     Posteriors are written through to Redis on every update so that the engine
     can be restored to its previous state after a service restart.
+
+    EXP-2's SRM (Sample Ratio Mismatch) gate deliberately does NOT apply
+    here, checked and disclosed rather than silently skipped: SRM detects
+    an ACTUAL traffic split diverging from an INTENDED allocation ratio
+    between two or more arms (see app/experiments/srm.py). This engine has
+    no such ratio anywhere in its data model -- FlagPosterior tracks ONE
+    arm's success rate (the flag's current rollout) via a single
+    Beta(alpha, beta) posterior, with no second arm and no "expected split"
+    to compare actual traffic against. There is nothing for a chi-square
+    goodness-of-fit test to check here. A meaningfully analogous safety
+    check for THIS engine -- e.g. confirming actual observed traffic volume
+    roughly tracks the configured rollout_pct -- would be a different,
+    new mechanism entirely, not a literal SRM gate, and needs its own
+    design decision if ever pursued.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: int | None = None) -> None:
+        """
+        seed: EXP-2 -- forwarded to numpy's Generator so recommend()'s
+        Thompson Sample draws are reproducible. Production leaves this
+        None (the real, unseeded randomness the algorithm is supposed to
+        use); tests/debugging pass a fixed int to get a deterministic
+        confidence/sampled_success_rate for a given posterior instead of a
+        value that changes every run and can only be asserted with a
+        loose tolerance. Before this, recommend() constructed a brand-new
+        `np.random.default_rng()` on every single call, with no seed
+        parameter anywhere on this class, and this module had zero test
+        files of any kind.
+
+        NOT the only unseeded RNG in app/ (a claim this comment originally
+        made and adversarial review of PR #217 found to be false): the
+        experiments analyzer's bayesian branch
+        (app/experiments/analyzer.py, both analyze() and analyze_from_stats())
+        calls the legacy global-state `np.random.beta(...)` unseeded too,
+        feeding directly into `probability_beats_control`/`is_significant`
+        -- a live experiment-decision output, not merely diagnostic like
+        this class's own docstring implied "the only" one was. Deliberately
+        NOT fixed here -- EXP-2's plan item scoped this PR to Thompson
+        Sampling specifically, and that call site already has its own
+        (loosely-toleranced, but existing) test coverage in
+        test_experiment_analyzer.py, unlike this module before this PR.
+        Flagging as a separate, real reproducibility gap for whoever picks
+        it up next, not silently expanding this PR's scope to cover it.
+        """
         self._posteriors: dict[str, FlagPosterior] = {}
-        self._redis: Any | None = None  # set via set_redis_client or load_all_from_redis
+        self._rng: np.random.Generator = np.random.default_rng(seed)
+        self._redis: Any | None = (
+            None  # set via set_redis_client or load_all_from_redis
+        )
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -129,7 +173,9 @@ class ThompsonSamplingEngine:
                     # Key format: tombstone:thompson:{flag_key}:{environment}
                     # flag_key itself may contain colons, so split from the right
                     # to isolate environment (last segment) and flag_key (all middle segments).
-                    parts = key_str.split(":", 3)  # ['tombstone', 'thompson', flag_key, env]
+                    parts = key_str.split(
+                        ":", 3
+                    )  # ['tombstone', 'thompson', flag_key, env]
                     if len(parts) != 4:
                         logger.warning("Skipping malformed Redis key: %s", key_str)
                         continue
@@ -140,7 +186,9 @@ class ThompsonSamplingEngine:
                         continue
                     try:
                         data = json.loads(
-                            raw_value.decode() if isinstance(raw_value, bytes) else raw_value
+                            raw_value.decode()
+                            if isinstance(raw_value, bytes)
+                            else raw_value
                         )
                         posterior = FlagPosterior(
                             flag_key=flag_key,
@@ -269,9 +317,9 @@ class ThompsonSamplingEngine:
 
         posterior = self._posteriors[key]
 
-        # Thompson Sample
-        rng = np.random.default_rng()
-        samples = rng.beta(posterior.alpha, posterior.beta, size=_SAMPLE_DRAWS)
+        # Thompson Sample -- self._rng (EXP-2), not a fresh default_rng()
+        # per call, so a seeded engine gives reproducible draws.
+        samples = self._rng.beta(posterior.alpha, posterior.beta, size=_SAMPLE_DRAWS)
         sampled_success_rate: float = float(np.mean(samples))
         confidence: float = float(np.mean(samples > (1.0 - _ERROR_THRESHOLD)))
 
@@ -355,7 +403,9 @@ class ThompsonSamplingEngine:
         self._posteriors[key] = updated
         return updated
 
-    def disable_autonomous(self, flag_key: str, environment: str) -> FlagPosterior | None:
+    def disable_autonomous(
+        self, flag_key: str, environment: str
+    ) -> FlagPosterior | None:
         """Remove a flag-environment pair from autonomous rollout mode.
 
         Returns the updated posterior, or None if the flag was not tracked.

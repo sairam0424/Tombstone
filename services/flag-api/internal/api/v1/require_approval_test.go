@@ -71,7 +71,7 @@ func TestRequireApprovalGate(t *testing.T) {
 		t.Fatalf("token hasher: %v", err)
 	}
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, hasher)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, hasher, "")
 	bgH := NewBreakGlassHandler(database, rdb, logger, hasher, auditW)
 
 	flag := createTestFlag(t, flagH, projectID, "sec3b-gate-flag")

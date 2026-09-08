@@ -101,8 +101,12 @@ while IFS= read -r FLAG_KEY; do
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('risk_score', d.get('result',{}).get('risk_score','UNKNOWN')))" \
         2>/dev/null || echo "UNKNOWN")
 
+    # affected_users/total_evaluations never existed on BlastRadiusResult --
+    # the real fields are traffic_pct_affected (the requested rollout %)
+    # and recent_evaluation_count (real telemetry volume over the last 24h,
+    # added by EVAL-3), so this always printed the literal fallback "?".
     AFFECTED=$(echo "$RESPONSE" \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result',d); print(r.get('affected_users',r.get('total_evaluations','?')))" \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result',d); print(f\"{r.get('traffic_pct_affected','?')}% / {r.get('recent_evaluation_count','?')} evals\")" \
         2>/dev/null || echo "?")
 
     ALL_RESULTS+=("${FLAG_KEY}|${RISK}|${AFFECTED}")
@@ -128,8 +132,8 @@ if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "$GH_REPO" ] && [ -n "$GH_PR" ]; then
     # Build the Markdown comment body
     BODY="## Tombstone Flag Blast Radius Check\n\n"
     BODY+="Environment: \`${ENVIRONMENT}\` | Threshold: \`${MIN_RISK}+\`\n\n"
-    BODY+="| Flag Key | Risk | Affected Users |\n"
-    BODY+="|----------|------|----------------|\n"
+    BODY+="| Flag Key | Risk | Traffic / Recent Volume |\n"
+    BODY+="|----------|------|-------------------------|\n"
 
     for ENTRY in "${ALL_RESULTS[@]}"; do
         IFS='|' read -r K R A <<< "$ENTRY"

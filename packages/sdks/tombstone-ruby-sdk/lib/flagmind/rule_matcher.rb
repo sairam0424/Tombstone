@@ -12,6 +12,19 @@ module Tombstone
     def self.resolve_attribute(attribute, context)
       return context.user_id if attribute == "user_id"
       return context.org_id if attribute == "org_id"
+      # A blank attribute has nothing to resolve -- without this guard,
+      # "".split(".") returns [], so the segments.each loop below never
+      # runs and `current` falls through UNCHANGED from its initial value
+      # of context.attrs (the WHOLE attrs Hash), not nil. evaluate_condition
+      # only raises InconclusiveMatchError (the graceful "attribute not
+      # present, skip this rule" path) when resolve_attribute returns nil,
+      # so a blank attribute would otherwise silently stringify the entire
+      # attrs Hash via #to_s and substring-match it against contains/
+      # startswith/endswith, producing a spurious match instead of being
+      # skipped. Found by adversarial review of PR #248 -- reachable via a
+      # malformed/legacy targeting-rule row missing "attribute" on the wire
+      # (client.rb's parse_targeting_rules defaults it to "").
+      return nil if attribute.nil? || attribute.empty?
 
       # Dot-notation resolution: split on dots, traverse nested hashes
       segments = attribute.split(".")
@@ -34,15 +47,36 @@ module Tombstone
       raise InconclusiveMatchError, "Attribute '#{condition.attribute}' not present in evaluation context" if raw.nil?
 
       attr_val = raw.to_s
+      raw_op = condition.operator.downcase
       op = normalize_operator(condition.operator)
       values = condition.values
-      is_geo = GEO_ATTRIBUTES.include?(condition.attribute)
+      # is_geo is true whenever EITHER the attribute is a recognized geo path
+      # OR the operator itself declares geo semantics (GEO_COUNTRY/
+      # GEO_REGION) -- checking the attribute name ALONE would mean a rule
+      # using a non-canonical attribute (e.g. "country" instead of
+      # "geo.country") with a real GEO_COUNTRY operator silently falls back
+      # to case-SENSITIVE matching, even though nothing (backend or SDK)
+      # validates that operator=GEO_COUNTRY implies attribute=="geo.country".
+      # Found and fixed in the Java SDK's equivalent evaluateCondition by
+      # adversarial review of PR #247; checked here proactively.
+      is_geo = GEO_ATTRIBUTES.include?(condition.attribute) ||
+               raw_op == "geo_country" || raw_op == "geo_region"
 
       result = case op
       when "eq", "in"
         is_geo ? contains_ignore_case(values, attr_val) : values.include?(attr_val)
       when "neq", "nin"
-        is_geo ? !contains_ignore_case(values, attr_val) : !values.include?(attr_val)
+        # An EMPTY values list must never match "neq"/"nin":
+        # !values.include?(x) on an empty list is vacuously true (there is
+        # nothing to find, so "not found" is trivially true), which would
+        # make a rule with an empty/missing "values" list match EVERY
+        # context unconditionally -- the opposite of "no exclusions
+        # configured, so exclude nothing". Same bug class found and fixed in
+        # the TypeScript SDK's NOT_IN operator (adversarial review of PR
+        # #246) and the Java SDK's "neq"/"nin" branch (PR #247); fixed here
+        # proactively per those findings' own explicit note that the
+        # remaining SDKs likely share it.
+        !values.empty? && (is_geo ? !contains_ignore_case(values, attr_val) : !values.include?(attr_val))
       when "contains"
         any_contains_ignore_case(values, attr_val)
       when "startswith"
@@ -55,6 +89,24 @@ module Tombstone
         evaluate_semver(op, attr_val, values, condition.attribute)
       when "date_before", "date_after"
         evaluate_date(op, attr_val, values, condition.attribute)
+      when "regex"
+        # docs/SDK_CONTRACT.md:32 -- REGEX is declared (a real, distinct
+        # operator value in flag-api's targeting_rules.operator CHECK
+        # constraint) but deliberately NOT IMPLEMENTED in this release,
+        # across all 5 SDKs (parity matrix: "No" for every language) --
+        # matching TypeScript's existing behavior of "always returns false,
+        # not inconclusive". Found by adversarial review of PR #248: this
+        # SDK's own "else raise InconclusiveMatchError" fallback previously
+        # caught "regex" too (normalize_operator passes it through
+        # unchanged), which deviates from that documented contract in two
+        # ways -- it's treated as skip-the-whole-rule rather than a
+        # definite false, AND `negate: true` on a regex condition would
+        # ALSO skip rather than the contract's literal "false, negated ->
+        # true" outcome. This branch closes that narrow conformance gap
+        # WITHOUT implementing real regex matching, which remains
+        # deliberately deferred ("Future work") to keep this SDK consistent
+        # with the other 4, not introduce Ruby-only regex support.
+        false
       else
         raise InconclusiveMatchError, "Unknown operator: '#{op}'"
       end
@@ -68,6 +120,19 @@ module Tombstone
       when "not_in" then "nin"
       when "prefix" then "startswith"
       when "suffix" then "endswith"
+      # flag-api's targeting_rules.operator CHECK constraint (schema.sql)
+      # has GEO_COUNTRY/GEO_REGION as real, distinct operator VALUES (not
+      # just an attribute-name convention) -- without this mapping, a
+      # targeting rule using either would hit the else branch below and
+      # raise InconclusiveMatchError on every evaluation, silently never
+      # matching for any user. Mapped to "in" so it falls into the existing
+      # "eq"/"in" branch above, whose is_geo case-insensitive comparison
+      # already implements the real geo-matching semantics correctly. Found
+      # while wiring the real backend wire format into this SDK for the
+      # first time (targeting_rules had zero real snapshot data before this
+      # change, so this gap was never previously reachable) -- the identical
+      # gap the Java SDK's own normalizeOperator needed (PR #247).
+      when "geo_country", "geo_region" then "in"
       else op
       end
     end

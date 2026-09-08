@@ -23,7 +23,18 @@ public record FlagEnvironmentState(
     List<FlagPrerequisite>? Prerequisites = null,
     List<TargetingRule>? TargetingRules = null,
     List<string>? TargetList = null,
-    int HashVersion = 1
+    int HashVersion = 1,
+    // Unix seconds these prerequisites were last known-good as of -- either
+    // the snapshot fetch that loaded them, or a live prerequisites_updated
+    // event applied since. Lets an incoming live event be compared against
+    // what's already cached and rejected if it's older -- see FlagCache.
+    // ApplyPrerequisitesEvent's own doc comment.
+    long PrerequisitesUpdatedAt = 0,
+    // Identical purpose to PrerequisitesUpdatedAt above, tracked
+    // independently for TargetingRules -- see FlagCache.
+    // ApplyTargetingRulesEvent's own doc comment. A default trailing
+    // parameter, so no existing positional call site needs updating.
+    long TargetingRulesUpdatedAt = 0
 )
 {
     // Nullable constructor params, non-null properties — preserves the existing 7-arg

@@ -115,8 +115,6 @@ async def lifespan(app: FastAPI):
         db_url=os.environ["DB_URL"],
         embedding_model=app.state.embedding_model,
     )
-    app.state.stale = StaleFlagDetector(db_url=os.environ["DB_URL"])
-
     # Thompson Sampling engine for autonomous rollout
     app.state.rollout_engine = ThompsonSamplingEngine()
 
@@ -148,6 +146,24 @@ async def lifespan(app: FastAPI):
             await app.state.rollout_engine.load_all_from_redis(app.state.redis)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to restore Thompson posteriors from Redis: %s", exc)
+
+    # INT-6: constructed after app.state.redis so the real evaluation-count
+    # signal (EVAL-3's telemetry buckets) is available; both
+    # AST_REWRITER_URL and AST_REWRITER_REPO_PATH are optional (unset means
+    # the code-reference signal is always None/"unknown", which
+    # StaleFlagDetector treats as "assume still referenced", never as
+    # "safe to archive" -- see its own doc comment). AST_REWRITER_REPO_PATH
+    # is a path on ast-rewriter's OWN filesystem (its scanner walks a local
+    # directory), not on this service -- a real deployment needs the
+    # target app repo checked out somewhere ast-rewriter can read; today
+    # that's this repo's own checkout as the dogfood case, not a
+    # multi-tenant customer-repo mechanism (not yet designed).
+    app.state.stale = StaleFlagDetector(
+        db_url=os.environ["DB_URL"],
+        redis_client=app.state.redis,
+        ast_rewriter_url=os.environ.get("AST_REWRITER_URL"),
+        repo_path=os.environ.get("AST_REWRITER_REPO_PATH"),
+    )
 
     # ClickHouse telemetry pipeline (optional)
     # Schema (run once in ClickHouse):

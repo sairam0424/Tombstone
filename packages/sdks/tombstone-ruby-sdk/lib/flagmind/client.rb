@@ -30,7 +30,22 @@ module Tombstone
     def evaluate(flag_key, context)
       state = @cache.get(flag_key)
       default_value = @defaults.fetch(flag_key, false)
-      @engine.evaluate(state, context, default_value, flag_key)
+      # Passes a real flag_lookup backed by @cache, NOT the 4-positional-arg
+      # call used before -- EvaluationEngine#evaluate defaults flag_lookup to
+      # ->(k) { nil } when omitted, documented there as being for callers
+      # with no snapshot access. This client DOES have snapshot access via
+      # @cache, but never threaded it through. Before this same PR's other
+      # fix (parse_prerequisites), prerequisites was always [] and Step 2
+      # never actually ran against real data, so a nil-returning lookup was
+      # dead code from this call path specifically. Once prerequisites are
+      # real, omitting flag_lookup here would make ANY hard-gated
+      # prerequisite permanently PREREQUISITE_FAILED regardless of the real
+      # dependency's state (nil never equals a real required_variation
+      # string) -- swapping "prerequisites silently ignored" for "every
+      # gated flag permanently blocked", which is worse. Found while
+      # verifying this PR against the identical bug an adversarial review
+      # found in the Java SDK's equivalent fix (PR #231).
+      @engine.evaluate(state, context, default_value, flag_key, flag_lookup: ->(k) { @cache.get(k) })
     end
 
     def enabled?(flag_key, context)
@@ -55,17 +70,94 @@ module Tombstone
       resp = Net::HTTP.start(uri.host, uri.port) { |h| h.request(req) }
       return unless resp.is_a?(Net::HTTPSuccess)
       data = JSON.parse(resp.body)
-      flags = (data["flags"] || []).map do |f|
+      @cache.load_snapshot(parse_snapshot_flags(data), (data["ts"] || 0).to_i)
+    rescue => e
+      warn "[Tombstone] snapshot fetch failed: #{e.message}"
+    end
+
+    # Extracted so a spec can exercise the real wire-parsing logic directly
+    # with a hand-built Hash (already run through JSON.parse), without
+    # stubbing Net::HTTP -- mirrors client_lag_spec.rb's existing
+    # `client.send(:private_method)` convention for testing private methods.
+    def parse_snapshot_flags(data)
+      (data["flags"] || []).map do |f|
         FlagEnvironmentState.new(
           flag_id: f["flag_id"] || "", flag_key: f["flag_key"] || "",
           environment: f["environment"] || "", enabled: f["enabled"] == true,
           rollout_pct: (f["rollout_pct"] || 0).to_i,
-          safe_default: f["safe_default"] || "false", updated_at: 0
+          safe_default: f["safe_default"] || "false",
+          updated_at: (f["updated_at"] || 0).to_i,
+          prerequisites: parse_prerequisites(f["prerequisites"]),
+          targeting_rules: parse_targeting_rules(f["targeting_rules"])
         )
       end
-      @cache.load_snapshot(flags)
-    rescue => e
-      warn "[Tombstone] snapshot fetch failed: #{e.message}"
+    end
+
+    # flag-api's real per-prerequisite wire shape (services/flag-api/
+    # internal/api/v1/environments.go's SnapshotPrerequisite): "flag_key"
+    # (NOT "prereq_flag_key" -- that's only flag_prerequisites' own DB
+    # column name, matching proto's ParentCondition message and every other
+    # SDK's own FlagPrerequisite type), plus "required_variation"/"gate".
+    # "gate" defaults to true (hard-blocking) when the wire omits it,
+    # matching flag-api's own AddPrerequisite default.
+    #
+    # Before this fix, fetch_snapshot never passed prerequisites: at all,
+    # so every FlagEnvironmentState defaulted to prerequisites: [] --
+    # PrerequisiteChecker.check_all's algorithm is otherwise correct, but
+    # was completely unreachable with real gating data (found by
+    # adversarial review of the Python SDK's equivalent fix, PR #229).
+    def parse_prerequisites(raw)
+      return [] unless raw.is_a?(Array)
+      raw.filter_map do |p|
+        next unless p.is_a?(Hash)
+        FlagPrerequisite.new(
+          flag_key: p["flag_key"] || "",
+          required_variation: p["required_variation"] || "true",
+          gate: p["gate"] != false
+        )
+      end
+    end
+
+    # flag-api's real per-rule wire shape (services/flag-api/internal/api/v1/
+    # targeting_rules.go): "id"/"rule_type"/"attribute"/"operator"/"values"/
+    # "variation"/"priority" -- ONE flat condition per rule row. This SDK's
+    # own TargetingRule model (mirroring Python/Java's GrowthBook-style
+    # design: multiple AND-combined conditions per rule + per-rule rollout
+    # sub-bucketing) predates the real backend format and doesn't match it
+    # 1:1 -- adapted here into a single-element conditions list, with
+    # rollout_pct fixed at 100 (there is no per-rule rollout concept on the
+    # backend; 100 means "always apply once matched"), mirroring the Java
+    # SDK's identical parseTargetingRules adapter (PR #247).
+    def parse_targeting_rules(raw)
+      return [] unless raw.is_a?(Array)
+      raw.filter_map do |r|
+        next unless r.is_a?(Hash)
+        values = r["values"].is_a?(Array) ? r["values"].map { |v| stringify_wire_value(v) } : []
+        condition = PropertyCondition.new(
+          attribute: r["attribute"] || "", operator: r["operator"] || "",
+          values: values, negate: false
+        )
+        TargetingRule.new(
+          id: r["id"] || "", conditions: [condition], rollout_pct: 100,
+          variation: r["variation"] || "", priority: (r["priority"] || 0).to_i
+        )
+      end
+    end
+
+    # A JSON float that happens to be a whole number (e.g. flag-api's JSONB
+    # "values" column round-tripping [21.0, 65.0]) must render as "21", not
+    # "21.0" -- RuleMatcher's eq/in/neq/nin operators compare via plain
+    # string equality against EvaluationContext.attrs, and a real caller's
+    # own attribute is far more likely to be a plain Integer (21) or a bare
+    # numeric string ("21") than "21.0", so "21.0" would silently fail to
+    # match/exclude a value it should. Numeric operators that go through
+    # Float() parsing (gt/gte/lt/lte) are unaffected either way. Found by
+    # adversarial review of PR #248 -- the identical .to_s coercion gap
+    # exists in the Java SDK's own parseTargetingRules, not fixed there.
+    def stringify_wire_value(v)
+      return "" if v.nil?
+      return (v == v.to_i ? v.to_i : v).to_s if v.is_a?(Float)
+      v.to_s
     end
 
     def start_sse_listener
@@ -101,6 +193,16 @@ module Tombstone
 
     def apply_event(json)
       data = JSON.parse(json)
+      # A syntactically valid JSON payload that isn't a Hash at the top
+      # level (e.g. "null", "42", "[1,2,3]") parses successfully, so
+      # `rescue JSON::ParserError` alone doesn't catch it -- data["flag_key"]
+      # below would then raise NoMethodError/TypeError, which propagates
+      # past this method entirely into start_sse_listener's outer rescue,
+      # tearing down and reconnecting the WHOLE SSE connection for one
+      # malformed event instead of just skipping it. Found by adversarial
+      # review of PR #248; identical pre-existing gap fixed here for all
+      # three SSE handlers, not just the new targeting_rules one.
+      return unless data.is_a?(Hash)
       @cache.apply_event(
         data["flag_key"], data["enabled"] == true,
         (data["rollout_pct"] || 0).to_i, (data["ts"] || 0).to_i
@@ -109,13 +211,53 @@ module Tombstone
       # malformed event — ignore
     end
 
+    # services/flag-api/internal/api/v1/prerequisites.go's PrerequisitesEvent
+    # -- a distinct payload shape (flag_key/environment/prerequisites/ts, no
+    # enabled/rollout_pct/reason at all) from a real flag event, so it gets
+    # its own handler rather than being routed through apply_event, which
+    # would otherwise coerce those missing keys into false/0 defaults for a
+    # flag that was never actually disabled.
+    def apply_prerequisites_event(json)
+      data = JSON.parse(json)
+      return unless data.is_a?(Hash)
+      flag_key = data["flag_key"]
+      return unless flag_key
+      @cache.apply_prerequisites_event(
+        flag_key, parse_prerequisites(data["prerequisites"]), (data["ts"] || 0).to_i
+      )
+    rescue JSON::ParserError
+      # malformed event — ignore
+    end
+
+    # services/flag-api/internal/api/v1/targeting_rules.go's TargetingRulesEvent
+    # -- mirrors apply_prerequisites_event exactly, for the same reason (a
+    # distinct payload shape from a real flag event, so it gets its own
+    # handler rather than being routed through apply_event).
+    def apply_targeting_rules_event(json)
+      data = JSON.parse(json)
+      return unless data.is_a?(Hash)
+      flag_key = data["flag_key"]
+      return unless flag_key
+      @cache.apply_targeting_rules_event(
+        flag_key, parse_targeting_rules(data["targeting_rules"]), (data["ts"] || 0).to_i
+      )
+    rescue JSON::ParserError
+      # malformed event — ignore
+    end
+
     # Route a parsed SSE frame. A "lag" frame is the gateway warning us that our
     # buffer overflowed and it DROPPED the real flag-update event; recover the
-    # dropped update by refetching the full snapshot. Everything else is a normal
-    # flag-update event applied incrementally to the cache.
+    # dropped update by refetching the full snapshot. A "prerequisites_updated"
+    # or "targeting_rules_updated" frame gets its own handler (see each
+    # handler's own comment). Everything else is a normal flag-update event
+    # applied incrementally to the cache.
     def dispatch_sse_event(event_type, data)
       if event_type == "lag"
         schedule_snapshot_refetch
+      elsif event_type == "prerequisites_updated"
+        apply_prerequisites_event(data)
+      elsif event_type == "targeting_rules_updated"
+        apply_targeting_rules_event(data)
       else
         apply_event(data)
       end

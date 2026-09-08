@@ -37,18 +37,40 @@ public class RuleMatcher {
                 "Attribute '" + condition.attribute() + "' not present in evaluation context");
         }
         String attrVal = String.valueOf(raw);
+        String rawOp = condition.operator().toLowerCase(Locale.ROOT);
         String op = normalizeOperator(condition.operator());
         List<String> values = condition.values();
-        boolean isGeo = GEO_ATTRIBUTES.contains(condition.attribute());
+        // isGeo is true whenever EITHER the attribute is a recognized geo
+        // path OR the operator itself declares geo semantics (GEO_COUNTRY/
+        // GEO_REGION) -- checking the attribute name ALONE meant a rule
+        // using a non-canonical attribute (e.g. "country" instead of
+        // "geo.country") with a real GEO_COUNTRY operator silently fell
+        // back to case-SENSITIVE matching, even though nothing (backend
+        // or SDK) validates that operator=GEO_COUNTRY implies
+        // attribute=="geo.country" -- flag-api's AddTargetingRuleRequest.
+        // validate() checks operator validity and non-empty attribute but
+        // never checks the two are paired correctly. Found by adversarial
+        // review of PR #247.
+        boolean isGeo = GEO_ATTRIBUTES.contains(condition.attribute())
+            || "geo_country".equals(rawOp) || "geo_region".equals(rawOp);
 
         boolean result;
         switch (op) {
             case "eq", "in" -> result = isGeo
                 ? containsIgnoreCase(values, attrVal)
                 : values.contains(attrVal);
-            case "neq", "nin" -> result = isGeo
+            // An EMPTY values list must never match "neq"/"nin": !values.contains(x)
+            // on an empty list is vacuously true (there is nothing to find, so
+            // "not found" is trivially true), which would make a rule with an
+            // empty/missing "values" list match EVERY context for EVERY
+            // attribute -- the opposite of "no exclusions configured, so
+            // exclude nothing". Same bug class found and fixed in the
+            // TypeScript SDK's evaluation.ts (adversarial review of PR #246);
+            // checked here proactively per that finding's own explicit note
+            // that the other 4 SDKs' evaluation engines likely share it.
+            case "neq", "nin" -> result = !values.isEmpty() && (isGeo
                 ? !containsIgnoreCase(values, attrVal)
-                : !values.contains(attrVal);
+                : !values.contains(attrVal));
             case "contains" -> result = anyContainsIgnoreCase(values, attrVal);
             case "startswith" -> result = anyStartsWithIgnoreCase(values, attrVal);
             case "endswith" -> result = anyEndsWithIgnoreCase(values, attrVal);
@@ -57,6 +79,24 @@ public class RuleMatcher {
                 result = evaluateSemver(op, attrVal, values, condition.attribute());
             case "date_before", "date_after" ->
                 result = evaluateDate(op, attrVal, values, condition.attribute());
+            // docs/SDK_CONTRACT.md:32 -- REGEX is declared (a real, distinct
+            // operator value in flag-api's targeting_rules.operator CHECK
+            // constraint) but deliberately NOT IMPLEMENTED in this release,
+            // across all 5 SDKs (parity matrix: "No" for every language) --
+            // matching TypeScript's own default:false behavior. Returning
+            // a definite false (not throwing) matters specifically for
+            // negate=true: a thrown exception would skip the whole rule
+            // regardless of negate, while the contract's literal
+            // "false, negated -> true" semantics require a definite
+            // result here. Does NOT implement real regex matching, which
+            // remains deliberately deferred ("Future work") for cross-SDK
+            // parity. Found missing by adversarial review of the .NET
+            // SDK's PR #249, which discovered Java's own switch had no
+            // "regex" case and fell through to the default throw below,
+            // diverging from the documented contract -- the .NET/Ruby
+            // SDKs already had this fix; this closes the identical gap
+            // here.
+            case "regex" -> result = false;
             default -> throw new InconclusiveMatchException("Unknown operator: '" + op + "'");
         }
         return condition.negate() ? !result : result;
@@ -68,6 +108,19 @@ public class RuleMatcher {
             case "not_in" -> "nin";
             case "prefix" -> "startswith";
             case "suffix" -> "endswith";
+            // flag-api's targeting_rules.operator CHECK constraint (schema.sql)
+            // has GEO_COUNTRY/GEO_REGION as real, distinct operator VALUES
+            // (not just an attribute-name convention) -- without this mapping,
+            // a targeting rule using either would hit the switch's default
+            // branch below and throw InconclusiveMatchException on every
+            // evaluation, silently never matching for any user. Mapped to
+            // "in" so it falls into the existing case "eq","in" branch, whose
+            // isGeo case-insensitive comparison (via GEO_ATTRIBUTES) already
+            // implements the real geo-matching semantics correctly -- found
+            // while wiring the real backend wire format into this SDK for the
+            // first time (targeting_rules had zero real snapshot data before
+            // this change, so this gap was never previously reachable).
+            case "geo_country", "geo_region" -> "in";
             default -> op;
         };
     }

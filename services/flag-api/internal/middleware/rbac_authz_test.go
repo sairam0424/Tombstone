@@ -41,10 +41,11 @@ func newTestRBAC() *RBACMiddleware {
 // that the default service-token role (VIEWER) is denied all of them. If someone
 // adds a mutating route with a weaker gate, add it here.
 var writeGates = []struct{ resource, action string }{
-	{"flags", "write"},        // POST /flags, DELETE /flags/{key}, prerequisites, schedule
-	{"environments", "write"}, // PATCH /flags/{key}/environments/{env}
-	{"flags", "kill_switch"},  // POST /flags/{key}/kill
-	{"admin", "admin"},        // GET /compliance/export, break-glass tokens
+	{"flags", "write"},           // POST /flags, DELETE /flags/{key}, prerequisites, schedule
+	{"environments", "write"},    // PATCH /flags/{key}/environments/{env}
+	{"flags", "kill_switch"},     // POST /flags/{key}/kill
+	{"flags", "circuit_breaker"}, // POST /flags/{key}/rollback-step (EVAL-4)
+	{"admin", "admin"},           // GET /compliance/export, break-glass tokens
 }
 
 func TestViewerDeniedEveryWriteGate(t *testing.T) {
@@ -83,10 +84,30 @@ func TestPermissionMatrixLeastPrivilege(t *testing.T) {
 		{RoleOwner, "flags", "kill_switch", true, "evaluator auto-rollback needs this"},
 		{RoleOwner, "approvals", "approve", true, "four-eyes approver"},
 		{RoleOwner, "admin", "admin", false, "owner is not admin"},
+		// EVAL-4 (PR #220 adversarial review): flags:circuit_breaker must
+		// NOT come bundled with kill_switch -- the whole point of the new
+		// permission is that an OWNER/ADMIN does not get the graduated
+		// rollback-step capability "for free" the way they already hold
+		// the full kill switch.
+		{RoleOwner, "flags", "circuit_breaker", false, "graduated rollback-step must not be OWNER-usable -- would bypass require_approval for routine tuning"},
 
-		// ADMIN: everything, including audit export.
+		// ADMIN: everything, including audit export -- but still NOT
+		// circuit_breaker, for the identical reason as OWNER above.
 		{RoleAdmin, "admin", "admin", true, "admin exports the audit log"},
 		{RoleAdmin, "flags", "kill_switch", true, "admin can kill"},
+		{RoleAdmin, "flags", "circuit_breaker", false, "graduated rollback-step must not be ADMIN-usable either -- same reasoning as OWNER"},
+
+		// CIRCUIT_BREAKER: assignable only via service_tokens.role
+		// (migration 026), never a human project-membership grant. Holds
+		// ONLY circuit_breaker + read -- deliberately not write/kill_switch/
+		// admin/approvals, since its sole purpose is the automated
+		// rollback-step endpoint.
+		{RoleCircuitBreaker, "flags", "circuit_breaker", true, "the automated rollback-step endpoint's whole reason for existing"},
+		{RoleCircuitBreaker, "flags", "read", true, "sanity-checking current state before acting"},
+		{RoleCircuitBreaker, "flags", "write", false, "not a general flag-administration role"},
+		{RoleCircuitBreaker, "flags", "kill_switch", false, "must not also get the full, unconditional kill switch"},
+		{RoleCircuitBreaker, "admin", "admin", false, "must not export the audit log"},
+		{RoleCircuitBreaker, "approvals", "approve", false, "must not approve change requests"},
 	}
 
 	for _, c := range cases {
@@ -155,6 +176,54 @@ func TestRequirePermissionEnforcesRole(t *testing.T) {
 			t.Fatalf("status = %d reached = %v, want 403 and handler NOT reached", rec.Code, reached)
 		}
 	})
+}
+
+// TestCircuitBreakerPermissionExcludesHumanRoles is the regression guard for
+// the HIGH-severity finding from PR #220's adversarial review: reusing
+// flags:kill_switch for EVAL-4's graduated rollback-step capability would
+// have let any OWNER/ADMIN bypass require_approval for a routine rollout
+// change, not just genuine incident response, since those are exactly the
+// roles that already hold kill_switch. flags:circuit_breaker is a distinct
+// permission, held only by RoleCircuitBreaker (assignable only via
+// service_tokens.role, migration 026 -- never a human project-membership
+// grant). This test drives the REAL middleware chain (not just
+// hasPermission's table lookup above) end to end, exactly as
+// cmd/main.go's route registration does for POST /flags/{key}/rollback-step.
+func TestCircuitBreakerPermissionExcludesHumanRoles(t *testing.T) {
+	rbac := newTestRBAC()
+
+	reached := false
+	handler := rbac.RequirePermission("flags", "circuit_breaker")(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	callAs := func(role Role) int {
+		reached = false
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/flags/checkout/rollback-step", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyRole, role))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for _, role := range []Role{RoleViewer, RoleOperator, RoleOwner, RoleAdmin} {
+		if code := callAs(role); code != http.StatusForbidden {
+			t.Errorf("role %s: status = %d, want 403 -- every human-assignable role must be denied the graduated rollback-step capability", role, code)
+		}
+		if reached {
+			t.Errorf("role %s: handler ran despite insufficient permissions", role)
+		}
+	}
+
+	if code := callAs(RoleCircuitBreaker); code != http.StatusOK {
+		t.Errorf("RoleCircuitBreaker: status = %d, want 200 -- this is the ONE role the endpoint exists for", code)
+	}
+	if !reached {
+		t.Error("RoleCircuitBreaker: handler did not run despite holding the required permission")
+	}
 }
 
 func TestResolveRoleServiceTokenUsesPerTokenRole(t *testing.T) {

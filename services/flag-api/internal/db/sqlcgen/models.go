@@ -259,6 +259,7 @@ type TargetingRule struct {
 	Values      json.RawMessage
 	Variation   string
 	Priority    int32
+	CreatedAt   time.Time
 }
 
 type UserMfaLog struct {

@@ -99,6 +99,22 @@ secrets:
   redisUrl: ""
   jwtToken: ""
   apiToken: ""
+  # EVAL-2: optional -- unlike the four secrets above (all `required` in
+  # secret.yaml, hard-failing helm install if unset), an unset webhook just
+  # makes evaluator's auto-rollback Slack alert a logged no-op, matching
+  # this codebase's existing posture of treating third-party notification
+  # config as optional (see infra/.env.example's own SLACK_WEBHOOK_URL).
+  slackWebhookUrl: ""
+
+# EVAL-2: base URL of workspace-dashboard, used by evaluator to build the
+# "View in Dashboard" link in the Slack auto-rollback alert above. Optional --
+# unset produces a relative "/flags/{key}" link in the alert instead of an
+# absolute one (evaluator's own NotifyRollback omits the button entirely in
+# that case, since Slack has no defined behavior for a relative button URL).
+# Not derived from ingress.hosts below: ingress can be disabled/point at a
+# different domain than where the dashboard is actually reachable from an
+# on-call engineer's Slack client, so this is set independently.
+dashboardUrl: ""
 
 postgresql:
   enabled: false

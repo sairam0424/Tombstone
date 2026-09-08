@@ -215,6 +215,136 @@ def test_analyze_warehouse_failure_returns_502(mock_get_connector):
     assert response.status_code == 502
 
 
+@patch("app.experiments.routes.generate_ship_explanation")
+@patch("app.experiments.routes.get_connector")
+def test_analyze_srm_mismatch_blocks_rather_than_reporting_ship(
+    mock_get_connector, mock_explanation
+):
+    """
+    EXP-2: a severely lopsided control/treatment split (60/40 against an
+    implicit 50/50 expectation) must block with recommendation="BLOCKED_SRM"
+    rather than reporting a real SHIP/NO_SHIP/CONTINUE verdict computed on
+    top of a traffic split that is itself broken. Driven through the real
+    route, not just the isolated analyzer.recommend() unit test.
+    """
+    connector = CountingConnector(
+        {
+            "control": AggregatedMetric(
+                variant="control",
+                sample_size=6000,
+                mean=0.30,
+                std=0.4583,
+                variance=0.21,
+                sum=1800.0,
+                conversion_count=1800,
+            ),
+            "treatment": AggregatedMetric(
+                variant="treatment",
+                sample_size=4000,
+                mean=0.32,
+                std=0.4665,
+                variance=0.2176,
+                sum=1280.0,
+                conversion_count=1280,
+            ),
+        }
+    )
+    mock_get_connector.return_value = connector
+
+    client = TestClient(main.app)
+    response = client.post("/api/v1/experiments/analyze", json=_request_body())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recommendation"] == "BLOCKED_SRM"
+    assert body["srm_p_value"] is not None
+    assert body["srm_p_value"] < 0.001
+    assert body["sample_sizes"] == {"control": 6000, "treatment": 4000}
+    # The stat_method analysis still ran (cheap, in-process), but its
+    # output must NOT reach the response once SRM is mismatched -- these
+    # fields are nulled/zeroed, not passed through raw, so a client
+    # reading is_significant/p_value alone (without special-casing
+    # recommendation=="BLOCKED_SRM" first) cannot be misled into rendering
+    # "treatment up X%, statistically significant" from a split known to
+    # be broken (found by adversarial review of PR #216).
+    assert body["relative_lift"] == 0.0
+    assert body["is_significant"] is False
+    assert body["p_value"] is None
+    assert body["probability_beats_control"] is None
+    # The warehouse query DOES need to run (the real sample sizes are only
+    # known after it), but the real network round-trip to the LLM must be
+    # skipped once SRM is found mismatched -- an untrustworthy result is
+    # not worth explaining in plain language.
+    assert connector.call_count == 1
+    mock_explanation.assert_not_called()
+    assert body["ai_explanation"] == ""
+    assert body["explanation_generated"] is False
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_a_legitimate_90_10_canary_is_not_falsely_blocked(mock_get_connector):
+    """
+    Regression test for a real gap found by adversarial review of PR #216:
+    /analyze used to have no way to express a non-50/50 intended split, so
+    a legitimate 90/10 canary-style rollout -- Tombstone's own domain is
+    rollout_pct-driven, so this is the NORM, not an edge case -- would get
+    compared against an implicit 50/50 expectation and permanently return
+    recommendation="BLOCKED_SRM" for a perfectly healthy experiment.
+    expected_control_ratio now lets a caller declare the real intended
+    split; passing it must actually change the outcome, not be silently
+    ignored.
+    """
+    mock_get_connector.return_value = FakeConnector(
+        {
+            "control": AggregatedMetric(
+                variant="control",
+                sample_size=9000,
+                mean=0.30,
+                std=0.4583,
+                variance=0.21,
+                sum=2700.0,
+                conversion_count=2700,
+            ),
+            "treatment": AggregatedMetric(
+                variant="treatment",
+                sample_size=1000,
+                mean=0.32,
+                std=0.4665,
+                variance=0.2176,
+                sum=320.0,
+                conversion_count=320,
+            ),
+        }
+    )
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze",
+        json=_request_body(expected_control_ratio=0.9),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recommendation"] != "BLOCKED_SRM"
+    assert body["srm_p_value"] == pytest.approx(1.0)
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_clean_split_still_reports_a_real_recommendation(mock_get_connector):
+    """A healthy, evenly-split experiment must NOT be blocked -- proves the
+    SRM gate doesn't fire on every request regardless of the real split."""
+    mock_get_connector.return_value = FakeConnector(_CLOSE_METRICS)
+
+    client = TestClient(main.app)
+    response = client.post("/api/v1/experiments/analyze", json=_request_body())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recommendation"] != "BLOCKED_SRM"
+    assert body["srm_p_value"] is not None
+    assert body["srm_p_value"] > 0.001
+
+
 @patch("app.experiments.routes.get_connector")
 def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_connector):
     """

@@ -235,6 +235,53 @@ func (h *Hub) Broadcast(environment string, event FlagEvent, streamMsgID string)
 	}
 }
 
+// rawRelayEventKinds are Streams-only event kinds that bypass FlagEvent's
+// typed unmarshal/dedup entirely and are relayed to SSE clients verbatim via
+// BroadcastRaw below -- neither of these payloads' fields is ever inspected
+// by gateway, so there is nothing to gain from a typed unmarshal/remarshal
+// round-trip. Checked by three independent call sites that must all agree
+// on this set: streams.go's live RunStreamConsumer path, dlq.go's
+// reclaim-and-retry path, and streams.go's BuildReplayFrames XRANGE
+// catch-up path -- if any one of them checked a kind the others didn't, a
+// reconnecting client's catch-up replay could relay an event the live path
+// would have skipped (or vice versa), or a reclaimed message could get
+// mis-unmarshaled as a FlagEvent (see prerequisites_updated's own original
+// disclosure of that exact failure mode, dlq.go).
+var rawRelayEventKinds = map[string]bool{
+	"prerequisites_updated":   true,
+	"targeting_rules_updated": true,
+}
+
+func isRawRelayEventKind(kind string) bool {
+	return rawRelayEventKinds[kind]
+}
+
+// BroadcastRaw fans out a pre-serialized JSON payload verbatim under the
+// given SSE event: name, for event kinds this Hub does not need to
+// typed-unmarshal or dedupe (see rawRelayEventKinds above).
+// Deliberately does NOT run eventDeduper.claim -- dedup exists solely to
+// suppress a second delivery of the SAME logical event via the legacy
+// pub/sub transport, and no kind in rawRelayEventKinds is ever dual-written
+// there (see RunStreamConsumer's own "event" Values-map discriminator check).
+func (h *Hub) BroadcastRaw(environment, eventType string, payload []byte, streamMsgID string) {
+	v, ok := h.envs.Load(environment)
+	if !ok {
+		return // no clients subscribed to this environment
+	}
+	eb := v.(*EnvironmentBroadcaster)
+
+	frame := rawFrame(eventType, payload, streamMsgID)
+
+	sent, dropped := eb.Broadcast(frame)
+	if dropped > 0 {
+		h.logger.Warn("backpressure: events dropped for slow clients",
+			zap.String("env", environment),
+			zap.String("event_type", eventType),
+			zap.Int("dropped", dropped),
+			zap.Int("sent", sent))
+	}
+}
+
 // AllStats returns per-environment metrics for the /gateway/metrics endpoint.
 func (h *Hub) AllStats() map[string]EnvStats {
 	result := make(map[string]EnvStats)
@@ -323,6 +370,18 @@ func sseFrame(eventType string, event FlagEvent, id string) []byte {
 // at the (already-trimmed) ID it reconnected with.
 func snapshotFrame(snapshot []byte, newestID string) []byte {
 	return []byte(fmt.Sprintf("%sevent: snapshot\ndata: %s\n\n", idLine(newestID), snapshot))
+}
+
+// rawFrame builds an SSE frame carrying a pre-serialized JSON payload
+// verbatim -- for event kinds the gateway relays without ever needing to
+// typed-unmarshal, inspect a field, or dedupe (currently only
+// prerequisites_updated, which is Streams-only with no legacy pub/sub
+// dual-write to dedupe against -- see Broadcaster.RunStreamConsumer's own
+// "event" Values-map discriminator check). Shares snapshotFrame's exact
+// shape, just with a caller-supplied event: name instead of a hardcoded
+// "snapshot".
+func rawFrame(eventType string, payload []byte, id string) []byte {
+	return []byte(fmt.Sprintf("%sevent: %s\ndata: %s\n\n", idLine(id), eventType, payload))
 }
 
 func idLine(id string) string {

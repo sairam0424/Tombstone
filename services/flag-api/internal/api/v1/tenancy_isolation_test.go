@@ -70,12 +70,13 @@ func TestTenancyIsolation(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 	snapH := NewSnapshotHandler(database, logger)
-	prereqH := NewPrerequisiteHandler(database, logger)
+	prereqH := NewPrerequisiteHandler(database, rdb, logger)
+	targetingRuleH := NewTargetingRuleHandler(database, rdb, logger)
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
 	auditH := NewAuditHandler(database, logger, auditW)
-	crH := NewChangeRequestHandler(database, rdb, logger, auditW)
+	crH := NewChangeRequestHandler(database, rdb, logger, auditW, "")
 
 	const sharedKey = "ten1a-shared-key"
 
@@ -270,17 +271,95 @@ func TestTenancyIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("AddPrerequisite rejects a prereq_flag_key that only exists in another project", func(t *testing.T) {
+	t.Run("AddPrerequisite rejects a flag_key that only exists in another project", func(t *testing.T) {
 		onlyInB := createTestFlag(t, flagH, projectB, "ten1a-only-in-b")
 
 		req := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+sharedKey+"/prerequisites",
-			map[string]any{"prereq_flag_key": onlyInB.Key}, projectA, map[string]string{"key": sharedKey})
+			map[string]any{"flag_key": onlyInB.Key}, projectA, map[string]string{"key": sharedKey})
 		rec := httptest.NewRecorder()
 		prereqH.AddPrerequisite(rec, req)
 
 		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422 (prereq_flag_key must not resolve across projects); body: %s",
+			t.Fatalf("status = %d, want 422 (flag_key must not resolve across projects); body: %s",
 				rec.Code, rec.Body.String())
+		}
+	})
+
+	// TEN-1a coverage for the new targeting_rules surface (PR #245) --
+	// flagged as missing by adversarial review of that PR. Proves the
+	// same guarantee the AddPrerequisite subtest above proves for
+	// prerequisites: a shared flag KEY existing in two different projects
+	// must never let one project's rule additions/reads/deletes reach the
+	// other project's row for that same key.
+	t.Run("AddTargetingRule/ListTargetingRules/DeleteTargetingRule never cross projects for the same shared key", func(t *testing.T) {
+		addReq := newTenancyRequest(t, http.MethodPost, "/api/v1/flags/"+sharedKey+"/environments/production/rules",
+			map[string]any{"rule_type": "USER", "attribute": "email", "operator": "EQ", "variation": "true"},
+			projectA, map[string]string{"key": sharedKey, "env": "production"})
+		addRec := httptest.NewRecorder()
+		targetingRuleH.AddTargetingRule(addRec, addReq)
+		if addRec.Code != http.StatusCreated {
+			t.Fatalf("AddTargetingRule in project A: status = %d, want 201; body: %s", addRec.Code, addRec.Body.String())
+		}
+		var created TargetingRule
+		if err := json.NewDecoder(addRec.Body).Decode(&created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		listA := newTenancyRequest(t, http.MethodGet, "/api/v1/flags/"+sharedKey+"/environments/production/rules",
+			nil, projectA, map[string]string{"key": sharedKey, "env": "production"})
+		listARec := httptest.NewRecorder()
+		targetingRuleH.ListTargetingRules(listARec, listA)
+		var respA struct {
+			Total int `json:"total"`
+		}
+		if err := json.NewDecoder(listARec.Body).Decode(&respA); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if respA.Total != 1 {
+			t.Fatalf("project A's own ListTargetingRules total = %d, want 1", respA.Total)
+		}
+
+		// The SAME key resolves to a DIFFERENT flag row in project B
+		// (flagB, created earlier) -- project B must see ZERO rules for it.
+		listB := newTenancyRequest(t, http.MethodGet, "/api/v1/flags/"+sharedKey+"/environments/production/rules",
+			nil, projectB, map[string]string{"key": sharedKey, "env": "production"})
+		listBRec := httptest.NewRecorder()
+		targetingRuleH.ListTargetingRules(listBRec, listB)
+		var respB struct {
+			Total int `json:"total"`
+		}
+		if err := json.NewDecoder(listBRec.Body).Decode(&respB); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if respB.Total != 0 {
+			t.Fatalf("project A's targeting rule leaked into project B's ListTargetingRules: total = %d, want 0", respB.Total)
+		}
+
+		// Project B must not be able to delete project A's rule by ID,
+		// even though it's a real, existing ID -- InsertTargetingRule's own
+		// project_id scoping (via ResolveFlagIDByKey) must hold for delete too.
+		deleteFromB := newTenancyRequest(t, http.MethodDelete, "/api/v1/flags/"+sharedKey+"/environments/production/rules/"+created.ID,
+			nil, projectB, map[string]string{"key": sharedKey, "env": "production", "id": created.ID})
+		deleteRec := httptest.NewRecorder()
+		targetingRuleH.DeleteTargetingRule(deleteRec, deleteFromB)
+		if deleteRec.Code != http.StatusNotFound {
+			t.Fatalf("project B deleting project A's targeting rule: status = %d, want 404; body: %s",
+				deleteRec.Code, deleteRec.Body.String())
+		}
+
+		// Confirm the row survived project B's failed delete attempt.
+		listAAfter := newTenancyRequest(t, http.MethodGet, "/api/v1/flags/"+sharedKey+"/environments/production/rules",
+			nil, projectA, map[string]string{"key": sharedKey, "env": "production"})
+		listAAfterRec := httptest.NewRecorder()
+		targetingRuleH.ListTargetingRules(listAAfterRec, listAAfter)
+		var respAAfter struct {
+			Total int `json:"total"`
+		}
+		if err := json.NewDecoder(listAAfterRec.Body).Decode(&respAAfter); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if respAAfter.Total != 1 {
+			t.Fatalf("project A's rule was removed by project B's cross-project delete attempt: total = %d, want 1", respAAfter.Total)
 		}
 	})
 
@@ -597,7 +676,7 @@ func TestArchiveFlagPublishesAnArchivedEventForAnomalyEviction(t *testing.T) {
 		t.Fatalf("audit key: %v", err)
 	}
 	auditW := audit.NewWriter(database, auditKey)
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 
 	const flagKey = "int4-archive-event-flag"
 	createTestFlag(t, flagH, projectID, flagKey)

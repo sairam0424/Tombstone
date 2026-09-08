@@ -21,7 +21,12 @@ import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { evaluate } from "../evaluation.js";
-import type { EvaluationContext, FlagEnvironmentState } from "../types.js";
+import type { FlagLookup } from "../evaluation.js";
+import type {
+  EvaluationContext,
+  FlagEnvironmentState,
+  FlagPrerequisite,
+} from "../types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -201,5 +206,179 @@ describe("@tomb-stone/edge — evaluate()", () => {
       assert.strictEqual(next.value, first.value);
       assert.strictEqual(next.reason, first.reason);
     }
+  });
+});
+
+describe("@tomb-stone/edge — evaluate() prerequisites (SDK-2 follow-up)", () => {
+  const ctx: EvaluationContext = { userId: "u" };
+
+  function flagState(
+    flagKey: string,
+    opts: {
+      enabled?: boolean;
+      rolloutPct?: number;
+      safeDefault?: string;
+      prerequisites?: FlagPrerequisite[];
+    } = {},
+  ): FlagEnvironmentState {
+    return {
+      flagKey,
+      enabled: opts.enabled ?? true,
+      rolloutPct: opts.rolloutPct ?? 100,
+      safeDefault: opts.safeDefault ?? "false",
+      environment: "test",
+      prerequisites: opts.prerequisites,
+    };
+  }
+
+  function lookup(flags: FlagEnvironmentState[]): FlagLookup {
+    const map = new Map(flags.map((f) => [f.flagKey, f]));
+    return { get: (k: string) => map.get(k) };
+  }
+
+  it("blocks with PREREQUISITE_FAILED when a gating prerequisite's variation does not match", () => {
+    const parent = flagState("parent-flag", { enabled: false }); // OFF -> "false"
+    const child = flagState("child-flag", {
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: true },
+      ],
+    });
+    const cache = lookup([parent, child]);
+    const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
+    assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
+    assert.strictEqual(result.value, false);
+    assert.strictEqual(
+      result.ruleId,
+      "parent-flag",
+      "ruleId must identify which prerequisite blocked evaluation",
+    );
+  });
+
+  it("proceeds to the child's own rollout when a gating prerequisite's variation matches", () => {
+    const parent = flagState("parent-flag", { enabled: true, rolloutPct: 100 }); // -> "true"
+    const child = flagState("child-flag", {
+      rolloutPct: 100,
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: true },
+      ],
+    });
+    const cache = lookup([parent, child]);
+    const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("does not block when a non-gating (gate: false) prerequisite's variation does not match", () => {
+    const parent = flagState("parent-flag", { enabled: false }); // OFF -> "false"
+    const child = flagState("child-flag", {
+      rolloutPct: 100,
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: false },
+      ],
+    });
+    const cache = lookup([parent, child]);
+    const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("blocks with PREREQUISITE_FAILED when a gating prerequisite flag is missing from the cache", () => {
+    const child = flagState("child-flag", {
+      prerequisites: [
+        { flagKey: "never-seen", requiredVariation: "true", gate: true },
+      ],
+    });
+    const cache = lookup([child]);
+    const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
+    assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
+    assert.strictEqual(result.ruleId, "never-seen");
+  });
+
+  it("does not block when a non-gating prerequisite flag is missing from the cache", () => {
+    const child = flagState("child-flag", {
+      rolloutPct: 100,
+      prerequisites: [
+        { flagKey: "never-seen", requiredVariation: "true", gate: false },
+      ],
+    });
+    const cache = lookup([child]);
+    const result = evaluate<boolean>(child, ctx, false, "child-flag", cache);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("does not enforce prerequisites when no cache is provided — permissive, matching pre-prerequisites behavior", () => {
+    const child = flagState("child-flag", {
+      rolloutPct: 100,
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: true },
+      ],
+    });
+    // No 5th (cache) argument at all — the direct low-level call site this
+    // package's tests above all use.
+    const result = evaluate<boolean>(child, ctx, false, "child-flag");
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("caps recursion at MAX_PREREQ_DEPTH (5) — a chain deeper than the cap permissively falls through instead of enforcing an unreachable prerequisite", () => {
+    // flag0 -> flag1 -> flag2 -> flag3 -> flag4 -> flag5, each gating on the
+    // next at requiredVariation "true". flag5 is evaluated at depth=5 (the
+    // cap), so its OWN prerequisites (a gating reference to "flag6", which
+    // deliberately does not exist in the cache) must NOT be enforced — if
+    // the cap didn't apply, this missing gating prerequisite would fail
+    // closed and the assertion below would fail.
+    const flags: FlagEnvironmentState[] = [];
+    for (let i = 0; i <= 4; i++) {
+      flags.push(
+        flagState(`flag${i}`, {
+          rolloutPct: 100,
+          prerequisites: [
+            {
+              flagKey: `flag${i + 1}`,
+              requiredVariation: "true",
+              gate: true,
+            },
+          ],
+        }),
+      );
+    }
+    flags.push(
+      flagState("flag5", {
+        rolloutPct: 100,
+        prerequisites: [
+          { flagKey: "flag6", requiredVariation: "true", gate: true },
+        ],
+      }),
+    );
+    const cache = lookup(flags);
+    const result = evaluate<boolean>(flags[0], ctx, false, "flag0", cache);
+    assert.strictEqual(result.reason, "FALLTHROUGH");
+    assert.strictEqual(result.value, true);
+  });
+
+  it("a non-finite depth (NaN) does not silently disable prerequisite enforcement", () => {
+    // Before the fix, `depth < MAX_PREREQ_DEPTH` with depth=NaN evaluates
+    // to false (any comparison with NaN is false), so checkPrerequisites
+    // was never invoked at all -- gating silently skipped with no error.
+    // A direct low-level caller could pass this by mistake since depth is
+    // part of evaluate()'s public signature. Found by adversarial review
+    // of PR #244.
+    const parent = flagState("parent-flag", { enabled: false }); // OFF -> "false"
+    const child = flagState("child-flag", {
+      prerequisites: [
+        { flagKey: "parent-flag", requiredVariation: "true", gate: true },
+      ],
+    });
+    const cache = lookup([parent, child]);
+    const result = evaluate<boolean>(
+      child,
+      ctx,
+      false,
+      "child-flag",
+      cache,
+      NaN,
+    );
+    assert.strictEqual(result.reason, "PREREQUISITE_FAILED");
   });
 });

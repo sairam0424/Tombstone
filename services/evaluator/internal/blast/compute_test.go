@@ -2,46 +2,86 @@ package blast
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"strconv"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
-// TestCompute_ScopesBothQueriesByProjectID closes a test-coverage gap
-// flagged by adversarial review of PR #206 (INT-2's tenancy fix):
-// blast_radius_test.go's existing tests only ever call the pure scoreRisk()
-// method on a zero-value Calculator with a nil db -- Compute() itself, and
-// the project_id-scoped SQL this PR added to it, had never been exercised
-// by any test. A placeholder-ordering mistake or a typo'd column name would
-// have compiled cleanly, passed go vet, and passed every existing test.
-func TestCompute_ScopesBothQueriesByProjectID(t *testing.T) {
+func newTestCalculatorDeps(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *redis.Client) {
+	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New() failed: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
-	mock.ExpectQuery("SELECT DISTINCT flag_key FROM audit_log").
-		WithArgs("checkout-v2", "production", "project-a").
-		WillReturnRows(sqlmock.NewRows([]string{"flag_key"}).
-			AddRow("fraud-check").
-			AddRow("payments-v3"))
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
 
-	mock.ExpectQuery("SELECT AVG").
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	return db, mock, rdb
+}
+
+// seedTelemetryBucket writes a real telemetry bucket at the current hour,
+// matching the JSON shape telemetry.Aggregator.persistTelemetryBucket
+// writes -- Compute's recentTelemetry reads this exact key shape.
+func seedTelemetryBucket(t *testing.T, rdb *redis.Client, flagKey, env string, total, errors int64) {
+	t.Helper()
+	unixHour := time.Now().UTC().Truncate(time.Hour).Unix() / 3600
+	key := "telemetry:" + flagKey + ":" + env + ":hour:" + strconv.FormatInt(unixHour, 10)
+	payload, err := json.Marshal(struct {
+		Total  int64 `json:"total"`
+		Errors int64 `json:"errors"`
+	}{Total: total, Errors: errors})
+	if err != nil {
+		t.Fatalf("marshal seed bucket: %v", err)
+	}
+	if err := rdb.Set(context.Background(), key, payload, time.Hour).Err(); err != nil {
+		t.Fatalf("seed telemetry bucket: %v", err)
+	}
+}
+
+// TestCompute_ScopesDependentFlagsQueryByProjectID proves the real
+// flag_prerequisites query (which replaced the old audit_log co-change
+// heuristic) binds flagKey and projectID correctly -- a placeholder-
+// ordering mistake or typo'd column name would compile cleanly, pass go
+// vet, and pass every test that only exercises the pure scoreRisk() method.
+func TestCompute_ScopesDependentFlagsQueryByProjectID(t *testing.T) {
+	db, mock, rdb := newTestCalculatorDeps(t)
+
+	mock.ExpectQuery("SELECT f.key, f.owner_id FROM flag_prerequisites").
 		WithArgs("checkout-v2", "project-a").
-		WillReturnRows(sqlmock.NewRows([]string{"avg"}).AddRow(0.01))
+		WillReturnRows(sqlmock.NewRows([]string{"key", "owner_id"}).
+			AddRow("fraud-check", "payments-team").
+			AddRow("payments-v3", "payments-team").
+			AddRow("receipts", "billing-team"))
 
-	calc := NewCalculator(db, "http://unused")
+	calc := NewCalculator(db, rdb, "http://unused")
 	result, err := calc.Compute(context.Background(), "checkout-v2", "production", "project-a", 50)
 	if err != nil {
 		t.Fatalf("Compute() returned an error: %v", err)
 	}
 
-	if result.DependentFlagsCount != 2 {
-		t.Errorf("DependentFlagsCount = %d, want 2", result.DependentFlagsCount)
+	if result.DependentFlagsCount != 3 {
+		t.Errorf("DependentFlagsCount = %d, want 3", result.DependentFlagsCount)
 	}
-	if result.HistoricalErrorDelta != 0.01 {
-		t.Errorf("HistoricalErrorDelta = %v, want 0.01", result.HistoricalErrorDelta)
+	if len(result.AffectedServices) != 2 {
+		t.Errorf("AffectedServices = %v, want 2 distinct owners", result.AffectedServices)
+	}
+	if result.Confidence != "LOW" {
+		t.Errorf("Confidence = %q, want LOW (no telemetry seeded)", result.Confidence)
+	}
+	if result.HistoricalErrorRate != 0 {
+		t.Errorf("HistoricalErrorRate = %v, want 0 when cold-start", result.HistoricalErrorRate)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -49,35 +89,100 @@ func TestCompute_ScopesBothQueriesByProjectID(t *testing.T) {
 	}
 }
 
-// TestCompute_DifferentProjectIDsProduceDifferentBoundArgs proves the
-// project_id value passed to Compute() actually reaches BOTH queries as a
-// real bound parameter, not just a comment/unused variable -- a stray
-// "-- project_id filter removed" edit with an unused trailing arg would
-// still compile and still pass TestCompute_ScopesBothQueriesByProjectID
-// above if that test only checked its own hardcoded project_id; asserting
-// on ExpectationsWereMet with a DIFFERENT project_id here, on a fresh
-// mock, provides an independent check that the argument travels through.
-func TestCompute_DifferentProjectIDsProduceDifferentBoundArgs(t *testing.T) {
-	db, mock, err := sqlmock.New()
+// TestCompute_ReadsRealTelemetryForErrorRateAndConfidence proves Compute
+// reads the SAME Redis telemetry buckets telemetry.Aggregator writes
+// (EVAL-3), rather than the old fake constant capped at 0.02.
+func TestCompute_ReadsRealTelemetryForErrorRateAndConfidence(t *testing.T) {
+	db, mock, rdb := newTestCalculatorDeps(t)
+
+	mock.ExpectQuery("SELECT f.key, f.owner_id FROM flag_prerequisites").
+		WithArgs("checkout-v2", "project-a").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "owner_id"}))
+
+	seedTelemetryBucket(t, rdb, "checkout-v2", "production", 1000, 80)
+
+	calc := NewCalculator(db, rdb, "http://unused")
+	result, err := calc.Compute(context.Background(), "checkout-v2", "production", "project-a", 60)
 	if err != nil {
-		t.Fatalf("sqlmock.New() failed: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery("SELECT DISTINCT flag_key FROM audit_log").
-		WithArgs("checkout-v2", "production", "project-b").
-		WillReturnRows(sqlmock.NewRows([]string{"flag_key"}))
-
-	mock.ExpectQuery("SELECT AVG").
-		WithArgs("checkout-v2", "project-b").
-		WillReturnRows(sqlmock.NewRows([]string{"avg"}))
-
-	calc := NewCalculator(db, "http://unused")
-	if _, err := calc.Compute(context.Background(), "checkout-v2", "production", "project-b", 10); err != nil {
 		t.Fatalf("Compute() returned an error: %v", err)
 	}
 
+	if result.RecentEvaluationCount != 1000 {
+		t.Errorf("RecentEvaluationCount = %d, want 1000", result.RecentEvaluationCount)
+	}
+	if result.Confidence != "HIGH" {
+		t.Errorf("Confidence = %q, want HIGH (1000 >= coldStartMinEvaluations)", result.Confidence)
+	}
+	if result.HistoricalErrorRate != 0.08 {
+		t.Errorf("HistoricalErrorRate = %v, want 0.08", result.HistoricalErrorRate)
+	}
+	// 60% traffic + 8% real error rate crosses the BLOCKED gate that a fake
+	// constant capped at 0.02 could never reach.
+	if result.RiskScore != RiskBlocked {
+		t.Errorf("RiskScore = %s, want BLOCKED", result.RiskScore)
+	}
+	if result.JustificationRequired == "" {
+		t.Error("JustificationRequired must be set when risk is BLOCKED")
+	}
+}
+
+// TestCompute_CachesRepeatedIdenticalCalls proves the second Compute() call
+// for the identical input reuses the cached result instead of re-querying
+// Postgres -- expecting the DB query exactly once, then asserting a second
+// call still succeeds, is the regression test for the cache actually being
+// consulted rather than merely present and unused.
+func TestCompute_CachesRepeatedIdenticalCalls(t *testing.T) {
+	db, mock, rdb := newTestCalculatorDeps(t)
+
+	mock.ExpectQuery("SELECT f.key, f.owner_id FROM flag_prerequisites").
+		WithArgs("checkout-v2", "project-a").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "owner_id"}))
+
+	calc := NewCalculator(db, rdb, "http://unused")
+	ctx := context.Background()
+
+	first, err := calc.Compute(ctx, "checkout-v2", "production", "project-a", 10)
+	if err != nil {
+		t.Fatalf("first Compute() returned an error: %v", err)
+	}
+	second, err := calc.Compute(ctx, "checkout-v2", "production", "project-a", 10)
+	if err != nil {
+		t.Fatalf("second Compute() returned an error: %v", err)
+	}
+	if first != second {
+		t.Error("second Compute() call did not return the cached *BlastRadiusResult")
+	}
+
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("project-b was not bound to both queries as expected: %v", err)
+		t.Errorf("dependentFlags query ran more than once -- cache was not consulted: %v", err)
+	}
+}
+
+// TestCompute_DifferentRolloutPctBypassesCache proves the cache key is
+// scoped by newRolloutPct, not just flag+env+project -- otherwise a second
+// call with a DIFFERENT candidate percentage would incorrectly reuse a
+// result computed for a different TrafficPctAffected.
+func TestCompute_DifferentRolloutPctBypassesCache(t *testing.T) {
+	db, mock, rdb := newTestCalculatorDeps(t)
+
+	mock.ExpectQuery("SELECT f.key, f.owner_id FROM flag_prerequisites").
+		WithArgs("checkout-v2", "project-a").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "owner_id"}))
+	mock.ExpectQuery("SELECT f.key, f.owner_id FROM flag_prerequisites").
+		WithArgs("checkout-v2", "project-a").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "owner_id"}))
+
+	calc := NewCalculator(db, rdb, "http://unused")
+	ctx := context.Background()
+
+	if _, err := calc.Compute(ctx, "checkout-v2", "production", "project-a", 10); err != nil {
+		t.Fatalf("Compute(10) returned an error: %v", err)
+	}
+	if _, err := calc.Compute(ctx, "checkout-v2", "production", "project-a", 90); err != nil {
+		t.Fatalf("Compute(90) returned an error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expected the dependentFlags query to run twice, once per distinct rollout pct: %v", err)
 	}
 }

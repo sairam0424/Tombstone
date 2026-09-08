@@ -13,7 +13,18 @@ public record FlagEnvironmentState(
     List<FlagPrerequisite> prerequisites,
     List<TargetingRule> targetingRules,
     List<String> targetList,
-    int hashVersion
+    int hashVersion,
+    // Unix seconds these prerequisites were last known-good as of -- either
+    // the snapshot fetch that loaded them, or a live prerequisites_updated
+    // event applied since. Lets an incoming live event be compared against
+    // what's already cached and rejected if it's older -- see FlagCache.
+    // applyPrerequisitesEvent's own doc comment.
+    long prerequisitesUpdatedAt,
+    // Same role as prerequisitesUpdatedAt above, for targetingRules --
+    // against services/flag-api/internal/api/v1/targeting_rules.go's
+    // TargetingRulesEvent.Ts -- see FlagCache.applyTargetingRulesEvent's
+    // own doc comment.
+    long targetingRulesUpdatedAt
 ) {
     /** Convenience factory for flags with no prerequisites/rules/target-list — hashVersion defaults to 1 (MurmurHash3). */
     public static FlagEnvironmentState simple(
@@ -22,7 +33,7 @@ public record FlagEnvironmentState(
     ) {
         return new FlagEnvironmentState(
             flagId, flagKey, environment, enabled, rolloutPct, safeDefault, updatedAt,
-            List.of(), List.of(), List.of(), 1
+            List.of(), List.of(), List.of(), 1, 0L, 0L
         );
     }
 }

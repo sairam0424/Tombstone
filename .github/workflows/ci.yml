@@ -329,6 +329,15 @@ jobs:
           # sequential top-level tests, no t.Parallel) rather than separate
           # invocations — no fixture collision between them.
           go test ./internal/api/v1/ -run 'TestTenancyIsolation|TestChangeRequestProposeQuorumAndApply|TestRequireApprovalGate|TestSCIMDeprovisionRevokesUserRoles' -v
+          # Proves the real sqlc-generated targeting_rules queries (zero
+          # prior real-DB execution before this PR — the table existed since
+          # the baseline schema as pure scaffolding) and, specifically, that
+          # a rule is correctly scoped to its own environment and does not
+          # leak into another one via ListTargetingRulesForFlag, GetSnapshot,
+          # or the live "targeting_rules_updated" event's fan-out (or lack
+          # thereof — unlike prerequisites, which has no environment column
+          # and fans out to every environment).
+          go test ./internal/api/v1/ -run 'TestTargetingRulesAgainstPostgres|TestTargetingRulesPublishLiveUpdateEvent' -v
           # SEC-5: proves user_mfa_log actually gets written on login (SOC 2 CC6
           # evidence) — a separate package from the ones above, so its own
           # invocation, but still after internal/db's fresh-apply test.

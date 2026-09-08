@@ -62,6 +62,83 @@ public class RuleMatcherTest {
         assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "us"))));
     }
 
+    // flag-api's targeting_rules.operator CHECK constraint (schema.sql) has
+    // GEO_COUNTRY/GEO_REGION as real operator VALUES, not just an
+    // attribute-name convention -- normalizeOperator must map both to "in"
+    // so they reach the case-insensitive isGeo branch above, or every
+    // GEO_COUNTRY/GEO_REGION rule from a real backend response would throw
+    // InconclusiveMatchException (unknown operator) and never match for
+    // any user. Found while wiring the real backend wire format into this
+    // SDK for the first time.
+    @Test void testEvaluateConditionGeoCountryOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.country", "GEO_COUNTRY", List.of("US", "CA"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "us"))));
+    }
+
+    @Test void testEvaluateConditionGeoRegionOperatorIsRecognized() {
+        var condition = new PropertyCondition("geo.region", "GEO_REGION", List.of("CA-ON"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.region", "CA-QC"))));
+    }
+
+    // Found by adversarial review of PR #247: isGeo was originally decided
+    // PURELY by attribute name (GEO_ATTRIBUTES.contains(attribute)), so a
+    // GEO_COUNTRY rule using a non-canonical attribute name (nothing
+    // validates that operator=GEO_COUNTRY implies attribute=="geo.country")
+    // silently fell back to case-SENSITIVE matching instead of the
+    // case-insensitive semantics the operator itself declares.
+    @Test void testEvaluateConditionGeoCountryOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("country", "GEO_COUNTRY", List.of("US"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("country", "us"))),
+            "the GEO_COUNTRY operator must match case-insensitively regardless of the attribute's own name");
+    }
+
+    @Test void testEvaluateConditionGeoRegionOperatorIsCaseInsensitiveEvenWithANonCanonicalAttributeName() {
+        var condition = new PropertyCondition("region", "GEO_REGION", List.of("CA-ON"), false);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("region", "ca-on"))),
+            "the GEO_REGION operator must match case-insensitively regardless of the attribute's own name");
+    }
+
+    // An EMPTY values list must never match "neq"/"nin": !values.contains(x)
+    // on an empty list is vacuously true, which would make a rule with an
+    // empty/missing "values" list match EVERY context unconditionally --
+    // the same bug class found and fixed in the TypeScript SDK's NOT_IN
+    // operator (adversarial review of PR #246), which explicitly flagged
+    // this as likely present in the other SDKs too. Confirmed here.
+    @Test void testEvaluateConditionNotInWithEmptyValuesNeverMatches() {
+        var condition = new PropertyCondition("plan", "not_in", List.of(), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "anything"))),
+            "an empty NOT_IN values list must never match, not vacuously match everyone");
+    }
+
+    @Test void testEvaluateConditionNotInWithEmptyValuesNeverMatchesForGeoAttribute() {
+        var condition = new PropertyCondition("geo.country", "not_in", List.of(), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("geo.country", "US"))),
+            "an empty NOT_IN values list must never match, even for a geo (case-insensitive) attribute");
+    }
+
+    @Test void testEvaluateConditionNotInWithNonEmptyValuesStillExcludesCorrectly() {
+        var condition = new PropertyCondition("plan", "not_in", List.of("banned", "suspended"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "banned"))));
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("plan", "pro"))));
+    }
+
+    // docs/SDK_CONTRACT.md:32 -- REGEX is declared but deliberately NOT
+    // implemented in this release, across all 5 SDKs. It must return a
+    // definite false (matching TS's documented behavior), NOT throw
+    // InconclusiveMatchException like a genuinely unknown operator would.
+    // Found missing here by adversarial review of the .NET SDK's PR #249
+    // -- the .NET/Ruby SDKs already had this fix; Java's switch had no
+    // "regex" case at all and fell through to the default throw.
+    @Test void testEvaluateConditionRegexReturnsFalseRatherThanThrowing() {
+        var condition = new PropertyCondition("email", "REGEX", List.of("^admin.*@corp\\.com$"), false);
+        assertFalse(RuleMatcher.evaluateCondition(condition, ctx(Map.of("email", "admin1@corp.com"))));
+    }
+
+    @Test void testEvaluateConditionNegatedRegexReturnsTrue() {
+        var condition = new PropertyCondition("email", "REGEX", List.of("^admin.*@corp\\.com$"), true);
+        assertTrue(RuleMatcher.evaluateCondition(condition, ctx(Map.of("email", "admin1@corp.com"))));
+    }
+
     @Test void testPaddedVersionOrdersNumericSegmentsCorrectly() {
         assertTrue(RuleMatcher.paddedVersion("1.9.0").compareTo(RuleMatcher.paddedVersion("1.10.0")) < 0);
     }

@@ -54,6 +54,7 @@ type Querier interface {
 	CreateSCIMOrphanChangeRequest(ctx context.Context, arg CreateSCIMOrphanChangeRequestParams) error
 	CreateScheduledChange(ctx context.Context, arg CreateScheduledChangeParams) (CreateScheduledChangeRow, error)
 	DeletePrerequisite(ctx context.Context, arg DeletePrerequisiteParams) (int64, error)
+	DeleteTargetingRule(ctx context.Context, arg DeleteTargetingRuleParams) (int64, error)
 	DeprovisionSCIMUser(ctx context.Context, externalID string) (string, error)
 	FinalizeAppliedChangeRequest(ctx context.Context, arg FinalizeAppliedChangeRequestParams) error
 	FlagExistsInProject(ctx context.Context, arg FlagExistsInProjectParams) (bool, error)
@@ -64,6 +65,7 @@ type Querier interface {
 	GetCurrentFlagEnvironmentState(ctx context.Context, arg GetCurrentFlagEnvironmentStateParams) (GetCurrentFlagEnvironmentStateRow, error)
 	GetEnvironmentSnapshot(ctx context.Context, arg GetEnvironmentSnapshotParams) ([]GetEnvironmentSnapshotRow, error)
 	GetEnvironmentSnapshotPrerequisites(ctx context.Context, arg GetEnvironmentSnapshotPrerequisitesParams) ([]GetEnvironmentSnapshotPrerequisitesRow, error)
+	GetEnvironmentSnapshotTargetingRules(ctx context.Context, arg GetEnvironmentSnapshotTargetingRulesParams) ([]GetEnvironmentSnapshotTargetingRulesRow, error)
 	GetFlag(ctx context.Context, arg GetFlagParams) (GetFlagRow, error)
 	// Shared by flags.go's UpdateEnvironment and change_requests.go's
 	// ApproveChangeRequest apply path — byte-identical SQL in both original
@@ -99,8 +101,8 @@ type Querier interface {
 	InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (string, error)
 	InsertMFALogEvent(ctx context.Context, arg InsertMFALogEventParams) error
 	InsertPrerequisite(ctx context.Context, arg InsertPrerequisiteParams) (InsertPrerequisiteRow, error)
+	InsertTargetingRule(ctx context.Context, arg InsertTargetingRuleParams) (InsertTargetingRuleRow, error)
 	IsProjectMember(ctx context.Context, arg IsProjectMemberParams) (bool, error)
-	KillSwitchFlagEnvironment(ctx context.Context, arg KillSwitchFlagEnvironmentParams) (int64, error)
 	ListActiveFlagsByOwner(ctx context.Context, ownerID string) ([]ListActiveFlagsByOwnerRow, error)
 	// The project_id parameter is cast to ::uuid (never the column to text) on
 	// both sides of the OR — casting a uuid column to text to compare it against
@@ -130,6 +132,7 @@ type Querier interface {
 	// plain TEXT columns compared to a TEXT parameter, so (unlike a uuid column)
 	// there is no cast-direction ambiguity to worry about here at all.
 	ListScheduledChanges(ctx context.Context, arg ListScheduledChangesParams) ([]ListScheduledChangesRow, error)
+	ListTargetingRulesForFlag(ctx context.Context, arg ListTargetingRulesForFlagParams) ([]ListTargetingRulesForFlagRow, error)
 	// Serializes appends to one chain. pg_advisory_xact_lock releases
 	// automatically at commit/rollback, so a crashed writer cannot wedge it.
 	// flag_key is the plain (possibly empty) string, not a NULL sentinel — "" is
@@ -141,6 +144,14 @@ type Querier interface {
 	MarkScheduledChangeFailedTerminal(ctx context.Context, arg MarkScheduledChangeFailedTerminalParams) error
 	PurgeExpiredIdempotencyKeys(ctx context.Context) (int64, error)
 	RecordApproval(ctx context.Context, arg RecordApprovalParams) error
+	// EVAL-4: RecoveryStep's atomic compare-and-swap write -- the mirror
+	// image of RollbackFlagEnvironment above, for the HALF_OPEN recovery
+	// ladder's ascent direction (10->25->50->100) instead of the rollback
+	// ladder's descent. The guard is reversed (<=, not >=): only apply an
+	// INCREASE if the live exposure hasn't already risen past this
+	// request's own target (a more-aggressive concurrent recovery already
+	// won), same TOCTOU-closing technique as the descent side.
+	RecoveryFlagEnvironment(ctx context.Context, arg RecoveryFlagEnvironmentParams) (int64, error)
 	RejectChangeRequest(ctx context.Context, arg RejectChangeRequestParams) (RejectChangeRequestRow, error)
 	ResolveFlagIDByKey(ctx context.Context, arg ResolveFlagIDByKeyParams) (string, error)
 	ResolveServiceToken(ctx context.Context, tokenHash sql.NullString) (ResolveServiceTokenRow, error)
@@ -151,6 +162,18 @@ type Querier interface {
 	// to `user_id = lower($1)`, which would make the column-side comparison
 	// case-sensitive again.
 	RevokeUserRoles(ctx context.Context, userEmail string) ([]string, error)
+	// EVAL-4: RollbackStep's atomic compare-and-swap write. The exposure guard
+	// ($7, the caller's own requested target) is evaluated by Postgres as part
+	// of the SAME statement that performs the write, closing a TOCTOU gap a
+	// separate SELECT-then-UPDATE would have between reading "current" state
+	// and committing the new one -- two concurrent rollback-step calls could
+	// otherwise each pass their own read-time check and then last-write-wins,
+	// letting a less-aggressive step silently overwrite a more-aggressive one
+	// (found by adversarial review of PR #220). Rows affected = 0 means either
+	// the flag/environment doesn't exist, or a concurrent write already
+	// reduced exposure below this request's own target -- the caller
+	// disambiguates via a follow-up read.
+	RollbackFlagEnvironment(ctx context.Context, arg RollbackFlagEnvironmentParams) (int64, error)
 	SelectDueScheduledChanges(ctx context.Context) ([]SelectDueScheduledChangesRow, error)
 	// Shared by flags.go's UpdateEnvironment and change_requests.go's
 	// ApproveChangeRequest apply path — byte-identical SQL in both original

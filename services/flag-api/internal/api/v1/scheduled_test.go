@@ -64,7 +64,7 @@ func TestScheduledChangeLifecycle(t *testing.T) {
 	}
 	auditW := audit.NewWriter(database, auditKey)
 
-	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil)
+	flagH := NewFlagHandler(database, rdb, logger, nil, auditW, nil, "")
 	scheduledH := NewScheduledHandler(database, rdb, logger, auditW)
 
 	flag := createTestFlag(t, flagH, projectID, "sched-lifecycle-flag")

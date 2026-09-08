@@ -88,10 +88,30 @@ func (d *Dispatcher) clientFor(integrationID string) *httpclient.ResilientClient
 
 // Dispatch looks up installed webhooks for the event type and fires each
 // in its own goroutine so delivery is non-blocking.
+//
+// deliver's goroutines outlive Dispatch's own return by design (that's the
+// entire point of "non-blocking" above) -- but an http.Server request's
+// ctx is canceled the instant its handler returns (see http.Request.
+// Context()'s own docs), which previously aborted every delivery attempt
+// with context.Canceled before a real network round-trip could complete,
+// since TriggerEvent (services/marketplace/internal/api/v1/handlers.go)
+// passes r.Context() straight through to here and returns right after
+// (found by adversarial review of the flag-api notifyMarketplace PR --
+// the first real caller to ever exercise this path end-to-end; nothing
+// had ever actually driven a live request through it before). context.
+// WithoutCancel detaches from that lifetime while preserving any trace/
+// span VALUES already on ctx (this handler runs inside otelhttp.
+// NewHandler's instrumented chain), so cross-service tracing still
+// correlates. This is safe to leave unbounded by a new explicit timeout:
+// each attempt is already bounded by clientFor's own httpClient.Timeout
+// (10-15s, set directly on the http.Client, independent of ctx's
+// deadline -- see resilient_client.go's NewResilientClient), and the
+// retry loop itself terminates on MaxRetries, not on ctx cancellation.
 func (d *Dispatcher) Dispatch(ctx context.Context, event FlagEvent) {
+	deliverCtx := context.WithoutCancel(ctx)
 	integrations := d.registry.InstalledWebhooks(event.EventType)
 	for _, i := range integrations {
-		go d.deliver(ctx, i, event)
+		go d.deliver(deliverCtx, i, event)
 	}
 }
 
