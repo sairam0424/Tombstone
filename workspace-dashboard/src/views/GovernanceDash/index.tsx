@@ -9,10 +9,6 @@ import {
 } from "../../config.js";
 
 import {
-  EvaluationChart,
-  type TimeSeriesPoint,
-} from "../../components/charts/EvaluationChart.js";
-import {
   Section,
   Reveal,
   SkeletonStatCard,
@@ -46,6 +42,30 @@ interface HealthSummary {
   stale_flags: number;
   health_score: number;
 }
+
+interface AuditVerifyReport {
+  intact: boolean;
+  total_entries: number;
+  verified_entries: number;
+  legacy_entries_unverifiable: number;
+  chains_checked: number;
+  failure_count: number;
+  checked_at: string;
+  note?: string;
+}
+
+// GET /api/v1/audit/verify's non-2xx responses are NOT all the same
+// condition: 503 means AUDIT_HMAC_KEY isn't configured (audit.go), but
+// 401/403 mean the dashboard's own SDK_TOKEN is invalid or lacks the
+// audit:read permission, and 5xx means the audit service itself errored
+// -- none of those are fixed by configuring a signing key, so they each
+// need their own message rather than collapsing to one.
+type AuditVerifyState =
+  | { status: "ok"; report: AuditVerifyReport }
+  | { status: "not_configured" }
+  | { status: "unauthorized" }
+  | { status: "forbidden" }
+  | { status: "error" };
 
 interface ActivityEntry {
   flag_key: string;
@@ -839,24 +859,44 @@ export default function GovernanceDash() {
 
   // ── TanStack Query data fetching ──────────────────────────────────────────
 
-  const { data: healthSummary, isLoading: healthLoading } = useQuery({
-    queryKey: ["governance", "health"],
+  // GET /api/v1/intelligence/health-summary never existed on the backend --
+  // this always 404'd and silently fell back to a fabricated
+  // {health_score: 0} (which then fed a Math.sin-jittered "24h trend"
+  // chart with no real historical data behind it at all — found by the
+  // Phase 3 deep-scope pass). Total flag count is real (flag-api's own
+  // GET /api/v1/flags, which already returns an exact `total`); stale
+  // count is the already-real staleFlagsData below. health_score is now a
+  // real, honestly-derived ratio, not a value with no backing data.
+  //
+  // flag-api scopes ListFlags to the caller's own project (TEN-1a) but
+  // intelligence's GET /api/v1/stale has no auth-based project resolution
+  // of its own — it defaults to a hardcoded DEFAULT_PROJECT_ID query
+  // param. Reusing the project_id flag-api already resolved and returned
+  // on each flag row keeps both counts scoped to the SAME project instead
+  // of silently blending two different tenants' data (invisible in a
+  // single-project dev stack, real in any multi-project deployment).
+  const { data: flagsSummary, isLoading: totalLoading } = useQuery({
+    queryKey: ["governance", "total-flags"],
     queryFn: async () => {
-      const r = await fetch(`${INTEL_URL}/api/v1/intelligence/health-summary`, {
-        headers: hdrs,
-      });
-      if (!r.ok) return { total_flags: 0, stale_flags: 0, health_score: 0 };
-      return r.json() as Promise<{
-        total_flags: number;
-        stale_flags: number;
-        health_score: number;
-      }>;
+      const r = await fetch(`${API_URL}/api/v1/flags`, { headers: hdrs });
+      if (!r.ok) return { total: 0, projectId: null as string | null };
+      const d = (await r.json()) as {
+        total?: number;
+        flags?: Array<{ project_id?: string }>;
+      };
+      return {
+        total: d.total ?? 0,
+        projectId: d.flags?.[0]?.project_id ?? null,
+      };
     },
     refetchInterval: 60_000,
   });
 
+  const totalFlagsCount = flagsSummary?.total;
+  const projectId = flagsSummary?.projectId ?? null;
+
   const { data: staleFlagsData = [], isLoading: staleLoading } = useQuery({
-    queryKey: ["governance", "stale"],
+    queryKey: ["governance", "stale", projectId],
     queryFn: async () => {
       // The real backend route is GET /api/v1/stale (app/main.py), which
       // returns {"stale_flags": [...], "count": N} -- this previously
@@ -864,13 +904,19 @@ export default function GovernanceDash() {
       // decoded a {flags: [...]} shape that was never the real response,
       // so this panel silently always showed "no stale flags" (a 404
       // gracefully falling back to []), regardless of reality.
-      const r = await fetch(`${INTEL_URL}/api/v1/stale`, {
-        headers: hdrs,
-      });
+      const url = projectId
+        ? `${INTEL_URL}/api/v1/stale?project_id=${encodeURIComponent(projectId)}`
+        : `${INTEL_URL}/api/v1/stale`;
+      const r = await fetch(url, { headers: hdrs });
       if (!r.ok) return [] as StaleFlag[];
       const d = (await r.json()) as { stale_flags?: StaleFlag[] };
       return d.stale_flags ?? [];
     },
+    // No known project_id (empty project or the flags fetch itself
+    // failed) means there is nothing real to scope this query to --
+    // querying intelligence's default-project fallback here would just
+    // reintroduce the cross-tenant blend this is fixing.
+    enabled: !!projectId,
   });
 
   const { data: autonomousData } = useQuery({
@@ -908,13 +954,46 @@ export default function GovernanceDash() {
     },
   });
 
+  // GET /api/v1/audit/verify is a real, tested route (AUD-1/AUD-1b) that
+  // nothing in the dashboard ever called before -- the "SOC2 compliance"
+  // subtitle on this page had zero supporting data behind it. 503 means
+  // AUDIT_HMAC_KEY isn't configured on this deployment -- a real,
+  // meaningful state to show ("verification unavailable"), not an error
+  // to hide.
+  const { data: auditVerify, isLoading: verifyLoading } = useQuery({
+    queryKey: ["governance", "audit-verify"],
+    queryFn: async (): Promise<AuditVerifyState> => {
+      const res = await fetch(`${API_URL}/api/v1/audit/verify`, {
+        headers: hdrs,
+      });
+      if (res.status === 503) return { status: "not_configured" };
+      if (res.status === 401) return { status: "unauthorized" };
+      if (res.status === 403) return { status: "forbidden" };
+      if (!res.ok) return { status: "error" };
+      const report = (await res.json()) as AuditVerifyReport;
+      return { status: "ok", report };
+    },
+    refetchInterval: 60_000,
+  });
+
   const stale = staleFlagsData;
   const autonomousRecs = autonomousData ?? [];
   const activity = activityData;
-  const loading = healthLoading || staleLoading;
+  const loading = totalLoading || staleLoading;
 
-  // Derive health from healthSummary or compute from stale data as fallback
-  const health: HealthSummary | null = healthSummary ? healthSummary : null;
+  // health_score is a real ratio derived from the two real counts above,
+  // not a value read from a nonexistent backend endpoint.
+  const health: HealthSummary | null =
+    totalFlagsCount !== undefined
+      ? {
+          total_flags: totalFlagsCount,
+          stale_flags: stale.length,
+          health_score:
+            totalFlagsCount > 0
+              ? Math.max(0, 1 - stale.length / totalFlagsCount)
+              : 1,
+        }
+      : null;
 
   const handleApplyRec = async (rec: AutonomousRecommendation) => {
     setApplyingKey(`${rec.flag_key}:${rec.environment}`);
@@ -941,13 +1020,14 @@ export default function GovernanceDash() {
   const healthPct = Math.round((health?.health_score ?? 1) * 100);
   const healthColor =
     healthPct >= 80 ? T.green : healthPct >= 60 ? T.amber : T.red;
-  const activeFlags = (health?.total_flags ?? 0) - (health?.stale_flags ?? 0);
-
-  // Demo time-series for health score trend (replace with real endpoint when available)
-  const healthTrend: TimeSeriesPoint[] = Array.from({ length: 24 }, (_, i) => ({
-    timestamp: Date.now() - (23 - i) * 3_600_000,
-    value: Math.max(60, (health?.health_score ?? 0.8) * 100 + Math.sin(i) * 5),
-  }));
+  // Clamped like health_score above: totalFlagsCount and stale.length come
+  // from independently-cached queries with different refetch cadences, so a
+  // transient mismatch (stale briefly stale-r than the total) must never
+  // render as a nonsensical negative count.
+  const activeFlags = Math.max(
+    0,
+    (health?.total_flags ?? 0) - (health?.stale_flags ?? 0),
+  );
 
   if (!isIntelAvailable) {
     return (
@@ -1063,7 +1143,13 @@ export default function GovernanceDash() {
             </div>
           </Reveal>
 
-          {/* ── Health Score Trend Chart ─────────────────────────────────────── */}
+          {/* ── Audit Chain Integrity ────────────────────────────────────────── */}
+          {/* Real data from GET /api/v1/audit/verify -- the actual substance
+              behind this page's "SOC2 compliance" subtitle, which previously
+              had zero supporting data anywhere on this page. No fabricated
+              trend line: there is no real historical time-series for this,
+              so this shows the current verification snapshot honestly
+              instead of inventing a 24h chart with nothing real behind it. */}
           <Reveal delay={0.08}>
             <div
               style={{
@@ -1071,22 +1157,87 @@ export default function GovernanceDash() {
                 border: `1px solid ${T.border}`,
                 borderRadius: 10,
                 marginBottom: 28,
-                overflow: "hidden",
+                padding: "18px 20px",
               }}
             >
-              <EvaluationChart
-                data={healthTrend}
-                title="Health Score (24h)"
-                color={
-                  healthPct >= 80
-                    ? "#4ade80"
-                    : healthPct >= 60
-                      ? "#fbbf24"
-                      : "#f87171"
-                }
-                height={160}
-                yLabel="%"
-              />
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.07em",
+                  color: T.textDim,
+                  marginBottom: 14,
+                }}
+              >
+                Audit Chain Integrity
+              </div>
+              {verifyLoading ? (
+                <div style={{ fontSize: 13, color: T.textMuted }}>
+                  Verifying…
+                </div>
+              ) : !auditVerify || auditVerify.status !== "ok" ? (
+                <div style={{ fontSize: 13, color: T.textMuted }}>
+                  {auditVerify?.status === "unauthorized"
+                    ? "Verification unavailable — the dashboard's SDK token was rejected."
+                    : auditVerify?.status === "forbidden"
+                      ? "Verification unavailable — this token lacks the audit:read permission."
+                      : auditVerify?.status === "error"
+                        ? "Verification unavailable — the audit service returned an error."
+                        : "Verification unavailable — AUDIT_HMAC_KEY is not configured on this deployment."}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 24,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      fontSize: 14,
+                      fontWeight: 700,
+                      color: auditVerify.report.intact ? T.green : T.red,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: auditVerify.report.intact ? T.green : T.red,
+                        flexShrink: 0,
+                      }}
+                    />
+                    {auditVerify.report.intact
+                      ? "Chain intact"
+                      : "Tampering detected"}
+                  </div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>
+                    {auditVerify.report.verified_entries} verified /{" "}
+                    {auditVerify.report.total_entries} total entries ·{" "}
+                    {auditVerify.report.chains_checked} chains checked
+                    {auditVerify.report.legacy_entries_unverifiable > 0 && (
+                      <>
+                        {" "}
+                        · {auditVerify.report.legacy_entries_unverifiable}{" "}
+                        legacy (pre-AUD-1) unverifiable
+                      </>
+                    )}
+                    {auditVerify.report.failure_count > 0 && (
+                      <span style={{ color: T.red, fontWeight: 600 }}>
+                        {" "}
+                        · {auditVerify.report.failure_count} failures
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </Reveal>
 
