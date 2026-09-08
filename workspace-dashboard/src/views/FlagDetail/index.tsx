@@ -561,7 +561,7 @@ export default function FlagDetail() {
           token={tok}
           environment={activeEnv}
           environments={ENVS}
-          onEnvironmentChange={setActiveEnv}
+          onEnvironmentChange={(env) => setActiveEnv(env as Env)}
         />
       )}
     </div>
