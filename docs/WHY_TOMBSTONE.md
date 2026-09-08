@@ -291,18 +291,18 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 
 ### What Tombstone is not
 
-- A feature flag SaaS with a managed cloud (no committed timeline — originally targeted at v1.1; the project is now at v1.5.0 heading to v2.0.0 with this still unshipped)
+- A feature flag SaaS with a managed cloud (no committed timeline — originally targeted at v1.1; still unshipped as of v2.0.0)
 - An A/B testing platform with visual editor (use GrowthBook for that alongside Tombstone)
 - A session recording or analytics tool (use PostHog, Mixpanel, etc.)
 - A deployment orchestrator (use ArgoCD, Flux, etc. for that)
 
-### Current version scope (v1.5.0 self-hosted — last tagged release; `develop`/`main` are ahead working toward v2.0.0)
+### Current version scope (v2.0.0 self-hosted — see `CHANGELOG.md` for the full release)
 
-| In v1.5.0 | Planned |
+| In v2.0.0 | Planned |
 |-----------|-----------------|
 | All 8 services via `make dev` | Managed cloud option |
-| Circuit breaker + auto-rollback | Multi-region active-active |
-| Blast radius + dependency graph | SOC2 Type II certification |
+| Circuit breaker + stepped auto-rollback/recovery | Multi-region active-active |
+| Blast radius + dependency graph (dashboard-wired kill-switch confirm UI) | SOC2 Type II certification |
 | Thompson Sampling + LinUCB | Kubernetes operator GA |
 | 3-model anomaly ensemble | More warehouse connectors |
 | CUPED + mSPRT + collision detection | Argos LLM rule generation (needs API key) |
@@ -310,9 +310,12 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 | OPA hot-reload RBAC | mTLS between internal services |
 | Tombstoning + break-glass tokens | |
 | NLP semantic search | |
-| 6 integrations (Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear) | |
-| TypeScript/Python/Java/.NET/Ruby SDKs | |
+| 6 integrations (Slack, Datadog, PagerDuty, OpsGenie, Jira, Linear) — with real lifecycle-event wiring | |
+| TypeScript/Python/Java/.NET/Ruby SDKs, all with live `prerequisites_updated`/`targeting_rules_updated` streaming | |
+| Targeting rules — full CRUD API + live streaming + dashboard UI | |
 | WASM zero-dependency eval engine | |
+| Edge (Cloudflare Workers) SDK — prerequisites + targeting-rules evaluation | |
+| Kubernetes autoscaling (HPA/PDB/topology-spread) + non-root hardening | |
 
 ---
 
@@ -324,7 +327,7 @@ If you need a lightweight flag system with minimal ops overhead and no interest 
 
 **The intelligence service is large.** The Docker image bundles BAAI/bge-m3 (~400MB) for NLP search. First build takes 3–5 minutes. Subsequent builds use the cached layer.
 
-**Managed cloud hosting status, now verified**: the "not a SaaS with managed cloud" claim above still holds — no committed timeline exists for it, and it remains unshipped well past its original v1.1 target (the project is now at v1.5.0 heading to v2.0.0). `infra/.env.example`'s Northflank + Oracle + Cloudflare Pages topology and `infra/northflank/README.md` are self-hosting instructions — a runbook for deploying YOUR OWN instance across three third-party platforms, not a Tombstone-operated managed cloud offering. No SaaS exists; there is nothing to sign up for.
+**Managed cloud hosting status, now verified**: the "not a SaaS with managed cloud" claim above still holds — no committed timeline exists for it, and it remains unshipped well past its original v1.1 target, even at v2.0.0. `infra/.env.example`'s Northflank + Oracle + Cloudflare Pages topology and `infra/northflank/README.md` are self-hosting instructions — a runbook for deploying YOUR OWN instance across three third-party platforms, not a Tombstone-operated managed cloud offering. No SaaS exists; there is nothing to sign up for.
 
 ---
 

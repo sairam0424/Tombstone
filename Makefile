@@ -1,6 +1,15 @@
 .DEFAULT_GOAL := help
 # Use docker context desktop-linux automatically (macOS Docker Desktop)
 COMPOSE := docker compose -f infra/docker-compose.yml
+# go.work's own `go 1.22.0` directive is lower than every service's real
+# go.mod `go 1.25.0` directive -- modern Go refuses to proceed on that
+# mismatch ("go.work lists go 1.22.0... update it"). CI never hits this
+# because every Go step there sets GOWORK=off explicitly (see ci.yml);
+# `make test`/`make build` never did, so running either locally failed
+# immediately on the very first Go service, before testing anything.
+export GOWORK := off
+
+GO_SERVICES := flag-api gateway evaluator gitops-sync ast-rewriter marketplace tombstone-operator
 
 .PHONY: help dev down migrate seed gen-proto gen-sqlc test build lint
 
@@ -37,16 +46,22 @@ gen-sqlc: ## Regenerate flag-api's type-safe query package from internal/db/quer
 
 test: ## Run all tests (Go + TypeScript + Python)
 	@echo "--- Go tests ---"
-	cd services/flag-api && go test ./...
-	cd services/gateway && go test ./...
+	@for svc in $(GO_SERVICES); do \
+		echo "-- $$svc --"; \
+		(cd services/$$svc && go test ./...) || exit 1; \
+	done
+	@echo "--- Python intelligence tests ---"
+	cd services/intelligence && uv sync --all-packages && uv run pytest tests/
 	@echo "--- TypeScript SDK tests ---"
-	npm run test --workspace=packages/sdks/@tombstone/core
+	cd packages/sdks/@flagmind/core && npm run test
 	@echo "--- Dashboard tests ---"
 	npm run test --workspace=workspace-dashboard
 
 build: ## Build all Go binaries and TypeScript packages
-	cd services/flag-api && go build -o bin/flag-api ./cmd/main.go
-	cd services/gateway && go build -o bin/gateway ./cmd/main.go
+	@for svc in $(GO_SERVICES); do \
+		echo "-- building $$svc --"; \
+		(cd services/$$svc && go build -o bin/$$svc ./cmd/main.go) || exit 1; \
+	done
 	npm run build --workspaces --if-present
 
 lint: ## Lint all code

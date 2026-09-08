@@ -158,9 +158,9 @@ function CheckoutButton() {
 
 ---
 
-## What Is in v1.5.0
+## What Is in v2.0.0
 
-This is the v1.5.0 self-hosted release of Tombstone (the last tagged release — `develop`/`main` are well ahead of it working toward v2.0.0, see `CHANGELOG.md`'s `[Unreleased]` section for what's shipped since). Everything runs locally with `make dev`.
+This is the v2.0.0 self-hosted release of Tombstone (see `CHANGELOG.md` for the full list). Everything runs locally with `make dev`.
 
 | Feature | Status |
 |---------|--------|
@@ -347,7 +347,7 @@ cd services/intelligence && uv sync && uv run pytest tests/
 cd workspace-dashboard && npm run dev
 ```
 
-**Go 1.22** | **Python 3.12** | **Node 22** | **TypeScript 6**
+**Go 1.25** | **Python 3.12** | **Node 22** | **TypeScript 5.8** (dashboard uses 6)
 
 ---
 
