@@ -19,7 +19,8 @@
   "bin": { "flagmind-mcp": "./dist/index.js" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test dist/tests/**/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
