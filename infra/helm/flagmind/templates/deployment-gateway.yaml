@@ -10,7 +10,9 @@ metadata:
     {{- include "tombstone.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "tombstone.selectorLabels" . | nindent 6 }}
@@ -23,14 +25,26 @@ spec:
     spec:
       serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
       terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "tombstone.podSecurityContext" . | nindent 8 }}
+      {{- include "tombstone.topologySpreadConstraints" (dict "component" "gateway" "context" $) | nindent 6 }}
       containers:
         - name: gateway
           image: "{{ .Values.global.imageRegistry }}{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "tombstone.containerSecurityContextBase" . | nindent 12 }}
+            readOnlyRootFilesystem: {{ .Values.gateway.readOnlyRootFilesystem }}
           ports:
             - name: http
               containerPort: {{ .Values.gateway.service.port }}
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.gateway.service.port }}
+            periodSeconds: 5
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
@@ -57,4 +71,10 @@ spec:
             limits:
               cpu: {{ .Values.gateway.resources.limits.cpu }}
               memory: {{ .Values.gateway.resources.limits.memory }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

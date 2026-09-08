@@ -23,6 +23,21 @@ flagApi:
   service:
     type: ClusterIP
     port: 8081
+  # INFRA-1: on by default, matching the plan's "CPU/mem HPAs on by
+  # default" -- minReplicas matches the chart's own replicaCount default
+  # so enabling this doesn't itself change steady-state capacity.
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # INFRA-1: Go binary, no known runtime disk writes outside /tmp (which
+  # every deployment template mounts as an emptyDir regardless).
+  readOnlyRootFilesystem: true
 
 gateway:
   enabled: true
@@ -39,6 +54,29 @@ gateway:
   service:
     type: ClusterIP
     port: 8080
+  # INFRA-1: standard CPU/mem HPA only -- the plan's own "connection-based
+  # HPA (KEDA)" item is deliberately NOT implemented here. gateway's real
+  # /api/v1/gateway/metrics endpoint returns plain JSON (services/gateway/
+  # internal/api/v1/metrics.go), not a Prometheus-scrapeable /metrics
+  # endpoint, and no Prometheus/KEDA operator exists anywhere in this
+  # chart or infra/ -- OBS-1 (a separate, still-open Phase-1 backlog item)
+  # is the real prerequisite for wiring genuine connection-count-based
+  # autoscaling. Shipping a KEDA ScaledObject against the JSON endpoint
+  # now (technically possible via KEDA's generic metrics-api trigger)
+  # would be new scaffolding that looks real but is unverified against
+  # any actual cluster -- the exact anti-pattern this plan exists to
+  # eliminate. CPU/mem HPA is a genuine, if cruder, stopgap until OBS-1
+  # lands real metrics.
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 evaluator:
   enabled: true
@@ -56,10 +94,15 @@ evaluator:
     type: ClusterIP
     port: 8082
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 intelligence:
   enabled: true
@@ -77,6 +120,20 @@ intelligence:
   service:
     type: ClusterIP
     port: 8083
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # INFRA-1: intelligence has NO securityContext hardening applied at all
+  # (unlike the other 4 services) -- see deployment-intelligence.yaml's
+  # own comment for why (verified empirically, not guessed: both the
+  # non-root UID and capability dropping independently break this image's
+  # model-cache and signal-file writes).
 
 marketplace:
   enabled: true
@@ -93,6 +150,16 @@ marketplace:
   service:
     type: ClusterIP
     port: 8086
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  readOnlyRootFilesystem: true
 
 secrets:
   dbUrl: ""

@@ -1,0 +1,28 @@
+{{- if and .Values.flagApi.enabled .Values.flagApi.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tombstone.fullname" . }}-flag-api
+  labels:
+    {{- include "tombstone.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tombstone.fullname" . }}-flag-api
+  minReplicas: {{ .Values.flagApi.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.flagApi.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.flagApi.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.flagApi.autoscaling.targetMemoryUtilizationPercentage }}
+{{- end }}
