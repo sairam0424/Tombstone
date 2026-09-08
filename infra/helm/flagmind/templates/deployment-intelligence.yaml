@@ -22,27 +22,16 @@ spec:
     spec:
       serviceAccountName: {{ include "tombstone.serviceAccountName" . }}
       terminationGracePeriodSeconds: 60
-      # INFRA-1: deliberately NO pod- or container-level securityContext
-      # hardening here, unlike the other 4 services. Verified (empirically,
-      # by adversarial review actually running python:3.12-slim/alpine:3.19
-      # as a non-root UID) that runAsNonRoot:true would break this image
-      # two ways independent of readOnlyRootFilesystem: it can't read
-      # /root (where the Dockerfile bakes the ~400MB BAAI/bge-m3 model as
-      # root at build time) or create a cache dir anywhere under /, so NLP
-      # search silently returns empty embeddings; separately,
-      # capabilities.drop:[ALL] would ALSO break it even while still
-      # running as root, because dropping CAP_DAC_OVERRIDE removes root's
-      # usual permission-bypass, so the Argos rule-generation endpoint's
-      # unhandled mkdir under the root-owned /app/signals dir would start
-      # 500ing. Making this image genuinely UID-non-root-compatible needs
-      # its own Dockerfile change (USER directive + HF_HOME/signals_dir
-      # pointed at a writable, group-owned path) verified against a real
-      # build -- out of scope for a Helm-only pass with no image rebuild.
+      securityContext:
+        {{- include "tombstone.podSecurityContext" . | nindent 8 }}
       {{- include "tombstone.topologySpreadConstraints" (dict "component" "intelligence" "context" $) | nindent 6 }}
       containers:
         - name: intelligence
           image: "{{ .Values.global.imageRegistry }}{{ .Values.intelligence.image.repository }}:{{ .Values.intelligence.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "tombstone.containerSecurityContextBase" . | nindent 12 }}
+            readOnlyRootFilesystem: {{ .Values.intelligence.readOnlyRootFilesystem }}
           ports:
             - name: http
               containerPort: {{ .Values.intelligence.service.port }}

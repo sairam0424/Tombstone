@@ -129,11 +129,17 @@ intelligence:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
-  # INFRA-1: intelligence has NO securityContext hardening applied at all
-  # (unlike the other 4 services) -- see deployment-intelligence.yaml's
-  # own comment for why (verified empirically, not guessed: both the
-  # non-root UID and capability dropping independently break this image's
-  # model-cache and signal-file writes).
+  # INFRA-1 follow-up: the intelligence image now sets HF_HOME to a
+  # world-readable path baked at build time and creates /app/signals
+  # world-writable, but /app/signals isn't reachable once the root
+  # filesystem is actually read-only (chmod bits are irrelevant once the
+  # mount itself is read-only) -- SIGNALS_DIR (configmap.yaml) points the
+  # real runtime write target at the /tmp emptyDir every Deployment
+  # already mounts instead. Verified locally via `docker build` + `docker
+  # run --user 65532:65532 --read-only --tmpfs /tmp` against the real
+  # image (no Kubernetes cluster available, but this is a genuine,
+  # reproducible container-runtime test, not a guess).
+  readOnlyRootFilesystem: true
 
 marketplace:
   enabled: true
