@@ -166,7 +166,20 @@ def test_flag_state_has_targeting_rules():
 
 
 def test_snapshot_deserialization_includes_targeting_rules():
-    """Client._apply_snapshot must populate targeting_rules and prerequisites."""
+    """Client._apply_snapshot must populate targeting_rules and prerequisites.
+
+    Regression: an EARLIER version of this fixture used a NESTED
+    "conditions" key per rule ("conditions": [{"attribute": ..., ...}]),
+    which does not exist anywhere on flag-api's real wire format --
+    targeting_rules.go's real per-rule shape is FLAT (id/rule_type/
+    attribute/operator/values/variation/priority, ONE condition per rule
+    row). The test and the pre-fix _apply_snapshot code both encoded the
+    same wrong assumption, so it passed despite testing an unreachable
+    shape (found by adversarial review of the .NET/Ruby SDKs' identical
+    adapters, PRs #248/#249, applied here after discovering this SDK's
+    own parsing had the identical gap). This fixture now uses the real
+    flat shape.
+    """
     from tombstone.client import TombstoneClient
 
     client = TombstoneClient(sdk_key="test", environment="prod")
@@ -183,16 +196,12 @@ def test_snapshot_deserialization_includes_targeting_rules():
                 "targeting_rules": [
                     {
                         "id": "r1",
-                        "conditions": [
-                            {
-                                "attribute": "country",
-                                "operator": "eq",
-                                "values": ["US"],
-                                "negate": False,
-                            }
-                        ],
-                        "rollout_pct": 100.0,
+                        "rule_type": "USER",
+                        "attribute": "country",
+                        "operator": "eq",
+                        "values": ["US"],
                         "variation": True,
+                        "priority": 0,
                     }
                 ],
             }
@@ -209,6 +218,7 @@ def test_snapshot_deserialization_includes_targeting_rules():
     assert len(state.targeting_rules) == 1
     assert state.targeting_rules[0].id == "r1"
     assert state.targeting_rules[0].conditions[0].attribute == "country"
+    assert state.targeting_rules[0].rollout_pct == 100.0
 
 
 # ── V-6: TARGET_MATCH ────────────────────────────────────────────────────────
