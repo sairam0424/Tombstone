@@ -7,7 +7,12 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tombstone.client import TombstoneClient, _parse_targeting_rules
-from tombstone.types import FlagEnvironmentState, TargetingRule, PropertyCondition
+from tombstone.types import (
+    EvaluationContext,
+    FlagEnvironmentState,
+    TargetingRule,
+    PropertyCondition,
+)
 
 
 def _client() -> TombstoneClient:
@@ -994,4 +999,164 @@ def test_a_targeting_rule_missing_the_values_key_entirely_parses_with_empty_valu
 
     condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
     assert condition.values == []
+    client.close()
+
+
+# ── malformed field type-safety (found by adversarial review of PR #251) ──
+
+
+def test_nan_and_infinity_in_values_do_not_crash_stringify_wire_value():
+    from tombstone.client import _stringify_wire_value
+
+    assert _stringify_wire_value(float("nan")) == "nan"
+    assert _stringify_wire_value(float("inf")) == "inf"
+    assert _stringify_wire_value(float("-inf")) == "-inf"
+
+
+def test_a_targeting_rule_with_nan_in_values_does_not_drop_the_whole_flag():
+    # Python's json module parses the extended (non-strict-JSON) tokens
+    # NaN/Infinity/-Infinity by default. An earlier version of
+    # _stringify_wire_value's float branch called int(v) unconditionally,
+    # which raises ValueError for NaN / OverflowError for +-Infinity --
+    # uncaught inside _apply_snapshot's per-flag try block, this dropped
+    # the ENTIRE flag from the cache, not just the one malformed value.
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire(
+                    "rule-1", attribute="score", operator="gt", values=[float("nan")]
+                )
+            ],
+        )
+    )
+
+    assert "my-flag" in client._cache, (
+        "the whole flag must not be dropped for one malformed value"
+    )
+    condition = client._cache["my-flag"].targeting_rules[0].conditions[0]
+    assert condition.values == ["nan"]
+    client.close()
+
+
+def test_a_targeting_rules_updated_event_with_infinity_in_values_does_not_drop_the_whole_event():
+    client = _client()
+    client._cache["my-flag"] = FlagEnvironmentState(
+        flag_key="my-flag",
+        enabled=True,
+        rollout_pct=100.0,
+        safe_default=False,
+        environment="prod",
+        targeting_rules=_parse_targeting_rules([_rule_wire("old-rule")]),
+        targeting_rules_updated_at=1_000,
+    )
+
+    client._apply_targeting_rules_event(
+        json.dumps(
+            {
+                "flag_key": "my-flag",
+                "environment": "prod",
+                "targeting_rules": [
+                    _rule_wire(
+                        "new-rule",
+                        attribute="score",
+                        operator="gt",
+                        values=[float("inf")],
+                    )
+                ],
+                "ts": 2_000,
+            }
+        )
+    )
+
+    updated = client._cache["my-flag"]
+    assert updated.targeting_rules[0].id == "new-rule", (
+        "the event must still apply, not be dropped wholesale for one malformed value"
+    )
+    assert updated.targeting_rules_updated_at == 2_000
+    client.close()
+
+
+def test_a_nested_dict_or_list_in_values_renders_as_empty_string_not_python_repr():
+    from tombstone.client import _stringify_wire_value
+
+    assert _stringify_wire_value({"a": 1}) == ""
+    assert _stringify_wire_value([1, 2, 3]) == ""
+
+
+def test_a_non_string_operator_is_skipped_as_a_single_rule_not_a_whole_flag_evaluation_error():
+    # A present-but-wrong-typed "operator" (e.g. a JSON number) previously
+    # passed through unvalidated into PropertyCondition.operator, and
+    # match_property's unconditional .lower() call raised AttributeError
+    # (not InconclusiveMatchError) -- which _match_targeting_rules' narrow
+    # `except InconclusiveMatchError` does not catch, turning ONE
+    # malformed rule into a total evaluation failure (reason="ERROR") for
+    # the whole flag.
+    #
+    # The context DELIBERATELY supplies a real "email" attribute value
+    # matching the rule's own attribute -- an earlier draft of this test
+    # omitted it, which let _get_attr's OWN "attribute not present" ->
+    # InconclusiveMatchError fire first and mask whether the operator's
+    # own .lower() call was ever reached at all (confirmed by inject-
+    # confirms-catches: removing the operator type-guard did NOT fail
+    # this test until the attribute value was added).
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            flag_key="f1",
+            targeting_rules=[_rule_wire("bad-rule", operator=42, values=["x"])],
+        )
+    )
+
+    result = client.evaluate(
+        "f1", EvaluationContext(user_id="u1", attrs={"email": "x@example.com"})
+    )
+    assert result.reason != "ERROR", (
+        "a malformed operator must not fail the whole flag's evaluation"
+    )
+    assert result.value is True, "a 100% rollout must still fall through normally"
+    client.close()
+
+
+def test_a_non_int_priority_defaults_to_a_low_not_high_priority():
+    # priority=0 is the HIGHEST priority per evaluation.py's ascending
+    # sort -- silently coercing a malformed (non-int) priority to 0 would
+    # let a broken rule jump to the FRONT of the evaluation order and win
+    # ties against every correctly-typed rule.
+    client = _client()
+    client._apply_snapshot(
+        _snapshot(
+            1_000,
+            targeting_rules=[
+                _rule_wire("malformed-priority-rule", priority="3"),
+                _rule_wire("well-formed-rule", priority=5),
+            ],
+        )
+    )
+
+    rules = client._cache["my-flag"].targeting_rules
+    malformed = next(r for r in rules if r.id == "malformed-priority-rule")
+    well_formed = next(r for r in rules if r.id == "well-formed-rule")
+    assert malformed.priority > well_formed.priority, (
+        "a malformed priority must sort AFTER every well-formed rule, not before"
+    )
+    client.close()
+
+
+# ── previously-untested defensive defaults (found by adversarial review) ──
+
+
+def test_a_targeting_rule_missing_attribute_operator_id_or_variation_parses_with_safe_defaults():
+    client = _client()
+    bare_rule = {"values": ["x"]}
+    client._apply_snapshot(_snapshot(1_000, targeting_rules=[bare_rule]))
+
+    rule = client._cache["my-flag"].targeting_rules[0]
+    assert rule.id == ""
+    assert rule.variation is True
+    condition = rule.conditions[0]
+    assert condition.attribute == ""
+    assert condition.operator == ""
     client.close()

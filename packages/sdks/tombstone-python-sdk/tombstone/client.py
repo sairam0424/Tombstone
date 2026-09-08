@@ -1,4 +1,5 @@
 import logging
+import math
 import threading
 from typing import Any
 
@@ -46,8 +47,32 @@ def _stringify_wire_value(v: object) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, float):
-        return str(int(v)) if v == int(v) else str(v)
+        # Python's json module parses (and re-emits) the extended, non-
+        # strict-JSON tokens NaN/Infinity/-Infinity by default -- int(v)
+        # raises ValueError for NaN and OverflowError for +/-Infinity,
+        # neither of which this function used to guard against. Because
+        # this is called from inside a per-flag/per-event try block whose
+        # own `except Exception` drops the ENTIRE flag or ENTIRE live
+        # event (not just the one malformed value) if anything raises, an
+        # unguarded crash here was a materially worse failure mode than
+        # the malformed-entry guards used elsewhere in this same module.
+        # math.isfinite(v) is False for NaN/Infinity, safely routing them
+        # to the plain str(v) fallback ("nan"/"inf"/"-inf") instead of
+        # crashing -- those strings will never legitimately equal a real
+        # context attribute anyway, so the condition just safely never
+        # matches. Found by adversarial review of PR #251.
+        return str(int(v)) if math.isfinite(v) and v == int(v) else str(v)
     if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        # A "values" element that is itself a nested structure is
+        # malformed wire data (every real operator compares against a
+        # scalar) -- rendering it as "" (rather than Python's own repr,
+        # e.g. "{'a': 1}") keeps this consistent with how every OTHER
+        # malformed-field default in this module degrades: safely, to a
+        # value that can never spuriously match a real attribute, not to
+        # an implementation-detail string. Found by adversarial review of
+        # PR #251.
         return ""
     return str(v)
 
@@ -80,9 +105,22 @@ def _parse_targeting_rules(raw: object) -> list[TargetingRule]:
         if not isinstance(r, dict):
             continue
         values = r.get("values")
+        # attribute/operator/id are type-guarded the same way values/
+        # priority already were -- found missing by adversarial review of
+        # PR #251: a present-but-wrong-typed "operator" (e.g. a JSON
+        # number) previously passed through unvalidated into
+        # PropertyCondition.operator, and match_property's unconditional
+        # `condition.operator.lower()` then raised AttributeError (not
+        # InconclusiveMatchError), which _match_targeting_rules' narrow
+        # `except InconclusiveMatchError` does NOT catch -- turning ONE
+        # malformed rule into a total evaluation failure (reason="ERROR")
+        # for the WHOLE flag, not just a skipped rule. Coercing to a
+        # string default instead routes a genuinely bad operator through
+        # the existing, well-tested "unknown operator" ->
+        # InconclusiveMatchError -> per-rule-skip path.
         condition = PropertyCondition(
-            attribute=r.get("attribute", ""),
-            operator=r.get("operator", ""),
+            attribute=_str_or_default(r.get("attribute"), ""),
+            operator=_str_or_default(r.get("operator"), ""),
             values=[_stringify_wire_value(v) for v in values]
             if isinstance(values, list)
             else [],
@@ -91,14 +129,35 @@ def _parse_targeting_rules(raw: object) -> list[TargetingRule]:
         priority = r.get("priority", 0)
         result.append(
             TargetingRule(
-                id=r.get("id", ""),
+                id=_str_or_default(r.get("id"), ""),
                 conditions=[condition],
                 rollout_pct=100.0,
                 variation=r.get("variation", True),
-                priority=priority if isinstance(priority, int) else 0,
+                # A non-int priority (e.g. a wire value corrupted into a
+                # numeric string by a bad migration) previously defaulted
+                # to 0 -- the HIGHEST priority per evaluation.py's
+                # ascending sort, silently letting a malformed rule jump
+                # to the FRONT of the evaluation order and win ties
+                # against every correctly-typed rule. _LOW_PRIORITY_FALLBACK
+                # is a large sentinel so a malformed priority instead sorts
+                # LAST, never disrupting well-formed rules. Found by
+                # adversarial review of PR #251.
+                priority=priority
+                if isinstance(priority, int)
+                else _LOW_PRIORITY_FALLBACK,
             )
         )
     return result
+
+
+# Deliberately far larger than any realistic real priority value (flag-api
+# stores priority as a plain small integer -- see _LOW_PRIORITY_FALLBACK's
+# own use in _parse_targeting_rules above).
+_LOW_PRIORITY_FALLBACK = 2**31 - 1
+
+
+def _str_or_default(v: object, default: str) -> str:
+    return v if isinstance(v, str) else default
 
 
 class TombstoneClient:
@@ -340,6 +399,29 @@ class TombstoneClient:
                     # protection "sticky", vetoing a later, independent
                     # snapshot that merely happens to tie the same
                     # coarse-resolution second too.
+                    #
+                    # Residual, accepted limitation (identical across all 5
+                    # SDKs, not a Python-specific gap -- flagged by
+                    # adversarial review of this PR as an apparently-new
+                    # HIGH finding, then confirmed by hand-tracing that
+                    # Java/Ruby/.NET/TS's own identical designs regress
+                    # IDENTICALLY given the same input sequence): if TWO
+                    # (or more) snapshot fetches were BOTH already in
+                    # flight when the SAME live event fired, only the
+                    # FIRST one to be PROCESSED consumes this one-shot
+                    # protection -- any LATER one to arrive, even though
+                    # its own ts is also older than the live event's ts
+                    # (which is only possible if flag-api generated that
+                    # snapshot's response, and therefore its ts, before
+                    # the live event happened too), sees the protection
+                    # already consumed and overwrites the live-sourced
+                    # data, regressing *_updated_at backward. Solving this
+                    # fully would require a signal finer than flag-api's
+                    # 1-second-resolution wall-clock ts (e.g. a per-flag
+                    # version/sequence number) -- an infrastructure-level
+                    # change, not something any SDK's own cache design can
+                    # close alone. Not fixed here, for the same reason it
+                    # was not fixed in any of the other 4 SDKs.
                     next_prereq_live[flag_key] = False
                     next_rules_live[flag_key] = False
                 except Exception as exc:
