@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased]
+## [2.0.0] - 2026-09-09
 
 ### Added
 - **Live `prerequisites_updated` streaming** (#234–#239, #244): flag-api/gateway now publish a dedicated `prerequisites_updated` Redis Streams event (a `"kind"` discriminator, never colliding with a free-text `FlagEvent.Reason`) whenever `AddPrerequisite`/`DeletePrerequisite` commits, fanned out per-environment and relayed verbatim through the live SSE path, the reconnect XRANGE replay path, and the DLQ reclaim path alike. All 5 SDKs (Python, TypeScript, Java, Ruby, .NET) now consume this event instead of waiting for their next full snapshot refetch, each with a per-flag staleness guard (reject an incoming event older than what's cached) and a snapshot-vs-live-event monotonicity guard. `@flagmind/edge` (KV/Cron-based, no live SSE client) instead gained snapshot-level prerequisite parsing and a Step 2 evaluation check ported from `@tombstone/core`.
@@ -18,6 +18,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **marketplace — real lifecycle-event wiring** (#224): flag-api now actually calls the marketplace webhook dispatcher (previously fully built but never triggered) on all 6 flag-lifecycle mutation points — create, enable/disable transition, kill-switch, rollback-step, a new `flag.recovery` event, and archive.
 - **INT-6 — stale-flag archive gated on verified zero code references** (#225): `StaleFlagDetector`'s `ARCHIVE` recommendation, previously based purely on days-since-update, now also requires a verified-zero result from `ast-rewriter`'s (already-built but previously uncalled) code-reference scanner and zero recent evaluations from EVAL-3's telemetry — an unreachable/unconfigured scanner reports "unknown", never coerced to zero, capping the recommendation below `ARCHIVE`.
 - **EXP-2 — experiment-analysis correctness** (#216, #217): added the missing Sample Ratio Mismatch (SRM) chi-square gate (blocks a ship/no-ship recommendation at `p<0.001`, with an exact-binomial fallback below the chi-square validity floor) to `ExperimentAnalyzer` and `POST /api/v1/experiments/analyze`; seeded `ThompsonSamplingEngine`'s RNG (optional, production behavior unchanged) so tests can get deterministic draws.
+- **Dashboard — kill-switch blast-radius confirm UI wired in** (#255): `BlastRadiusBadge` (a full risk-tier confirm UI) existed but was imported nowhere — an operator could disable a flag with zero blast-radius visibility. `FlagDetail`'s Kill Switch now pre-checks `GET /api/v1/blast-radius` (using the environment's CURRENT `rollout_pct` — the traffic actually cut off by disabling, not the post-kill 0%) before disabling, with a per-environment state machine so a check/kill in flight for one environment never disables or mislabels another's independent button.
+- **Dashboard — LiveFeed + ConnectionStatus wired into the shell** (#262): both were fully built (real SSE via `useSSE`) but imported nowhere; the top bar's "Production" pill was hardcoded green regardless of real gateway reachability. Replaced with the real `ConnectionStatus`; `LiveFeed` added as a persistent panel.
+- **Dashboard — Targeting Rules CRUD tab** (#267): `targeting_rules` has had a full REST CRUD surface (`POST/GET/DELETE /flags/{key}/environments/{env}/rules[/{id}]`) since #245, and every SDK has evaluated it since #245–#251, but nothing in the dashboard ever called it — an operator could not create, view, or delete a targeting rule without hitting the API directly. New "Targeting Rules" tab on `FlagDetail`: priority-sorted list, add form (required Values field — an empty one silently changes several operators' meaning instead of erroring), delete-with-confirm, an inline warning when a REGEX/semver/date operator is selected (declared but not evaluated by one or more SDKs), and its own environment switcher (the page's existing env sub-tabs only rendered inside the Overview tab).
+- **Edge SDK — Step 4 rule matching (`targeting_rules`)** (#268): `@tomb-stone/edge`'s `EvaluationReason` reserved `RULE_MATCH` since introduction but never produced it. Ported `@tombstone/core`'s rule-matching step exactly (same operator set, same `NOT_IN`-empty-values-fails-closed guard from #246, same intentional REGEX/semver/date no-op). Individual `target_list` targeting (Core's Step 3) deliberately NOT ported — it has no real backend data model anywhere in the project yet; Core itself only parses it defensively to `[]`.
+- **workspace-mcp — governed change-request tools** (#257): added `tombstone_propose_change_request` / `tombstone_list_change_requests` — previously an AI assistant using this MCP server could only `kill_switch` or write directly, with no way to route a change through four-eyes approval. Also fixed `tombstone_blast_radius`, which called the wrong service with wrong param names, silently computing risk for an empty flag key at a hardcoded 100% rollout on every call.
+- **infra — Kubernetes autoscaling, resilience, and hardening** (#259, #260): HPAs, a PodDisruptionBudget, soft topology-spread constraints, and non-root/dropped-capability `securityContext` for all 5 services (previously 0% implemented beyond one disabled evaluator HPA). `intelligence` needed its own Dockerfile fix (`HF_HOME`, `SIGNALS_DIR`) before it could take the same hardening as the 4 Go services — forcing it in as-is broke both its baked model cache and, separately, its own root-owned file writes (`CAP_DAC_OVERRIDE` removal breaks root's own permission-bypass too, not just non-root access).
 
 ### Fixed
 - **Cross-SDK live-event tie-break race** (#240–#243): a snapshot fetch racing a live `prerequisites_updated` event landing in the same wall-clock second (both `time.Now().Unix()`-derived) could have the snapshot silently overwrite the just-applied live update, across TypeScript, Java, Ruby, and .NET — the same bug class, found once in TypeScript and proactively fixed in the other three before their own reviews could rediscover it. Fixed with a `>=`, one-shot (non-sticky) live-event-provenance guard; Java and .NET additionally needed their cache fields combined into one atomic state object to close a related thread-race.
@@ -30,6 +36,29 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **Ruby SDK — blank-attribute resolution bug** (#248): `resolve_attribute`'s dot-notation traversal (`"".split(".")` → `[]`) let a blank attribute name fall through to return the entire attributes hash unchanged instead of `nil`, letting `contains`/`startswith`/`endswith` spuriously match against a stringified hash. Not present in the other 4 SDKs (all flat-map attribute resolution); fixed with an explicit blank/nil guard.
 - **.NET SDK — numeric wire-value stringification could produce garbage or lose precision** (#249): the original cast (`(long)(double)v`) silently produced platform-dependent garbage for integers beyond `Int64` range and lost precision above 2^53 even within range. Rewritten to operate directly on `JsonElement.GetRawText()` rather than round-tripping through `double`/`long`. Also fixed a C# `record`-equality gotcha in the new test file: auto-generated `Equals`/`==` on a `record` falls back to reference equality for any `List<T>` property, so two structurally-identical `TargetingRule` instances compared unequal via `Assert.Equal` — tests now compare by `.Id` instead of whole objects.
 - **Dependabot**: pinned `serialize-javascript` (transitive via `mocha`) to `^7.0.5` in `@flagmind/core` and `@flagmind/edge`, closing a code-injection and a CPU-exhaustion advisory; also patched 2 more pre-existing dev-only vulnerabilities (`brace-expansion`, `js-yaml`) surfaced by the same lockfile refresh (#215).
+- **infra — Helm chart deploy-breaker** (#254): `TOKEN_HASH_PEPPER` is startup-fatal in flag-api (SEC-4) but was entirely absent from `infra/helm/flagmind`'s secret/values — `helm install` as written deployed a crash-looping flag-api on every real cluster. Also wired `AUDIT_HMAC_KEY`, `COMPLIANCE_SIGNING_KEY`(+`_ID`), `SCIM_TOKEN`, `REKOR_SIGNING_KEY`, `SSO_ALLOWED_DOMAINS` — env vars added across the project that the chart never picked up.
+- **infra — Oracle Cloud production compose had the SAME deploy-breaker** (#265): `infra/oracle/docker-compose.prod.yml` is the real, currently-documented production home for flag-api (gateway/intelligence run on Northflank separately) and was missing `TOKEN_HASH_PEPPER` too — this compose file predates SEC-4 and was never updated when the Helm chart was fixed. Also wired `MARKETPLACE_URL`: flag-api never notified marketplace on any flag-lifecycle mutation in this deployment despite marketplace running in the same compose file.
+- **Dashboard — GovernanceDash's health score and audit-chain panel were entirely fabricated** (#263): `GET /api/v1/intelligence/health-summary` never existed on the backend — this always 404'd and silently fell back to a `Math.sin`-jittered fake "24h trend" chart with zero real data behind it. Replaced with a real ratio derived from flag-api's `GET /api/v1/flags` and intelligence's `GET /api/v1/stale`, and wired the real (previously never-called) `GET /api/v1/audit/verify` into a new "Audit Chain Integrity" panel. Adversarial review caught a cross-tenant data-blend bug in the first draft: the two real endpoints are scoped to different notions of "current project" (flag-api resolves it from the caller's auth; intelligence defaults to a hardcoded sentinel), so combining them naively would silently blend two different tenants' data in any real multi-project deployment.
+- **Java/.NET SDKs — `FlagCache` lost-update race** (disclosed since #241–#243, closed here): every cache mutator did a plain read-modify-write instead of a CAS loop — two real concurrent callers (the SSE listener racing a lag-recovery snapshot fetch) could silently lose one another's entire update, not just the touched key. Fixed with `AtomicReference.updateAndGet` (Java) / an `Interlocked.CompareExchange` retry loop (.NET), matching each file's own disclosure comment.
+- **Dashboard test suite was silently running half its tests against dead code**: ~50 untracked, stray `.js` files (compiled twins of nearly every `.tsx`/`.ts` source and test file, left by a bare `tsc` invocation that bypassed `tsconfig.app.json`'s `noEmit: true`) were being discovered by Vitest's default glob alongside the real sources, doubling every reported test count with no signal that half the run was against a stale snapshot. Fixed via `vitest.config.ts`'s `exclude` plus a `.gitignore` rule.
+- **Dashboard — `tsc --noEmit` was a false positive for the entire project**: the plain command resolves to the root solution-style `tsconfig.json` (`files: []`, references-only) and type-checks zero files, always exiting 0 regardless of any real error. The correct equivalent of what CI's `Dashboard` job actually runs is `tsc -b tsconfig.app.json` (or `npm run build`).
+- **`make test`/`make build` didn't actually run** (this project's own documented "run everything" entrypoints): `go.work` declared `go 1.22.0` while every service's own `go.mod` requires `go 1.25.0` — modern Go refuses to proceed on that mismatch. CI never hit this (`GOWORK=off` on every step there) but a plain local `make test`/`make build` failed immediately, before testing anything. `make test` was also missing 5 of 7 Go services, all of the Python intelligence suite, and referenced a TypeScript package name (`@tombstone/core`) that hasn't existed since the npm-scope sweep (#261). Fixed at the root cause (`go.work` bumped to `go 1.25.0`, matching every real member module — also closing a stale claim in `CLAUDE.md`/`README.md`, which both still said "Go 1.22"), plus `export GOWORK := off` at the Makefile level to match CI's own convention regardless, all 7 Go services in both targets, Python intelligence tests added, correct `@flagmind/core` path.
+- **`workspace-cli`'s build has been broken since the package was created**: it has no `tsconfig.json` at all — a bare `tsc` invocation just prints usage help and exits 1. No CI job has ever exercised this package. Added the missing config (mirroring `workspace-mcp`'s); also fixed its own `--help` output still saying `flagmind` instead of `tombstone`.
+- **Docs — CLAUDE.md/README version and SDK paths** (#256): version banner corrected `v1.2.1` → `v1.5.0`; the documented `packages/sdks/@tombstone/{core,react,edge,browser}` path doesn't exist (real path `@flagmind/{core,react,edge}` — no `browser` SDK was ever built); stale test counts corrected against real `npm run test` output.
+- **Docs — wider `@tombstone/*` → `@tomb-stone/*` npm-scope sweep** (#261): the real published npm scope is `@tomb-stone/*` (hyphenated) — 16 files had install instructions for the wrong/nonexistent package, including `workspace-mcp`'s own live-served `tombstone_openfeature_setup` MCP tool and both CLI/MCP READMEs' own titles.
+- **Docs — deployment/positioning corrections** (#258): `docs/DEPLOYMENT_KUBERNETES.md` presented multi-region as working; verified it's genuinely non-functional scaffolding (the primary/secondary env var is wired but never read, the region ConfigMap is never read by any service, the Terraform region resource calls a route that doesn't exist on flag-api). Reconciled 3 divergent version strings across docs to `v1.5.0`.
+- **Docs — managed-cloud hosting status, verified** (2026-09-08): confirmed no Tombstone-operated SaaS exists anywhere in the repo — `infra/.env.example`'s Northflank+Oracle+Cloudflare topology and `infra/northflank/README.md` are self-hosting instructions for a third-party deployment, not a managed offering. Also fixed a stale "planned for v1.1" claim (no committed timeline exists) and the orphaned `infra/northflank/flag-api.json` (a leftover from an earlier topology where flag-api ran on Northflank too — not part of the current setup, now disclosed in that directory's own README).
+- **Docs — `workspace-mcp`'s own tool count and transport were both wrong** (found while verifying this release's own docs): `CLAUDE.md` claimed "9 tools, Streamable HTTP at `/api/mcp/mcp`" — the real server has 11 tools (confirmed against `allTools` in `flags.ts`) and uses `StdioServerTransport` (`bin: flagmind-mcp`); no `/api/mcp/mcp` route or Streamable HTTP transport exists anywhere in the repo. Also corrected `CLAUDE.md`/`README.md`'s "Go 1.22" banners (every real `go.mod` requires `go 1.25.0`) and README's "TypeScript 6" (only `workspace-dashboard` is on 6; every other TS package pins `~5.8.2`).
+
+### Known Issues (disclosed, deliberately not fixed in this release)
+- **vitest CVE** (GHSA-5xrq-8626-4rwp, CVSS 9.8) in `workspace-dashboard`'s dev-only vitest dependency. Verified zero real exposure (the UI server it affects is never invoked — headless `vitest run` only). A real fix needs a major version bump (2.x→5.0.0) that could break dashboard test config; tracked separately rather than rushed into this release.
+- **`@tombstone/eval` (sdk-wasm) has no prerequisites or individual-targeting support.** Its `evaluate()` implements Steps 1, 4 (rule matching), and 5 of Core's 5-step pipeline; Steps 2/3 need a lookup abstraction this zero-dependency, WASM-runnable engine doesn't yet have any scaffolding for (no cache param, no `PREREQUISITE_FAILED` reason, no recursion-depth cap) — adding it would meaningfully expand this package's deliberately minimal public surface, which is a product/design call, not a mechanical port.
+- **GW-1 (gateway connection-based autoscaling via KEDA)** was not implemented — gateway's metrics endpoint is plain JSON, not Prometheus-scrapeable, and no KEDA/Prometheus operator exists in this chart. Standard CPU/mem HPAs (shipped this release) are the interim stopgap; the real fix needs OBS-1 (a Prometheus operator) first.
+- **Root `package.json`'s `workspaces` array still points at 3 nonexistent paths** (`packages/sdks/@tombstone/{core,react,browser}` — the real directories are `@flagmind/{core,react,edge}`). npm silently drops dangling workspace entries rather than erroring, so this has caused no visible failure, but it also means these two real SDK packages have never actually been npm workspace members. Fixing the string would activate real workspace membership for the first time — a bigger change than a typo fix, deliberately left for its own pass.
+
+---
+
+> **Note on version history below:** the `[2.2.0-legacy]`, `[2.1.0-legacy]`, `[2.0.1-legacy]`, and `[2.0.0-legacy]` entries further down this file were tagged under an early internal versioning scheme, abandoned when the project reset to `v1.0.0` on 2026-06-27 — three days *after* `v2.2.0` was tagged (2026-06-24). They predate and are entirely unrelated to the `[2.0.0]` release above, which continues directly from `v1.5.0` (2026-08-09). Each entry's own heading was given a `-legacy` suffix here (their content is otherwise untouched) purely to stop their bracket label colliding with the real `[2.0.0]` link reference at the bottom of this file — without it, Markdown's reference-link resolution would silently point one era's heading at the other's compare URL.
 
 ---
 
@@ -185,7 +214,7 @@ First public self-hosted release. See prior CHANGELOG entries for full developme
 
 <!-- Internal development versions below — not public releases -->
 
-## [2.2.0] - 2026-06-24
+## [2.2.0-legacy] - 2026-06-24
 
 ### Added — Fly.io Free-Tier Deployment
 
@@ -211,7 +240,7 @@ First public self-hosted release. See prior CHANGELOG entries for full developme
 
 ---
 
-## [2.1.0] - 2026-06-24
+## [2.1.0-legacy] - 2026-06-24
 
 ### Added
 
@@ -252,7 +281,7 @@ First public self-hosted release. See prior CHANGELOG entries for full developme
 
 ---
 
-## [2.0.1] - 2026-06-23
+## [2.0.1-legacy] - 2026-06-23
 
 ### Fixed
 
@@ -269,7 +298,7 @@ First public self-hosted release. See prior CHANGELOG entries for full developme
 
 ---
 
-## [2.0.0] - 2026-06-23
+## [2.0.0-legacy] - 2026-06-23
 
 Tombstone v2 is a complete rebuild of the intelligence and evaluation layers. The v1 service contracts are preserved — all existing SDKs and integrations remain compatible.
 
@@ -505,9 +534,10 @@ Initial repository scaffolding. Project initialized as **FlagMind** before renam
 
 ---
 
-[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.1.0...HEAD
-[2.1.0]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...v2.1.0
-[2.0.1]: https://github.com/sairam0424/Tombstone/compare/v2.0.0...v2.0.1
-[2.0.0]: https://github.com/sairam0424/Tombstone/compare/v1.0.0...v2.0.0
+[Unreleased]: https://github.com/sairam0424/Tombstone/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/sairam0424/Tombstone/compare/v1.5.0...v2.0.0
+[2.1.0-legacy]: https://github.com/sairam0424/Tombstone/compare/v2.0.1...v2.1.0
+[2.0.1-legacy]: https://github.com/sairam0424/Tombstone/compare/v2.0.0...v2.0.1
+[2.0.0-legacy]: https://github.com/sairam0424/Tombstone/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/sairam0424/Tombstone/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/sairam0424/Tombstone/releases/tag/v0.1.0

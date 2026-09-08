@@ -4,11 +4,11 @@ Tombstone is the **production intelligence layer** for feature flags at scale. I
 
 **Core thesis:** Every competitor asks "how do I deliver a flag value?" — Tombstone asks "which of my 5,000 active flags is responsible for what's happening in production right now?"
 
-**Current version: v1.5.0** (last tagged release; `develop`/`main` are well ahead of it working toward v2.0.0 — see `CHANGELOG.md`'s `[Unreleased]` section)
+**Current version: v2.0.0** (see `CHANGELOG.md` for the full release)
 
 ## Architecture
 
-Polyglot monorepo (Go 1.22 + Python 3.12 + TypeScript) following the Graph-Forge workspace pattern.
+Polyglot monorepo (Go 1.25 + Python 3.12 + TypeScript) following the Graph-Forge workspace pattern.
 
 ```
 Tombstone/
@@ -37,7 +37,7 @@ Tombstone/
 ├── packages/sdk-wasm/   # @tombstone/eval — zero-dependency WASM-ready engine, 51 tests
 ├── workspace-cli/       # @tomb-stone/cli — Commander CLI
 ├── workspace-dashboard/ # React 19 + Vite + Tailwind v4 — management UI
-├── workspace-mcp/       # MCP server — 9 tools, Streamable HTTP at /api/mcp/mcp
+├── workspace-mcp/       # MCP server — 11 tools, stdio transport (bin: flagmind-mcp)
 ├── proto/v1/            # Protobuf contracts (source of truth for all APIs)
 └── infra/               # Docker Compose + Helm (multi-region) + Terraform tombstone_region
 ```
