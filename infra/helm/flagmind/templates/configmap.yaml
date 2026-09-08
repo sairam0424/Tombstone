@@ -29,3 +29,20 @@ data:
   # silently drops the alert's one-click CTA on this Helm/k8s deployment
   # path, the same class of gap INT-4 found for CONSUMER_BACKEND above.
   DASHBOARD_URL: {{ .Values.dashboardUrl | default "" | quote }}
+  # AUD-1: non-secret retention window; flag-api's main.go defaults to 365
+  # if unset, so this is safe to omit, but making it explicit here matches
+  # the DATA-2 pool-tuning vars below and infra/.env.example's own default.
+  AUDIT_LOG_RETENTION_DAYS: {{ .Values.auditLogRetentionDays | default 365 | quote }}
+  # AUD-1b: fail-open when false or when true with no rekorSigningKey
+  # configured in secret.yaml -- never blocks startup either way.
+  REKOR_ENABLED: {{ .Values.rekorEnabled | default false | quote }}
+  # SEC-5: empty means unrestricted login (see main.go's own startup warning
+  # if this folds to zero usable domains) -- matches infra/.env.example's
+  # own default and disclosed tradeoff, not silently overridden here.
+  SSO_ALLOWED_DOMAINS: {{ .Values.ssoAllowedDomains | default "" | quote }}
+  # marketplace's flag-lifecycle webhook receiver -- unset means
+  # notifyMarketplace's dispatch is a no-op (async, fail-open), matching
+  # DASHBOARD_URL/SLACK_WEBHOOK_URL's own "third-party integration is
+  # optional" posture. Defaults to this chart's own in-cluster marketplace
+  # service when enabled, the same pattern FLAG_API_URL above uses.
+  MARKETPLACE_URL: {{ .Values.marketplace.enabled | ternary (printf "http://%s-marketplace:%v" (include "tombstone.fullname" .) .Values.marketplace.service.port) "" | quote }}
