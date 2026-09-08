@@ -55,3 +55,10 @@ data:
   # adversarial review of the securityContext hardening in this same PR).
   # Point it at the /tmp emptyDir every Deployment already mounts instead.
   CERTS_DIR: "/tmp/certs"
+  # INFRA-1 follow-up: intelligence's Argos rule-generation endpoint
+  # (app/main.py's generate-rule handler) writes pending-approval signal
+  # files under this dir -- the code's own default ("signals", relative to
+  # /app) isn't writable once the intelligence Deployment's root
+  # filesystem is read-only. Points it at the /tmp emptyDir that
+  # Deployment already mounts instead.
+  SIGNALS_DIR: "/tmp/signals"
