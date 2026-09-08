@@ -34,9 +34,25 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		environment = "production"
 	}
 
-	// Validate service token (basic check — full auth middleware on router)
+	// Validate service token (basic check — full auth middleware on router).
+	//
+	// Falls back to a `sdk_key` query parameter when no Authorization header
+	// is present -- workspace-dashboard's useSSE.ts (a browser tab, not an
+	// SDK) has always connected via a plain `new EventSource(url)` with the
+	// token appended as `?sdk_key=...`, per this file's own pre-existing
+	// comment further down referencing "workspace-dashboard's useSSE.ts uses
+	// a raw browser EventSource" -- native browser EventSource has no way to
+	// set a custom Authorization header at all, so a header-only check here
+	// meant this endpoint 401'd every dashboard connection, ever, in any
+	// deployment. First-party SDKs (which DO send a real Authorization
+	// header, see @flagmind/core's streaming.ts) are unaffected either way.
+	// Downstream code (Redis-consumer group naming, rate limiting) reads no
+	// token value from this check today, so accepting it via either
+	// transport is equivalent from this handler's point of view.
 	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+	hasBearer := strings.HasPrefix(authHeader, "Bearer ")
+	hasSDKKeyParam := r.URL.Query().Get("sdk_key") != ""
+	if !hasBearer && !hasSDKKeyParam {
 		http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
 		return
 	}

@@ -37,14 +37,55 @@ export function useSSE(env: string) {
     // transient drop.
     es.onerror = () => setConnected(false);
 
-    es.onmessage = (e) => {
+    // gateway (hub.go's sseFrame/rawFrame) never sends an unnamed/default
+    // `message` event -- every real frame carries an explicit `event:` name
+    // (connected/flag_updated/kill_switch/prerequisites_updated/
+    // targeting_rules_updated/heartbeat/lag), which per the SSE spec only
+    // fires a NAMED listener, never `onmessage`. This hook used to attach
+    // only `onmessage`, so LiveFeed had never rendered a single real event,
+    // ever, in this dashboard's history -- found by actually connecting a
+    // real browser to this live gateway end to end, something no existing
+    // test does (this file has no test coverage at all). The raw wire
+    // payload's own field names (flag_key/rollout_pct/ts, see hub.go's
+    // sseFrame) also never matched this hook's SSEEvent shape
+    // (flagKey/timestamp/type/payload/id) even for the one event type
+    // (flag_updated) LiveFeed was designed to color-code -- mapped
+    // explicitly below instead of assuming the wire shape.
+    const toSSEEvent = (eventType: string, raw: string): SSEEvent | null => {
       try {
-        const data = JSON.parse(e.data) as SSEEvent;
-        setEvents((prev) => [data, ...prev].slice(0, MAX_EVENTS));
+        const data = JSON.parse(raw) as Record<string, unknown>;
+        const ts = Number(data["ts"]);
+        return {
+          id: `${eventType}-${data["flag_key"] ?? ""}-${Number.isFinite(ts) ? ts : Date.now()}-${Math.random().toString(36).slice(2)}`,
+          type: eventType,
+          flagKey: String(data["flag_key"] ?? ""),
+          environment: String(data["environment"] ?? env),
+          timestamp: new Date(
+            Number.isFinite(ts) ? ts * 1000 : Date.now(),
+          ).toISOString(),
+          payload: data,
+        };
       } catch {
-        /* ignore malformed */
+        return null; // malformed event — ignore
       }
     };
+
+    const handleNamedEvent = (eventType: string) => (e: MessageEvent) => {
+      const parsed = toSSEEvent(eventType, e.data as string);
+      if (parsed) {
+        setEvents((prev) => [parsed, ...prev].slice(0, MAX_EVENTS));
+      }
+    };
+
+    const listenedTypes = [
+      "flag_updated",
+      "kill_switch",
+      "prerequisites_updated",
+      "targeting_rules_updated",
+    ];
+    for (const eventType of listenedTypes) {
+      es.addEventListener(eventType, handleNamedEvent(eventType));
+    }
 
     return () => {
       es.close();
