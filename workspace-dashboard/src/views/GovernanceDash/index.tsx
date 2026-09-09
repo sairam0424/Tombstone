@@ -916,7 +916,18 @@ export default function GovernanceDash() {
     // failed) means there is nothing real to scope this query to --
     // querying intelligence's default-project fallback here would just
     // reintroduce the cross-tenant blend this is fixing.
-    enabled: !!projectId,
+    //
+    // isIntelAvailable (ENABLE_INTELLIGENCE) is also required here -- this
+    // component's own early return below ("Intelligence service offline")
+    // already treats intelligence-off as a supported, quiet state, but
+    // TanStack Query hooks run unconditionally on every render regardless
+    // of what JSX a component eventually returns, so without this the
+    // request fired (and its connection-refused/console error landed)
+    // before that early return ever had a chance to skip rendering the
+    // panel that needed it -- found by actually loading this page in a
+    // real browser with intelligence not running, something no existing
+    // test does.
+    enabled: !!projectId && isIntelAvailable,
   });
 
   const { data: autonomousData } = useQuery({
@@ -929,6 +940,7 @@ export default function GovernanceDash() {
       };
       return data.recommendations ?? [];
     },
+    enabled: isIntelAvailable,
   });
 
   const { data: activityData = [] } = useQuery({

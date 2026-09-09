@@ -1,3 +1,4 @@
+import { EventSource as NodeEventSourcePolyfill } from "eventsource";
 import type {
   FlagEvent,
   PrerequisitesUpdateEvent,
@@ -5,6 +6,44 @@ import type {
   TargetingRulesUpdateEvent,
   TombstoneClientConfig,
 } from "./types.js";
+
+// This package's own package.json has always declared `eventsource` as a
+// dependency, but nothing in this file ever actually imported it -- calling
+// connect() in a plain Node.js process (this SDK's own primary documented
+// target platform) threw `ReferenceError: EventSource is not defined`
+// unless the CONSUMING application happened to already polyfill a global
+// itself. Only the test suite ever worked around this (client.test.ts/
+// streaming.test.ts install their own FakeEventSource as a global before
+// running, per that file's own comment: "previously threw ReferenceError:
+// EventSource is not defined") -- found by actually connecting this SDK to
+// a live backend end to end, something no existing test does. Prefers a
+// real global EventSource when one exists (a real browser, or a Node/Bun/
+// Deno runtime that already provides one) so a browser bundle keeps using
+// the platform's own implementation; falls back to the declared npm
+// dependency otherwise -- matching openConnection's own existing comment
+// ("Use native EventSource in browser; use EventSource-compatible init in
+// Node.js") and its `fetch` override below, which only the npm polyfill
+// (not any native browser EventSource) has ever actually supported.
+//
+// Resolved INSIDE this function, called fresh on every connect()/reconnect
+// -- NOT as a module-level `const` evaluated once at import time. A
+// module-level const would freeze whatever `globalThis.EventSource` was at
+// the moment this module was first imported, which for every test in this
+// package is BEFORE that test file's own `globalThis.EventSource =
+// FakeEventSource` assignment runs (ES module evaluation order: importing
+// this file fully evaluates its top-level code before the importer's own
+// subsequent top-level statements execute) -- every SSE test would silently
+// open a REAL npm-polyfill connection to a real network address instead of
+// the intended FakeEventSource, both hanging the whole mocha process on an
+// unclosed handle and making every FakeEventSource.instances[0] lookup
+// undefined. Found by actually running this package's own test suite after
+// this file's other real-bug fixes, something that had not been done since
+// those fixes landed.
+function resolveEventSourceImpl(): typeof EventSource {
+  return typeof EventSource !== "undefined"
+    ? EventSource
+    : (NodeEventSourcePolyfill as unknown as typeof EventSource);
+}
 
 // SSE client with automatic reconnect and exponential backoff.
 // Handles: flag_updated, kill_switch, prerequisites_updated,
@@ -65,11 +104,37 @@ export class SSEStreamClient {
     const gatewayUrl = this.config.gatewayUrl ?? "http://localhost:8080";
     const url = `${gatewayUrl}/api/v1/stream?environment=${encodeURIComponent(this.config.environment)}`;
 
-    // Use native EventSource in browser; use EventSource-compatible init in Node.js
-    // The Authorization header is passed as a custom header via the headers option.
-    this.es = new EventSource(url, {
-      // @ts-expect-error - Node.js EventSource supports headers, browser does not type it
-      headers: { Authorization: `Bearer ${this.config.sdkKey}` },
+    // Use native EventSource in browser; use EventSource-compatible init in Node.js.
+    //
+    // The npm `eventsource` package's v3 constructor init (EventSourceInit)
+    // does NOT accept a `headers` option at all -- only `withCredentials` and
+    // `fetch` (confirmed against its own dist/index.cjs: `_fetch` is set from
+    // `eventSourceInitDict?.fetch`, and getRequestOptions_fn builds its
+    // request's headers as only `{Accept, Last-Event-ID}`, with no
+    // Authorization). Passing `headers` here used to be silently ignored --
+    // no Authorization header was EVER sent, so gateway's auth middleware
+    // correctly 401'd every real SSE connection from this SDK, in any
+    // deployment, ever. The `@ts-expect-error` comment this replaced dated
+    // from `eventsource`'s older v1/v2 API, which DID take `headers` directly
+    // -- v3's rewrite onto the Fetch API moved custom-header injection to a
+    // caller-supplied `fetch` override instead. Found by actually connecting
+    // this SDK to a live gateway end to end with a real bearer token, not the
+    // unauthenticated raw curl check that exposed the separate gateway
+    // Flush() bug. Native browser EventSource has no `fetch` option either
+    // (and cannot send custom headers at all -- a platform limitation, not
+    // fixable here); passing it is harmless there since the browser
+    // constructor simply ignores properties it doesn't recognize.
+    const EventSourceImpl = resolveEventSourceImpl();
+    this.es = new EventSourceImpl(url, {
+      // @ts-expect-error - fetch override is eventsource v3's Node-only mechanism for custom headers; not in the DOM EventSourceInit type
+      fetch: (input: unknown, init: Record<string, unknown>) =>
+        fetch(input as never, {
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string> | undefined),
+            Authorization: `Bearer ${this.config.sdkKey}`,
+          },
+        }),
     });
 
     this.es.addEventListener("flag_updated", (e: MessageEvent) => {
