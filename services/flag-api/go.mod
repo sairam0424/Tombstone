@@ -11,7 +11,7 @@ require (
 	github.com/go-chi/cors v1.2.1
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
-	github.com/lestrrat-go/httprc/v3 v3.0.5
+	github.com/lestrrat-go/httprc/v3 v3.0.6
 	github.com/lestrrat-go/jwx/v3 v3.1.1
 	github.com/lib/pq v1.10.9
 	github.com/mvrilo/go-redoc v0.1.5
