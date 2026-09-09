@@ -70,5 +70,8 @@
     "@openfeature/server-sdk": {
       "optional": true
     }
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5"
   }
 }

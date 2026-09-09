@@ -23,6 +23,9 @@ on:
           - argocd
           - both
 
+permissions:
+  contents: read
+
 jobs:
   bootstrap:
     name: Bootstrap Argo CD (${{ inputs.cluster }}, provider=${{ inputs.provider }})
