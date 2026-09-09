@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.0.1] - 2026-09-09
+
+### Fixed
+
+10 real, previously-undiscovered bugs found by actually standing up the full v2.0.0 stack (postgres/pgbouncer/redis/flag-api/gateway/evaluator + a real browser against the dashboard) end to end, rather than trusting each component's isolated test suite. None of these were caught by any existing test.
+
+- **PgBouncer transaction-pooling races (#272)** — the most severe finding: `pool_mode: transaction` is fundamentally incompatible with lib/pq's extended-query-protocol usage under real concurrent load. 10 parallel requests to the same endpoint reproduced a random mix of 200/401/500 with real postgres wire-protocol errors ("unnamed prepared statement does not exist", mismatched bind param/column counts) 100% of the time — including intermittent, false auth failures on genuinely valid tokens, since the auth lookup query itself raced the same way. `MAX_PREPARED_STATEMENTS` (PgBouncer 1.21+'s official mitigation) did not fully eliminate it; switching `pool_mode` to `session` did, confirmed via 30/30 clean runs across 3 rounds of 10 concurrent requests.
+- **Gateway SSE streaming never worked through the real middleware chain (#271)** — `statusRecorder` embedded `http.ResponseWriter` (the interface), so Go only promoted that interface's own methods, never `Flush` — every SSE connection behind the globally-registered `HTTPMetrics` middleware got "streaming not supported" (500), for every deployment, ever.
+- **Gateway SSE auth rejected the dashboard's only viable auth transport (#272)** — `/api/v1/stream` only read the `Authorization` header, but a browser's native `EventSource` (what the dashboard has always used) cannot set custom headers; the dashboard has always passed the token via a `?sdk_key=` query param, which the endpoint never read. Added a query-param fallback.
+- **`@flagmind/core` never actually imported its declared `eventsource` dependency (#271)** — `connect()` threw `ReferenceError: EventSource is not defined` in any real Node.js process; only the test suite's own global stub masked it.
+- **`eventsource` v3's real `EventSourceInit` type silently ignores a `headers` option (#271)** — the bearer token passed via `headers` was never actually sent, so gateway correctly 401'd every real SSE connection this SDK ever made. Fixed via v3's actual supported mechanism, a `fetch` override.
+- **`workspace-dashboard`'s `useSSE.ts` used `onmessage`, but gateway never sends an unnamed `message` event (#272)** — every real frame carries a named `event:` (`flag_updated`/`kill_switch`/etc.), which per the SSE spec only fires a named listener. Combined with the wire payload's field names never matching this hook's expected shape, **LiveFeed had never rendered a single real event in this dashboard's history**.
+- **`services/evaluator` had zero CORS middleware (#272)** — every browser call this service ever received (`CircuitBreakerStatus`, `AutonomousRolloutToggle`) was blocked before reaching a handler.
+- **`scripts/seed-dev.sh` inserted the dev token into the wrong column with the wrong role (#271)** — plaintext `token`, never `token_hash` (what auth has checked since SEC-4/migration 014), and no `role` (defaulting to read-only `VIEWER`). The seeded dev credential could never authenticate or write since 2026-08-13.
+- **`AutonomousRolloutToggle.tsx` and `GovernanceDash`'s intelligence queries never respected `ENABLE_INTELLIGENCE` (#272, #273)** — unlike sibling components, these fired real requests against the intelligence service (and logged connection-refused errors) on every load regardless of whether it was running or the feature flag was on.
+
+Full live chain re-verified end to end after all fixes: flag create → SDK evaluate → kill switch → live SSE propagation (both SDK and dashboard) → Targeting Rules CRUD → Governance's clean degradation when intelligence is unavailable.
+
 ## [2.0.0] - 2026-09-09
 
 ### Added
