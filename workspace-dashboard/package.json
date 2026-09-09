@@ -25,7 +25,7 @@
     "date-fns": "^3.0.0",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
-    "lucide-react": "^1.31.0",
+    "lucide-react": "^1.41.0",
     "motion": "^13.1.0",
     "nuqs": "^2.9.5",
     "react": "^19.0.0",
