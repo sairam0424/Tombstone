@@ -3,7 +3,7 @@ module github.com/tombstone/gitops-sync
 go 1.25.0
 
 require (
-	github.com/failsafe-go/failsafe-go v0.9.6
+	github.com/failsafe-go/failsafe-go v0.9.7
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.22.0
