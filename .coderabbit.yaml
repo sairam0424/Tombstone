@@ -1,0 +1,62 @@
+language: en-US
+tone_instructions: "This is a production feature-flag platform touching auth-adjacent config. Prioritize correctness and security over style."
+enable_free_tier: true
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    ignore_usernames: ["dependabot[bot]", "renovate[bot]"]
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 3
+  path_filters:
+    - "!**/*.pb.go"
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/*.pyc"
+    - "!workspace-dashboard/dist/**"
+    - "!**/*.generated.ts"
+  path_instructions:
+    - path: "services/flag-api/**/*.go"
+      instructions: >
+        Review as the flag-evaluation control plane. Flag any change to
+        auth/authz middleware, PgBouncer transaction-mode assumptions, or
+        blast-radius gate logic without corresponding tests.
+    - path: "services/gateway/**/*.go"
+      instructions: "Focus on request validation, timeout/retry correctness, and CORS config."
+    - path: "services/evaluator/**/*.go"
+      instructions: "Flag rule-evaluation logic changes (targeting_rules, tie-break ordering) that could silently change flag outcomes for existing users."
+    - path: "services/intelligence/**/*.py"
+      instructions: "Review causal-correlation and anomaly-detection logic for statistical correctness; flag unvalidated external input to the pgvector queries."
+    - path: "packages/sdks/@flagmind/**/*.ts"
+      instructions: >
+        This SDK is published to consumers. Flag any breaking change to
+        public interfaces, and check parity with the other language SDKs
+        (Java/.NET/Ruby/Python) for evaluation-logic consistency
+        (targeting rule tie-breaks, REGEX semantics).
+    - path: "packages/sdks/tombstone-*-sdk/**"
+      instructions: "Check parity with the TypeScript SDK for evaluation-logic consistency (targeting rule tie-breaks, REGEX semantics)."
+    - path: "workspace-dashboard/**"
+      instructions: "Check SSE/auth wiring and CORS handling on the governance dashboard."
+  tools:
+    golangci-lint:
+      enabled: true
+    ruff:
+      enabled: true
+    eslint:
+      enabled: true
+    semgrep:
+      enabled: true
+    gitleaks:
+      enabled: true
+    checkov:
+      enabled: true
+    trufflehog:
+      enabled: true
+
+knowledge_base:
+  learnings:
+    scope: local
+  code_guidelines:
+    enabled: true
