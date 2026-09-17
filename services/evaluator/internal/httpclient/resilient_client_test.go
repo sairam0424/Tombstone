@@ -40,7 +40,7 @@ func TestResilientClient_RetriesUpToMaxRetries(t *testing.T) {
 	}
 	resp, doErr := c.Do(req.Context(), req)
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if doErr == nil {
 		t.Fatal("expected error after exhausting retries, got nil")
@@ -72,7 +72,7 @@ func TestResilientClient_CircuitOpensAfterConsecutiveFailures(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 		resp, _ := c.Do(req.Context(), req)
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 	}
 	before := atomic.LoadInt32(&attempts)
@@ -83,7 +83,7 @@ func TestResilientClient_CircuitOpensAfterConsecutiveFailures(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 	resp, doErr := c.Do(req.Context(), req)
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if doErr == nil {
 		t.Fatal("expected circuit-open error, got nil")
@@ -110,7 +110,7 @@ func TestResilientClient_SucceedsWithoutRetryOnFirstSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Fatalf("expected exactly 1 attempt on success, got %d", got)
 	}
@@ -138,7 +138,7 @@ func TestResilientClient_RewindsBodyOnRetry(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader("payload-body"))
 	resp, _ := c.Do(req.Context(), req)
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	if len(bodies) != 3 {
@@ -195,7 +195,7 @@ func TestResilientClient_PropagatesTraceContext(t *testing.T) {
 	if doErr != nil {
 		t.Fatalf("unexpected error: %v", doErr)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotTraceparent == "" {
 		t.Fatal("outbound request carried no traceparent header — the trace was not propagated")
@@ -242,7 +242,7 @@ func TestResilientClient_WrapsRatherThanReplacesCustomTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if !custom.called {
 		t.Error("the caller-supplied custom transport was never invoked — otelhttp.NewTransport must wrap it as base, not discard it")

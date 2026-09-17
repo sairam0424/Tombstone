@@ -266,7 +266,7 @@ func fetchFlagsByService(ctx context.Context, resilientHTTP *httpclient.Resilien
 	if err != nil {
 		return nil, fmt.Errorf("flag-api request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("flag-api returned %d", resp.StatusCode)
@@ -310,7 +310,7 @@ func fetchBlastRadius(ctx context.Context, resilientHTTP *httpclient.ResilientCl
 	if err != nil {
 		return blastRadiusResult{}, fmt.Errorf("evaluator request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return blastRadiusResult{}, fmt.Errorf("evaluator returned %d", resp.StatusCode)
@@ -353,7 +353,7 @@ func (h *Handler) postKillSwitch(ctx context.Context, flagAPIBase, flagKey, aler
 	if err != nil {
 		return fmt.Errorf("kill-switch request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("kill-switch returned %d", resp.StatusCode)

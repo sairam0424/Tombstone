@@ -70,7 +70,7 @@ func TestRequireProjectID_HumanCallerWithMembershipIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(testActorAlice, testProjectA).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
@@ -101,7 +101,7 @@ func TestRequireProjectID_HumanCallerWithoutMembershipIsDenied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(testActorAlice, "someone-elses-project").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
@@ -132,7 +132,7 @@ func TestResolveRoleIsScopedPerProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	const projectB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 

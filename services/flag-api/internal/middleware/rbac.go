@@ -206,7 +206,7 @@ func (mw *RBACMiddleware) watchPolicies(policyDir string) {
 		mw.logger.Warn("[rbac] fsnotify unavailable — hot-reload disabled", zap.Error(err))
 		return
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(policyDir); err != nil {
 		mw.logger.Warn("[rbac] cannot watch policy dir — hot-reload disabled",

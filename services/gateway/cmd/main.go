@@ -25,7 +25,7 @@ import (
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	initCtx := context.Background()
 
@@ -155,7 +155,7 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		counts := h.AllConnectionCounts()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
+		_, _ = fmt.Fprintf(w, `{"status":"ok","connections":%v}`, counts)
 	})
 
 	// Gateway has no Postgres dependency; readiness is gated on Redis only.

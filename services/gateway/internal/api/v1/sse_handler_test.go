@@ -51,7 +51,7 @@ func TestSSEHandler_LastEventIDReplaysOnlyMissedEvents(t *testing.T) {
 	}
 	defer mr.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := hub.StreamKey(env)
@@ -111,7 +111,7 @@ func TestSSEHandler_NoLastEventIDSkipsReplay(t *testing.T) {
 	}
 	defer mr.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := hub.StreamKey(env)

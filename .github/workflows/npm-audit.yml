@@ -1,0 +1,39 @@
+name: npm Audit
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: npm audit (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only directories with their own committed package-lock.json.
+        # sdk-wasm, workspace-cli, workspace-dashboard, and workspace-mcp
+        # resolve against the root lockfile (see ci.yml comments) and are
+        # therefore covered by the "." entry.
+        project:
+          - .
+          - packages/sdks/@flagmind/core
+          - packages/sdks/@flagmind/edge
+          - packages/sdks/@flagmind/react
+          - workspace-vscode-ext
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: npm audit
+        working-directory: ${{ matrix.project }}
+        run: npm audit --audit-level=high

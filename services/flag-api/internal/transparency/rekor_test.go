@@ -107,7 +107,7 @@ func TestSubmitAuditEntry_SubmitsAVerifiableHashedRekordEntry(t *testing.T) {
 		gotBody = body
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"24296fb24b8ad77a": {"logIndex": 42, "integratedTime": 1700000000}}`)
+		_, _ = fmt.Fprint(w, `{"24296fb24b8ad77a": {"logIndex": 42, "integratedTime": 1700000000}}`)
 	}))
 	defer server.Close()
 
@@ -191,7 +191,7 @@ func TestSubmitAuditEntry_MalformedResponseFailsOpen(t *testing.T) {
 	t.Setenv("REKOR_ENABLED", "true")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `not valid json`)
+		_, _ = fmt.Fprint(w, `not valid json`)
 	}))
 	defer server.Close()
 
@@ -288,7 +288,7 @@ func TestSubmitAuditEntry_SignErrorFailsOpenWithoutHTTPCall(t *testing.T) {
 func TestSubmitAuditEntry_EmptyEntriesMapFailsOpen(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{}`)
+		_, _ = fmt.Fprint(w, `{}`)
 	}))
 	defer server.Close()
 

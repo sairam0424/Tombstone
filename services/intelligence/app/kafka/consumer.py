@@ -15,6 +15,8 @@ from app.anomaly.detector import AnomalyDetector
 from app.graph.builder import DEFAULT_PROJECT_ID
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
     from app.search.embedding_sync import EmbeddingSyncService
 
 logger = logging.getLogger(__name__)
@@ -304,7 +306,7 @@ class RedisStreamsEventConsumer(EventConsumer):
         self._environments = environments or ["production"]
         self._embedding_sync = embedding_sync
         self._graph_builder = graph_builder
-        self._redis = None
+        self._redis: "Redis | None" = None
         self._running = False
         # Build stream keys from environment names — must match flag-api format
         self._streams = [f"tombstone:stream:{env}" for env in self._environments]
@@ -314,6 +316,7 @@ class RedisStreamsEventConsumer(EventConsumer):
 
         if self._redis is None:
             self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        assert self._redis is not None
         # Create consumer groups idempotently (BUSYGROUP = already exists = OK)
         for stream in self._streams:
             try:
@@ -360,6 +363,7 @@ class RedisStreamsEventConsumer(EventConsumer):
         import os
 
         consumer_name = f"intelligence-{os.environ.get('FLY_MACHINE_ID', 'local')}"
+        assert self._redis is not None
         self._running = True
         logger.info(
             "RedisStreamsEventConsumer: starting on streams %s as %s",
@@ -560,6 +564,7 @@ class RedisStreamsEventConsumer(EventConsumer):
             XAdd convention), then XACK the original ID off the primary
             stream's PEL.
         """
+        assert self._redis is not None
         try:
             pending = await self._redis.xpending_range(
                 stream_key,
@@ -614,6 +619,7 @@ class RedisStreamsEventConsumer(EventConsumer):
 
     async def _dead_letter(self, stream_key: str, msg_id: str) -> None:
         """Move a poison message from stream_key's PEL to its DLQ stream."""
+        assert self._redis is not None
         dlq_key = self.dlq_stream_key(stream_key)
         try:
             entries = await self._redis.xrange(stream_key, min=msg_id, max=msg_id)

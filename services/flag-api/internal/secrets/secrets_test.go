@@ -128,9 +128,9 @@ func TestComplianceSignatureDependsOnDedicatedKey(t *testing.T) {
 	}
 
 	m1 := dedicated.New()
-	m1.Write([]byte(body))
+	_, _ = m1.Write([]byte(body))
 	m2 := asJWT.New()
-	m2.Write([]byte(body))
+	_, _ = m2.Write([]byte(body))
 
 	if Sum(m1) == Sum(m2) {
 		t.Fatal("export signature must depend on the dedicated key, proving it is no longer derived from the JWT key")
@@ -145,9 +145,9 @@ func TestComplianceSignatureIsReproducible(t *testing.T) {
 	const body = "line\n"
 
 	a := s.New()
-	a.Write([]byte(body))
+	_, _ = a.Write([]byte(body))
 	b := s.New()
-	b.Write([]byte(body))
+	_, _ = b.Write([]byte(body))
 
 	if Sum(a) != Sum(b) {
 		t.Fatal("signature must be reproducible so an auditor can verify an export")

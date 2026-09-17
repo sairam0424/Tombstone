@@ -21,7 +21,7 @@ import (
 
 func main() {
 	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	initCtx := context.Background()
 
@@ -81,7 +81,7 @@ func main() {
 	r.Use(httpMetrics)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"ok","service":"gitops-sync"}`)
 	})
 
 	// gitops-sync has no Postgres or Redis dependency of its own — it is

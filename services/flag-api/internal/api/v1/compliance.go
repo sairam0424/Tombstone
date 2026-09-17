@@ -347,7 +347,7 @@ func (h *ComplianceHandler) ExportAuditLog(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		mac.Write(line)
+		_, _ = mac.Write(line)
 		_, _ = fmt.Fprintf(w, "%s\n", line)
 		lineCount++
 	}

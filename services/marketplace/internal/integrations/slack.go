@@ -349,7 +349,7 @@ func (s *SlackApp) PostMessage(ctx context.Context, channelID string, msg SlackM
 	if err != nil {
 		return fmt.Errorf("slack: post message: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		OK    bool   `json:"ok"`
@@ -428,7 +428,7 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Flags []struct {
@@ -449,10 +449,10 @@ func (s *SlackApp) listCommand(env string) (SlackMessage, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Flags in %s* (showing up to 10):\n", env))
+	_, _ = fmt.Fprintf(&sb, "*Flags in %s* (showing up to 10):\n", env)
 	for _, f := range result.Flags {
 		badge := stateBadge(f.State, float64(f.Rollout))
-		sb.WriteString(fmt.Sprintf("%s `%s` — %d%% rollout\n", badge, f.Key, f.Rollout))
+		_, _ = fmt.Fprintf(&sb, "%s `%s` — %d%% rollout\n", badge, f.Key, f.Rollout)
 	}
 
 	return SlackMessage{
@@ -480,7 +480,7 @@ func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	if err != nil {
 		return errorMessage("Could not reach flag-api: " + err.Error()), nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Results []struct {
@@ -500,10 +500,10 @@ func (s *SlackApp) searchCommand(query string) (SlackMessage, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Search results for \"%s\"*:\n", query))
+	_, _ = fmt.Fprintf(&sb, "*Search results for \"%s\"*:\n", query)
 	for _, f := range result.Results {
 		badge := stateBadge(f.State, 0)
-		sb.WriteString(fmt.Sprintf("%s `%s`\n", badge, f.Key))
+		_, _ = fmt.Fprintf(&sb, "%s `%s`\n", badge, f.Key)
 	}
 
 	return SlackMessage{
@@ -577,7 +577,7 @@ func (s *SlackApp) executeKillSwitch(action BlockAction) error {
 	if err != nil {
 		return fmt.Errorf("kill switch: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var confirmMsg SlackMessage
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -615,7 +615,7 @@ func (s *SlackApp) fetchFlagData(flagKey, env string) (map[string]interface{}, e
 	if err != nil {
 		return nil, fmt.Errorf("get flag: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("flag %q not found", flagKey)
@@ -648,7 +648,7 @@ func (s *SlackApp) postResponse(responseURL string, msg SlackMessage) error {
 	if err != nil {
 		return fmt.Errorf("post response: HTTP post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
