@@ -28,12 +28,14 @@ jobs:
           # extraction, no compiler/toolchain setup) since this is a
           # multi-module monorepo (go.work, multiple build.gradle/.csproj
           # candidates) where autobuild would be ambiguous or fragile.
+          # go is the one exception: CodeQL's Go extractor has no "none"
+          # mode at all (only autobuild or manual), so it must build.
           - language: javascript-typescript
             build-mode: none
           - language: python
             build-mode: none
           - language: go
-            build-mode: none
+            build-mode: autobuild
           - language: ruby
             build-mode: none
           - language: java-kotlin
