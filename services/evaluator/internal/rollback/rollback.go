@@ -101,7 +101,7 @@ func (e *Executor) Execute(ctx context.Context, req RollbackRequest) error {
 	if err != nil {
 		return fmt.Errorf("kill switch call failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("kill switch returned HTTP %d", resp.StatusCode)
 	}
@@ -164,7 +164,7 @@ func (e *Executor) SetRolloutPct(ctx context.Context, flagKey, environment strin
 	if err != nil {
 		return fmt.Errorf("rollback-step call failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusConflict {
 		e.logger.Info("rollback-step superseded by a concurrent, more-aggressive step",
@@ -246,7 +246,7 @@ func (e *Executor) IncreaseRolloutPct(ctx context.Context, flagKey, environment 
 	if err != nil {
 		return fmt.Errorf("recovery-step call failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusConflict {
 		e.logger.Info("recovery-step superseded by a concurrent, more-aggressive step (or a manual override)",

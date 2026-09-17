@@ -53,7 +53,7 @@ func TestRunStreamConsumer_FansOutToEveryReplicaViaOwnGroup(t *testing.T) {
 	defer mr.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := StreamKey(env)
@@ -110,7 +110,7 @@ func TestRunStreamConsumer_DedupSuppressesPubSubAndStreamsDoubleDelivery(t *test
 	defer mr.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := StreamKey(env)
@@ -197,7 +197,7 @@ func TestRunStreamConsumer_RelaysPrerequisitesUpdatedVerbatim(t *testing.T) {
 	defer mr.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := StreamKey(env)
@@ -260,7 +260,7 @@ func TestRunStreamConsumer_RelaysTargetingRulesUpdatedVerbatim(t *testing.T) {
 	defer mr.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := StreamKey(env)
@@ -331,7 +331,7 @@ func TestRunStreamConsumer_KillSwitchReasonCannotCollideWithPrerequisitesUpdated
 	defer mr.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	const env = "production"
 	streamKey := StreamKey(env)

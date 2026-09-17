@@ -83,7 +83,7 @@ func WriteCerts(certsDir string, caCert *tls.Certificate, serverCert *tls.Certif
 		if err != nil {
 			return err
 		}
-		defer certOut.Close()
+		defer func() { _ = certOut.Close() }()
 		if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}); err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func WriteCerts(certsDir string, caCert *tls.Certificate, serverCert *tls.Certif
 		if err != nil {
 			return err
 		}
-		defer keyOut.Close()
+		defer func() { _ = keyOut.Close() }()
 		keyDER, err := x509.MarshalECPrivateKey(cert.PrivateKey.(*ecdsa.PrivateKey))
 		if err != nil {
 			return err

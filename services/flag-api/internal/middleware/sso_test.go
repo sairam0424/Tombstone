@@ -100,7 +100,7 @@ func newSSOTestIdPOpts(t *testing.T, keyHasAlg bool) *ssoTestIdP {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jwks_uri":%q}`, idp.server.URL+"/jwks.json")
+		_, _ = fmt.Fprintf(w, `{"jwks_uri":%q}`, idp.server.URL+"/jwks.json")
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -126,7 +126,7 @@ func newSSOTestIdPOpts(t *testing.T, keyHasAlg bool) *ssoTestIdP {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id_token":%q,"access_token":"stub","token_type":"Bearer","expires_in":3600}`, idToken)
+		_, _ = fmt.Fprintf(w, `{"id_token":%q,"access_token":"stub","token_type":"Bearer","expires_in":3600}`, idToken)
 	})
 
 	idp.server = httptest.NewServer(mux)
@@ -553,7 +553,7 @@ func TestDiscoverJWKSURL_NonHTTPSJWKSURIRejected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"jwks_uri":"http://attacker.example/jwks.json"}`)
+		_, _ = fmt.Fprint(w, `{"jwks_uri":"http://attacker.example/jwks.json"}`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -580,7 +580,7 @@ func TestDiscoverJWKSURL_MalformedJSONRejected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{not valid json`)
+		_, _ = fmt.Fprint(w, `{not valid json`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -594,7 +594,7 @@ func TestDiscoverJWKSURL_MissingJWKSURIRejected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{}`)
+		_, _ = fmt.Fprint(w, `{}`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -955,7 +955,7 @@ func TestOAuthLoginToCallback_PKCEChallengeMatchesVerifierAtTokenEndpoint(t *tes
 		}
 		gotVerifier = r.PostForm.Get("code_verifier")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id_token":"stub-id-token","access_token":"stub","token_type":"Bearer","expires_in":3600}`)
+		_, _ = fmt.Fprint(w, `{"id_token":"stub-id-token","access_token":"stub","token_type":"Bearer","expires_in":3600}`)
 	})
 	tokenServer := httptest.NewServer(mux)
 	defer tokenServer.Close()
@@ -1005,7 +1005,7 @@ func TestExchangeCode_SendsCodeVerifier(t *testing.T) {
 		gotVerifier = r.PostForm.Get("code_verifier")
 		gotCode = r.PostForm.Get("code")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id_token":"stub-id-token","access_token":"stub","token_type":"Bearer","expires_in":3600}`)
+		_, _ = fmt.Fprint(w, `{"id_token":"stub-id-token","access_token":"stub","token_type":"Bearer","expires_in":3600}`)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()

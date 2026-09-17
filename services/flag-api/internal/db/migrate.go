@@ -100,7 +100,7 @@ func Migrate(ctx context.Context, database *sql.DB) ([]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
 		return nil, fmt.Errorf("acquire advisory lock: %w", err)
@@ -142,7 +142,7 @@ func Baseline(ctx context.Context, database *sql.DB) ([]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
 		return nil, fmt.Errorf("acquire advisory lock: %w", err)
@@ -182,7 +182,7 @@ func appliedVersions(ctx context.Context, conn *sql.Conn) (map[int64]bool, error
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	applied := make(map[int64]bool)
 	for rows.Next() {
