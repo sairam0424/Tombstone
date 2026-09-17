@@ -286,7 +286,7 @@ class DependencyGraphBuilder:
         if not rows:
             return CausalGraph(generated_at=to_unix, event_count=0)
 
-        edge_map = {}
+        edge_map: dict[tuple[str, str], dict[str, float | int]] = {}
         events = [(r["flag_key"], r["ts"]) for r in rows]
         unique_flags = {r["flag_key"] for r in rows}
 

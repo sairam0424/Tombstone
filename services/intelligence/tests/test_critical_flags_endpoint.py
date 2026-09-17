@@ -56,7 +56,7 @@ class MockGraphBuilder:
 class MockPool:
     """Mock asyncpg pool for audit_log query."""
 
-    def __init__(self, edges: list[tuple[str, str, float]] = None):
+    def __init__(self, edges: list[tuple[str, str, float]] | None = None):
         self.edges = edges or []
 
     async def fetch(self, query: str, *args):

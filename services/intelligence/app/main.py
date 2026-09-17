@@ -444,11 +444,11 @@ async def get_flag_impact(
 
 @app.get("/api/v1/graph/dependencies")
 async def get_dependency_subgraph(
+    request: Request,
     flag_key: str,
     depth: int = 1,
     project_id: str = DEFAULT_PROJECT_ID,
     environment: str = "production",
-    request: Request = None,
 ):
     """
     Return a dependency subgraph centered on `flag_key`, traversing to `depth` hops.
@@ -551,10 +551,10 @@ BLAST_RADIUS_MULTIPLIER = {"BLOCKED": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 @app.get("/api/v1/graph/critical-flags")
 async def get_critical_flags(
+    request: Request,
     limit: int = 20,
     project_id: str = DEFAULT_PROJECT_ID,
     environment: str = "production",
-    request: Request = None,
 ):
     """
     Return top-N most critical flags ranked by dependency health score.
@@ -601,7 +601,7 @@ async def get_critical_flags(
         return {"flags": [], "generated_at": to_unix}
 
     # 2. Rebuild edge map (same logic as builder.build())
-    edge_map = {}
+    edge_map: dict[tuple[str, str], dict[str, float | int]] = {}
     events = [(r["flag_key"], int(r["ts"])) for r in rows]
     COUPLING_WINDOW_SECONDS = 300
     LAMBDA = 0.1
