@@ -45,13 +45,13 @@ func TestFlagExists_RetriesOnFlagAPIFailure(t *testing.T) {
 func TestSync_CreatesNewFlagWhenNotFound(t *testing.T) {
 	var createCalled, updateCalled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet:
+		switch r.Method {
+		case http.MethodGet:
 			w.WriteHeader(http.StatusNotFound)
-		case r.Method == http.MethodPost:
+		case http.MethodPost:
 			createCalled.Store(true)
 			w.WriteHeader(http.StatusCreated)
-		case r.Method == http.MethodPatch:
+		case http.MethodPatch:
 			updateCalled.Store(true)
 			w.WriteHeader(http.StatusOK)
 		}
