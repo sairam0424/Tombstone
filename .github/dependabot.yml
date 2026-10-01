@@ -1,3 +1,8 @@
+# Grouping: version updates arrive as one PR per group (OpenTelemetry modules together, minor and
+# patch together, majors individually); security updates arrive as one PR per ecosystem+directory.
+# Group order matters (first match wins). There is deliberately NO `ignore` rule: how `ignore`
+# interacts with security updates is unverified. Dependabot reads this file from the DEFAULT branch
+# (main) only, so none of this is live until develop is promoted.
 version: 2
 updates:
   # Go modules
@@ -9,6 +14,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/ast-rewriter"
@@ -18,6 +39,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/evaluator"
@@ -27,6 +64,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/flag-api"
@@ -36,6 +89,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/gateway"
@@ -45,6 +114,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/gitops-sync"
@@ -54,6 +139,47 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gomod"
+    directory: "/services/marketplace"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directory: "/services/tombstone-operator"
@@ -63,6 +189,22 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "go.opentelemetry.io/*"
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Python
   - package-ecosystem: "pip"
@@ -73,6 +215,18 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    groups:
+      pip-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      pip-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "pip"
     directory: "/services/intelligence"
@@ -82,6 +236,39 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    groups:
+      pip-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      pip-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "uv"
+    directory: "/services/intelligence"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      uv-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      uv-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # npm / TypeScript (root covers the npm workspaces declared in package.json)
   - package-ecosystem: "npm"
@@ -92,6 +279,18 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "npm"
     directory: "/packages/sdks/@flagmind/core"
@@ -101,6 +300,18 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "npm"
     directory: "/packages/sdks/@flagmind/edge"
@@ -110,6 +321,18 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "npm"
     directory: "/packages/sdks/@flagmind/react"
@@ -119,6 +342,18 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "npm"
     directory: "/workspace-vscode-ext"
@@ -128,6 +363,18 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -137,6 +384,18 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Docker (one entry per service Dockerfile)
   - package-ecosystem: "docker"
@@ -147,6 +406,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/gateway"
@@ -156,6 +427,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/evaluator"
@@ -165,6 +448,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/intelligence"
@@ -174,6 +469,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/marketplace"
@@ -183,6 +490,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/gitops-sync"
@@ -192,6 +511,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/ast-rewriter"
@@ -201,6 +532,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/services/tombstone-operator"
@@ -210,6 +553,18 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Ruby SDK
   - package-ecosystem: "bundler"
@@ -220,6 +575,18 @@ updates:
     labels:
       - "dependencies"
       - "ruby"
+    groups:
+      bundler-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      bundler-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Java SDK
   - package-ecosystem: "gradle"
@@ -230,6 +597,18 @@ updates:
     labels:
       - "dependencies"
       - "java"
+    groups:
+      gradle-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      gradle-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # .NET SDK
   - package-ecosystem: "nuget"
@@ -240,3 +619,15 @@ updates:
     labels:
       - "dependencies"
       - "dotnet"
+    groups:
+      nuget-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      nuget-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
