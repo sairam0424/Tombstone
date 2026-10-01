@@ -20,10 +20,14 @@ RUN pip install uv
 COPY pyproject.toml ./
 COPY app/ app/
 
-# Install all dependencies (including sentence-transformers — large, cached layer)
-RUN uv pip install --system --refresh .
+# Install all dependencies (including sentence-transformers). pyproject.toml's
+# [tool.uv.pip] torch-backend = "cpu" selects CPU-only torch (no nvidia-*/triton).
+# --no-cache keeps uv's unpacked wheel cache out of the image layer.
+# The second step fails the build if CUDA wheels ever sneak back in.
+RUN uv pip install --system --no-cache . \
+    && python3 -c "import importlib.metadata as m; v = m.version('torch'); bad = sorted((d.metadata['Name'] or '') for d in m.distributions() if (d.metadata['Name'] or '').lower().startswith(('nvidia-', 'triton', 'cuda-'))); assert v.endswith('+cpu') and not bad, (v, bad)"
 
-# Pre-download BAAI/bge-m3 embedding model (~400MB) at BUILD time.
+# Pre-download BAAI/bge-m3 embedding model (~2.3GB: pytorch_model.bin is 2271MB) at BUILD time.
 # This bakes the model into the Docker image layer so container startup is fast.
 # The download only happens once — subsequent `make dev` runs use the cached layer.
 # Without this, the first startup would silently hang for several minutes.
