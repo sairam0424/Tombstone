@@ -9,7 +9,7 @@
     <Description>Tombstone .NET SDK — server-side feature flag evaluation</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Collections.Immutable" Version="8.0.0" />
+    <PackageReference Include="System.Collections.Immutable" Version="10.0.12" />
     <PackageReference Include="murmurhash" Version="1.0.3" />
   </ItemGroup>
 </Project>
