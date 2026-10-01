@@ -86,9 +86,11 @@ Connection pools are set per service at startup:
 
 With `N` replicas of each service, total Postgres connections = `N × conns_per_service`.
 
-**Neon free tier** has a 20-connection limit. With default settings:
-- 2× flag-api + 2× evaluator = `(2×5) + (2×3) = 16 connections` — fits Neon free tier
-- 3× flag-api + 2× evaluator = `(3×5) + (2×3) = 21 connections` — exceeds Neon free tier
+**Neon** derives `max_connections` from the compute size (104 at 0.25 CU, 209 at 0.5 CU, 419 at 1 CU, per Neon's connection-pooling docs as of 2026-10), so the old "20-connection free tier" figure no longer applies. With default settings:
+- 2× flag-api + 2× evaluator = `(2×5) + (2×3) = 16 connections`
+- 3× flag-api + 2× evaluator = `(3×5) + (2×3) = 21 connections`
+
+Both fit under even the smallest compute's limit. Point `DB_URL` at the **direct** endpoint (see `infra/.env.example`), not the `-pooler` host: lib/pq cannot use a transaction-mode pooler safely, so the direct connections count against `max_connections` and your replica count should be sized against it.
 
 For production with Neon paid tiers or self-hosted Postgres, scale replicas freely. The connection pool settings (`SetMaxOpenConns`) should be tuned based on your Postgres `max_connections` setting.
 

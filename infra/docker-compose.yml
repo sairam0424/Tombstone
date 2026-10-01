@@ -17,9 +17,11 @@ services:
       retries: 10
 
   # DATA-2: pools app traffic so a burst of requests doesn't exhaust
-  # Postgres's own connection limit — mirrors what production does via
-  # Neon's built-in pooler ("-pooler" connection string), letting the same
-  # pooled-vs-direct split be exercised locally without real Neon creds.
+  # Postgres's own connection limit, and lets the pooled-vs-direct split be
+  # exercised locally without real Neon creds. NOT a model of Neon's
+  # "-pooler" endpoint: that is transaction mode (not configurable), which
+  # lib/pq cannot use safely -- see the pool_mode note below. Production
+  # should use a direct connection or a session-mode pooler for DB_URL.
   #
   # pool_mode: session, NOT transaction. This used to be transaction mode
   # with a comment claiming it was "safe for flag-api/intelligence's own
