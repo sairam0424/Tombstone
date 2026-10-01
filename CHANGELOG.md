@@ -7,6 +7,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [2.0.2] - 2026-10-02
+
+### Security
+
+Addresses every Dependabot alert that was open on the default branch at the start of this cycle (55: 2 critical, 8 high, 22 medium, 23 low).
+
+- **Python (`services/intelligence`)** — pyjwt 2.13.0 → 2.15.0, urllib3 2.7.0 → 2.8.0 and anyio 4.14.1 → 4.14.2 in `uv.lock` (Dependabot #330, #329, #327): 19 alerts including both critical and all 8 high. The two `oauthlib` alerts (medium; patched only in 4.0.0, which `databricks-sql-connector` caps below 4) were dismissed as not used: oauthlib is reachable only through the optional warehouse extras and is absent from the default image.
+- **Go (7 services)** — OpenTelemetry aligned on v1.46.0 (`otel`, `otel/sdk`, `otel/metric`, `otel/trace`, `otlptrace`/`otlptracegrpc`; `exporters/prometheus` v0.68.0; `otelhttp` v0.71.0) for GHSA-8wmf-6v46-5gfg, 19 alerts (#340). Replaces 28 conflicting per-module Dependabot PRs with one aligned change. Besides build, vet and test, each service's real `InitTracer` was driven against an in-process OTLP/gRPC receiver before and after, with a negative control, because no existing test exercised the exporter with a live endpoint.
+- **npm** — lockfile fixes for brace-expansion, serialize-javascript, hono, fast-uri, ip-address and dompurify in the root, `@flagmind/core`, `@flagmind/edge` and `workspace-vscode-ext` locks (#339, #343); dashboard vitest 3.2.7 → 4.1.11 for GHSA-82fw-gwwq-j7x9, with `"types": ["node"]` in `tsconfig.app.json` because vitest 4 no longer brings `@types/node` into scope (41 `TS2304` errors otherwise) (#344). `npm audit` reports 0 vulnerabilities in every directory with its own lockfile.
+
+### Fixed
+
+- **CPU-only torch in the intelligence image (#342)** — `sentence-transformers` pulls torch, and the default Linux wheel depends on 19 nvidia/triton/cuda packages (about 2.4-2.7 GB compressed) that a CPU-only `EMBEDDING_BACKEND=local` never uses; that set filled the Docker VM during the first attempt to build this service. `[tool.uv.pip] torch-backend = "cpu"` (`[tool.uv.sources]` is ignored by `uv pip install .`) resolves `torch==2.14.1+cpu` with no nvidia packages on both Linux platforms, and the Dockerfile fails the build if a non-CPU torch or any nvidia/triton/cuda distribution appears. Also corrects the bge-m3 size comment (about 2.3 GB, not 400 MB).
+
+### Changed
+
+- **`develop` and `main` reconciled (#339)** — promotions had only ever merged `main` into a throwaway branch, so `develop` was 39 commits behind. `main` is now an ancestor of `develop` (17 lockfile and manifest conflicts, all resolved mechanically), and a promotion is conflict-free.
+- **CI and security hardening (#318, previously `develop`-only)** — CodeQL for all six languages, OSSF Scorecard, Gitleaks, golangci-lint + govulncheck, mypy + pip-audit, npm audit, a Trivy scan of the service Dockerfiles and Checkov for Helm/Terraform; third-party actions SHA-pinned, least-privilege permissions; errcheck-style fixes in the Go services and grpc/chi/go-redis/x-net bumps for govulncheck findings. Also the CodeRabbit review configuration (#314, #315).
+- **Dependabot grouping (#345)** — OpenTelemetry modules group together, minor and patch updates batch into one PR per entry, security updates batch per entry, and majors stay individual PRs; adds the missing `gomod /services/marketplace` and `uv /services/intelligence` entries and the docker, bundler, gradle and nuget entries from #318. Dependabot reads this file from the default branch, so it takes effect with this release.
+- **`DB_URL` pooler guidance (#341)** — `infra/.env.example` and `docs/DAY2_OPERATIONS.md` told self-hosters to use Neon's `-pooler` host. lib/pq sends each parameterized query as two round trips on an unnamed statement, which a transaction-mode pooler can split across backends, and PgBouncer's `max_prepared_statements` only tracks named statements; `binary_parameters=yes` is not a safe workaround (it would send `json.RawMessage` values to jsonb columns in binary form). `DB_URL` should be a direct connection or a session-mode pooler. Comments and prose only.
+
+### Known issues
+
+- Lint checks that are red on `develop` and will be red on `main`: golangci-lint SA1019 in gateway, ast-rewriter, marketplace and flag-api (`chi` `middleware.RealIP` needs a trusted-proxy decision; `opa/rego` v0 to v1), and mypy for `services/intelligence` and the Python SDK.
+- `tombstone-operator`'s Docker image publish fails on `main` (its Dockerfile uses `golang:1.22-alpine` against a `go 1.25.0` module), and the Cloudflare Pages dashboard deploy has failed since August (`npx` is canceled because wrangler is not installed and the step has no `--yes`). Both will fire on the first push to `main` after this release.
+- `infra/helm/flagmind/templates/deployment-intelligence.yaml` probes `/readyz`, which the intelligence app does not define (only `/health` and `/metrics`).
+- The intelligence image has not been built end to end with CPU-only torch; the change is verified at resolve level and by the CI install.
+- OpenTelemetry v1.46.0 is the last release that supports Go 1.25; the v1.47 release candidate already requires Go 1.26.
+
 ## [2.0.1] - 2026-09-09
 
 ### Fixed
