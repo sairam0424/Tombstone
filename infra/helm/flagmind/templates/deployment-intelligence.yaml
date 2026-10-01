@@ -52,9 +52,13 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
             failureThreshold: 3
+          # The intelligence app serves /health and /metrics only (no /readyz
+          # like the Go services), so probing /readyz would 404 forever and the
+          # pod would never become Ready. Point at /health until the app grows
+          # a dependency-checking readiness endpoint.
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /health
               port: {{ .Values.intelligence.service.port }}
             initialDelaySeconds: 20
             periodSeconds: 15
