@@ -20,7 +20,7 @@ rollout-advisor, governance loops).
 ## Branch Structure
 
 ```
-main        <- Production releases only (tag: v2.0.1)
+main        <- Production releases only (tag: v2.0.2)
 develop     <- Integration branch — all PRs merge here first
 feature/*   <- One branch per feature or task, cut from develop
 hotfix/*    <- Emergency production fixes, cut from main
