@@ -81,7 +81,7 @@ func groupExists(t *testing.T, ctx context.Context, rdb *redis.Client, streamKey
 func TestGCIdleGroups_LiveGroupSurvives(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-alive-host", "primary")
@@ -101,7 +101,7 @@ func TestGCIdleGroups_LiveGroupSurvives(t *testing.T) {
 func TestGCIdleGroups_IdleGroupDestroyed(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-dead-host", "primary")
@@ -123,7 +123,7 @@ func TestGCIdleGroups_IdleGroupDestroyed(t *testing.T) {
 func TestGCIdleGroups_OnlyDestroysTheIdleGroupAmongMultiple(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-dead-host", "primary")
@@ -151,7 +151,7 @@ func TestGCIdleGroups_OnlyDestroysTheIdleGroupAmongMultiple(t *testing.T) {
 func TestGCIdleGroups_GroupWithNoConsumersIsTreatedAsStale(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	if err := rdb.XGroupCreateMkStream(ctx, streamKey, "gateway-workers-never-read", "0").Err(); err != nil {
@@ -175,7 +175,7 @@ func TestGCIdleGroups_GroupWithNoConsumersIsTreatedAsStale(t *testing.T) {
 func TestGCIdleGroups_ForeignReclaimConsumerDoesNotSpareADeadGroup(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	touchGroup(t, ctx, rdb, streamKey, "gateway-workers-dead-host", "primary")
@@ -205,7 +205,7 @@ func TestGCIdleGroups_ForeignReclaimConsumerDoesNotSpareADeadGroup(t *testing.T)
 func TestGCIdleGroups_ForeignServiceGroupIsNeverTouched(t *testing.T) {
 	mr, rdb, streamKey := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	// No clock advance at all — this consumer is maximally "fresh". If GC
@@ -227,7 +227,7 @@ func TestGCIdleGroups_ForeignServiceGroupIsNeverTouched(t *testing.T) {
 func TestGCIdleGroups_NoStreamIsNoop(t *testing.T) {
 	mr, rdb, _ := setupGCTest(t)
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	GCIdleGroups(context.Background(), rdb, StreamKey("never-created"), zap.NewNop())
 }

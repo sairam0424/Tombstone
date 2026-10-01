@@ -29,7 +29,7 @@ func TestExportAuditLog_OmitsSignatureWhenStreamFailsMidIteration(t *testing.T) 
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Row 0 streams successfully; row 1's injected error simulates a real
 	// mid-iteration failure (connection blip, context cancellation) —

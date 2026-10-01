@@ -37,7 +37,7 @@ func TestScheduledChangeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

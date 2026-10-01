@@ -1,0 +1,57 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly, Monday 03:17 UTC — catches newly-published CodeQL query
+    # advisories against unchanged code.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # build-mode: none is used for every language here (source-only
+          # extraction, no compiler/toolchain setup) since this is a
+          # multi-module monorepo (go.work, multiple build.gradle/.csproj
+          # candidates) where autobuild would be ambiguous or fragile.
+          # go is the one exception: CodeQL's Go extractor has no "none"
+          # mode at all (only autobuild or manual), so it must build.
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: ruby
+            build-mode: none
+          - language: java-kotlin
+            build-mode: none
+          - language: csharp
+            build-mode: none
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: "/language:${{ matrix.language }}"

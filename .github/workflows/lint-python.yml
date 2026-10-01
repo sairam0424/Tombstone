@@ -1,0 +1,70 @@
+name: Python Lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly, Tuesday 04:07 UTC — pip-audit's advisory DB updates
+    # independently of code changes.
+    - cron: "7 4 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  mypy:
+    name: mypy (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - services/intelligence
+          - packages/sdks/tombstone-python-sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + mypy
+        working-directory: ${{ matrix.project }}
+        run: |
+          pip install uv
+          uv pip install --system -e .
+          pip install mypy==1.14.1
+
+      - name: mypy
+        working-directory: ${{ matrix.project }}
+        run: mypy . --ignore-missing-imports
+
+  pip-audit:
+    name: pip-audit (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - services/intelligence
+          - packages/sdks/tombstone-python-sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + pip-audit
+        working-directory: ${{ matrix.project }}
+        run: |
+          pip install uv pip-audit
+          uv pip install --system -e .
+
+      - name: pip-audit
+        working-directory: ${{ matrix.project }}
+        run: pip-audit

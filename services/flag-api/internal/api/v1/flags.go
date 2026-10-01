@@ -120,7 +120,7 @@ func notifyMarketplace(marketplaceURL string, httpClient *http.Client, logger *z
 				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Error(err))
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			logger.Warn("marketplace notify: non-2xx response",
 				zap.String("event_type", eventType), zap.String("flag", flagKey), zap.Int("status", resp.StatusCode))
@@ -955,7 +955,7 @@ func (h *FlagHandler) ArchiveFlag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	n, err := sqlcgen.New(tx).ArchiveFlag(r.Context(), sqlcgen.ArchiveFlagParams{Key: key, ProjectID: projectID})
 	if err != nil {

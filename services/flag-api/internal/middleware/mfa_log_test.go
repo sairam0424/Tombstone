@@ -145,7 +145,7 @@ func TestLogMFAEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -259,10 +259,7 @@ func TestLogMFAEvent(t *testing.T) {
 		// asserting immediately, to avoid a test race against that
 		// goroutine.
 		deadline := time.Now().Add(2 * time.Second)
-		for {
-			if countEventsFor(t, email, "mfa_verified") == 1 {
-				break
-			}
+		for countEventsFor(t, email, "mfa_verified") != 1 {
 			if time.Now().After(deadline) {
 				t.Fatalf("mfa_verified row for %s never appeared — CallbackHandler's real amr->logMFAEvent wiring is broken", email)
 			}

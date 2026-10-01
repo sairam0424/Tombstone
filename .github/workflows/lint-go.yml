@@ -1,0 +1,66 @@
+name: Go Lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly, Tuesday 03:41 UTC — govulncheck's advisory DB updates
+    # independently of code changes.
+    - cron: "41 3 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  golangci-lint:
+    name: golangci-lint (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace, tombstone-operator]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: services/${{ matrix.service }}/go.sum
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOWORK: "off"
+        with:
+          working-directory: services/${{ matrix.service }}
+          version: latest
+
+  govulncheck:
+    name: govulncheck (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [flag-api, gateway, evaluator, gitops-sync, ast-rewriter, marketplace, tombstone-operator]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: services/${{ matrix.service }}/go.sum
+
+      - name: Install govulncheck
+        env:
+          GOWORK: "off"
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        working-directory: services/${{ matrix.service }}
+        env:
+          GOWORK: "off"
+        run: govulncheck ./...

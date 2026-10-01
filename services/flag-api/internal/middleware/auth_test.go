@@ -56,7 +56,7 @@ func TestValidateJWT_TokenIssuedBeforeWatermarkRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// iat must stay within jwt.Parse's own real-clock exp window (iat+24h),
 	// so the rejection this test proves comes from the watermark check, not
@@ -89,7 +89,7 @@ func TestValidateJWT_TokenIssuedAfterWatermarkAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	watermark := time.Now().Add(-2 * time.Hour)
 	iat := watermark.Add(time.Hour) // re-authenticated AFTER the forced logout, still in the past
@@ -121,7 +121,7 @@ func TestValidateJWT_NoWatermarkRowAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
 		WithArgs("alice@example.com").
@@ -149,7 +149,7 @@ func TestValidateJWT_WatermarkLookupErrorFailsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
 		WithArgs("alice@example.com").
@@ -181,7 +181,7 @@ func TestValidateJWT_InvalidSignatureStillRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	key := testHMACKey(t)
 	auth := NewAuthMiddleware(db, key, nil, zap.NewNop())
@@ -202,7 +202,7 @@ func TestValidateJWT_MissingIatRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	key := testHMACKey(t)
 	claims := jwt.MapClaims{"sub": "alice@example.com", "exp": time.Now().Add(time.Hour).Unix()}
@@ -229,7 +229,7 @@ func TestValidateJWT_TokenIssuedSameSecondAsWatermarkAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sameSecond := time.Now().Truncate(time.Second)
 	iat := sameSecond                                   // whole-second iat
@@ -261,7 +261,7 @@ func TestAuthenticate_WatermarkRevokedJWTRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	iat := time.Now().Add(-2 * time.Hour)
 	watermark := iat.Add(time.Hour)
@@ -305,7 +305,7 @@ func TestAuthenticate_ValidJWTPassesThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery("SELECT valid_after FROM user_token_watermarks").
 		WithArgs("alice@example.com").

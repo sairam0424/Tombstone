@@ -84,7 +84,7 @@ func deliverPoisonMessage(t *testing.T, ctx context.Context, rdb *redis.Client, 
 func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "development")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
@@ -131,7 +131,7 @@ func TestReclaimStalePending_RetriesUnderAttemptBudget(t *testing.T) {
 func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "development")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	id := deliverPoisonMessage(t, ctx, rdb, streamKey, b.Group(), "gateway-test-consumer")
@@ -182,7 +182,7 @@ func TestReclaimStalePending_DeadLettersAfterMaxAttempts(t *testing.T) {
 func TestReclaimStalePending_NoPendingIsNoop(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "staging")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	if err := b.ReclaimStalePending(ctx, streamKey); err != nil {
@@ -211,7 +211,7 @@ func TestReclaimStalePending_NoPendingIsNoop(t *testing.T) {
 func TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "production")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	ch := b.hub.Subscribe("production", "client")
@@ -273,7 +273,7 @@ func TestReclaimStalePending_CrossGroupReclaimDoesNotRebroadcast(t *testing.T) {
 func TestReclaimStalePending_OwnGroupReclaimStillRebroadcasts(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "production")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	ch := b.hub.Subscribe("production", "client")
@@ -417,7 +417,7 @@ func TestDLQStreamKey_MatchesConvention(t *testing.T) {
 func TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "production")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	ch := b.hub.Subscribe("production", "client")
@@ -472,7 +472,7 @@ func TestReclaimStalePending_PrerequisitesUpdatedIsRelayedNotMisunmarshaled(t *t
 func TestReclaimStalePending_TargetingRulesUpdatedIsRelayedNotMisunmarshaled(t *testing.T) {
 	mr, rdb, b, streamKey := setupDLQTest(t, "production")
 	defer mr.Close()
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	ctx := context.Background()
 	ch := b.hub.Subscribe("production", "client")

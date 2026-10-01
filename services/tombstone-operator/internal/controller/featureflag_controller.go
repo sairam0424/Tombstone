@@ -240,7 +240,7 @@ func (r *FeatureFlagReconciler) getFlag(ctx context.Context, key string) (*flagA
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -283,7 +283,7 @@ func (r *FeatureFlagReconciler) createFlag(ctx context.Context, flag *v1alpha1.F
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -322,7 +322,7 @@ func (r *FeatureFlagReconciler) updateFlag(ctx context.Context, flag *v1alpha1.F
 	if err != nil {
 		return fmt.Errorf("PATCH %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -358,7 +358,7 @@ func (r *FeatureFlagReconciler) syncFlagEnvironment(
 	if err != nil {
 		return fmt.Errorf("PATCH %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)

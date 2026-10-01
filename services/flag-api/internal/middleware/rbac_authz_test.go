@@ -274,7 +274,7 @@ func TestValidateServiceTokenResolvesRoleFromDB(t *testing.T) {
 			if err != nil {
 				t.Fatalf("sqlmock: %v", err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 
 			hasher := testHasher(t)
 			// SEC-4: the query must present the HASH, never the plaintext token.
@@ -309,7 +309,7 @@ func TestValidateServiceTokenRejectsUnknownOrRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Revoked/absent tokens produce no rows — the query filters revoked_at.
 	hasher := testHasher(t)
