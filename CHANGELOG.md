@@ -33,7 +33,7 @@ Addresses every Dependabot alert that was open on the default branch at the star
 - Lint checks that are red on `develop` and will be red on `main`: golangci-lint SA1019 in gateway, ast-rewriter, marketplace and flag-api (`chi` `middleware.RealIP` needs a trusted-proxy decision; `opa/rego` v0 to v1), and mypy for `services/intelligence` and the Python SDK.
 - `tombstone-operator`'s Docker image publish fails on `main` (its Dockerfile uses `golang:1.22-alpine` against a `go 1.25.0` module), and the Cloudflare Pages dashboard deploy has failed since August (`npx` is canceled because wrangler is not installed and the step has no `--yes`). Both will fire on the first push to `main` after this release.
 - `infra/helm/flagmind/templates/deployment-intelligence.yaml` probes `/readyz`, which the intelligence app does not define (only `/health` and `/metrics`).
-- The intelligence image has not been built end to end with CPU-only torch; the change is verified at resolve level and by the CI install.
+- The intelligence image built and published from the `v2.0.2` tag with CPU-only torch (`torch==2.14.1+cpu`, build guard passed), but the container has not been started, so the service's runtime behavior with the CPU wheel is untested.
 - OpenTelemetry v1.46.0 is the last release that supports Go 1.25; the v1.47 release candidate already requires Go 1.26.
 
 ## [2.0.1] - 2026-09-09
