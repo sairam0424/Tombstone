@@ -12,6 +12,9 @@ on:
           - staging
           - production
 
+permissions:
+  contents: read
+
 jobs:
   bootstrap:
     name: Bootstrap Flux on ${{ inputs.cluster }}
