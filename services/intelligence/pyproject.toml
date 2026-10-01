@@ -31,6 +31,14 @@ all-warehouses = [
 clickhouse = ["clickhouse-driver>=0.2.9"]
 bedrock = ["boto3>=1.34.0"]
 
+# Linux images must not pull the ~2.7 GB CUDA wheel set (nvidia-*, triton) that
+# PyPI's default torch requires. `uv pip install .` (the Dockerfile and CI) does
+# NOT read [tool.uv.sources], and torch is only a transitive dependency, so the
+# supported lever here is torch-backend. It is a uv-pip-only setting: `uv lock`
+# and `uv sync` ignore it, so uv.lock and macOS development are unaffected.
+[tool.uv.pip]
+torch-backend = "cpu"
+
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0.0",
