@@ -174,10 +174,11 @@ CREATE TABLE IF NOT EXISTS service_tokens (
 );
 
 -- Migration 008: pgvector embeddings for semantic search
-ALTER TABLE flags ADD COLUMN IF NOT EXISTS embedding vector(768);
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS embedding vector(1024); -- bge-m3 / Titan V2 width; was 768 until migration 028
+-- HNSW, not ivfflat: ivfflat picks its lists from the rows present at build time,
+-- and this index is built on the empty column (see migration 028).
 CREATE INDEX IF NOT EXISTS idx_flags_embedding
-  ON flags USING ivfflat (embedding vector_cosine_ops)
-  WITH (lists = 100);
+  ON flags USING hnsw (embedding vector_cosine_ops);
 
 -- Seed default project
 INSERT INTO projects (id, name, slug)

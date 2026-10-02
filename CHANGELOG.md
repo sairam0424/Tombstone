@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`flags.embedding` is now `vector(1024)` (migration 028)** — `schema.sql` declared `vector(768)` while both embedding backends (local BAAI/bge-m3 and Bedrock Titan V2) return 1024-dimensional vectors, so pgvector rejected every embedding write (`expected 768 dimensions, not 1024`), the intelligence service's startup backfill failed for every flag, and the dense arm of the 3-way RRF search always returned nothing: flag search was lexical-only in every deployment. (The 2.2.0-legacy note "no schema migration needed" was wrong.) A contract test, `services/intelligence/tests/test_embedding_schema_contract.py`, now fails if the dimension `schema.sql` and the migrations declare and the one the backends produce drift apart again (the local backend's dimension is pinned to its default model, BAAI/bge-m3).
+- **`idx_flags_embedding` is now an HNSW index, not ivfflat** — the baseline created the ivfflat index (`lists = 100`) on the empty column, so its list centroids were random and the dense arm missed most true neighbours: recall@10 was 0.44–0.53 on 6000 synthetic 1024-dimensional flags, and only 0.67–0.72 after a `REINDEX` on the filled table (HNSW on the same data: 0.98–0.99). HNSW needs no training data, so there is no `REINDEX` step. It needs pgvector 0.5.0 or newer; the `pgvector/pgvector:pg16` image qualifies.
+
+### Changed
+
+- Once flags have embeddings, `/api/v1/search` results and ranking change: the dense arm has no similarity cutoff, so a query that matches no text lexically now still returns its nearest flags (at most 40 from the dense arm) where it used to return nothing.
+
+### Upgrade notes
+
+Existing databases need migration 028, then an intelligence restart:
+
+1. **Apply 028.** `go run ./cmd/migrate` from `services/flag-api` (needs a repo checkout and `DB_URL_DIRECT`), `make migrate` for the compose stack, or `psql -v ON_ERROR_STOP=1 -f services/flag-api/internal/db/migrations/028_flags_embedding_1024.sql` against any Postgres (the published flag-api image ships only the `/flag-api` binary and `schema.sql`: no `cmd/migrate`, no migration files). It sets any wrong-width vector to NULL, retypes the column (adding it if it is missing) and replaces `idx_flags_embedding` with an HNSW index. It holds `ACCESS EXCLUSIVE` on `flags` while it runs, so apply it in a quiet moment; it gives up after 5 s waiting for that lock (readers of `flags` queue behind its request for that long), in which case find the holder in `pg_stat_activity` and re-run. On a database already in the target state it changes nothing and takes no lock. `make migrate` and a `psql -f` without `-v ON_ERROR_STOP=1` exit 0 even when 028 timed out, so check the result on every path: `SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'flags'::regclass AND attname = 'embedding'` must return `vector(1024)`.
+2. **`cmd/migrate -baseline` does not apply it.** A database built before this release and adopted with `-baseline` records 028 as applied without running it and stays `vector(768)`: run the `psql` command above, then the check. `scripts/dev-local.sh up` likewise leaves an existing dev volume at `vector(768)` (it applies only `schema.sql`, which never retypes a column); run `make migrate`.
+3. **Restart the intelligence service** (on Helm, `kubectl rollout restart deployment/<fullname>-intelligence`). It re-embeds the NULL rows in the background, but only at startup. The backfill is done when `SELECT count(*) FROM flags WHERE embedding IS NULL AND state IN ('ACTIVE', 'DRAFT', 'COMPLETE')` returns 0: the service logs `Backfilling embeddings: N flags queued` when it starts and nothing when it ends, and a flag whose embedding fails is logged as a warning and stays NULL. No `REINDEX` is needed.
+
+### Known issues
+
+- Embeddings are produced only by the startup backfill. The event-driven sync never fires: `EmbeddingSyncService.on_flag_event` accepts `flag.created`/`flag.updated`, the Redis Streams consumer passes `flag_created`/`flag_environment_updated`/`kill_switch_activated`, and flag-api publishes neither (its stream `event` field is the change reason, such as `manual` or `archived`, and `CreateFlag` publishes nothing). A flag created while an intelligence process is running therefore has no embedding until the next restart: dense search covers only flags that existed at the last restart. (No API edits a flag's name or description, so there is no stale-embedding case.) Widening the accepted event names alone would make this worse: the published event payload (`flag_key`, `enabled`, `rollout_pct`, `reason`, `ts`, `environment`) has no name or description, so every environment toggle or kill switch would overwrite a good embedding with one of the bare key. flag-api has to publish the name and description, or the consumer has to read them from the database, first.
+- The Helm chart sets no `EMBEDDING_BACKEND`, so intelligence runs the local BAAI/bge-m3 model (about 2.3 GB of weights per `services/intelligence/Dockerfile`) under a 1Gi memory limit (`infra/helm/flagmind/values.yaml`); the local model has not been tested under that limit. The chart has no way to set `EMBEDDING_BACKEND` or the `BEDROCK_*` variables either (the intelligence container reads only `tombstone-config`, `tombstone-secrets` and `IS_PRIMARY_REGION`), so choosing Bedrock on Kubernetes needs a chart change first; until then the lever is `intelligence.resources.limits.memory`, raised above the model's footprint. `docs/DAY2_OPERATIONS.md` and the deployment template still say bge-m3 needs about 400MB.
+- The local model is loaded twice at startup: `FlagSearchRetriever.initialize()` and `EmbeddingSyncService.initialize()` (`app/main.py`, lifespan) both call `initialize()` on the same `LocalEmbeddingModel`, which builds a new `SentenceTransformer` on every call.
+- `flags.embedding` does not record which model produced a vector, and both backends emit 1024 dimensions, so switching `EMBEDDING_BACKEND` leaves the old model's vectors in place with no error. After a switch, run `UPDATE flags SET embedding = NULL` and restart the intelligence service to re-embed. `services/intelligence/scripts/reembed_flags.py`, meant for this, cannot run today: it selects a `tags` column that `flags` does not have.
+
 ## [2.0.2] - 2026-10-02
 
 ### Security
