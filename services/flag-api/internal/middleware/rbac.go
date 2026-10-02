@@ -11,7 +11,8 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/open-policy-agent/opa/rego"
+	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/rego"
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/db/sqlcgen"
@@ -125,9 +126,14 @@ func (e *opaEvaluator) load(logger *zap.Logger) error {
 		return err
 	}
 
+	// opa/v1/rego defaults to Rego v1 syntax, but the deprecated opa/rego
+	// package this used to import defaulted to v0. Pin v0 so every policy file
+	// that loaded before still loads and decides identically, on the initial
+	// load and on hot reload alike (both come through here).
 	r := rego.New(
 		rego.Query(e.query),
 		rego.Load(files, nil),
+		rego.SetRegoVersion(ast.RegoV0),
 	)
 
 	ctx := context.Background()
