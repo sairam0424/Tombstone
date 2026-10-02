@@ -222,6 +222,22 @@ rekorEnabled: false
 # infra/.env.example's own default and disclosed tradeoff.
 ssoAllowedDomains: ""
 
+# Reverse proxies whose X-Forwarded-For flag-api, evaluator and marketplace
+# believe: comma-separated CIDRs (e.g. "10.42.0.0/24,10.42.1.0/24") or a YAML
+# list of them. These are the address ranges the proxy connects FROM, as the
+# pods see it. The forwarded chain is read only when the TCP peer is inside one
+# of these ranges; the client IP then keys the per-IP rate limits and is
+# recorded in the audit log. Empty (the default) trusts nothing, so the client
+# is always the TCP peer: behind an ingress every caller then shares the ingress
+# pod's IP (one rate-limit bucket for all unauthenticated callers, and new audit
+# rows record the ingress IP). An invalid entry stops those three services at
+# startup.
+# Set it from a values file: "--set trustedProxyCIDRs=a,b" splits on the comma.
+# The chart has no config checksum annotation, so after changing it restart the
+# flag-api, evaluator and marketplace Deployments. See
+# docs/DEPLOYMENT_KUBERNETES.md, "Client IP and trusted proxies".
+trustedProxyCIDRs: ""
+
 # EVAL-2: base URL of workspace-dashboard, used by evaluator to build the
 # "View in Dashboard" link in the Slack auto-rollback alert above. Optional --
 # unset produces a relative "/flags/{key}" link in the alert instead of an

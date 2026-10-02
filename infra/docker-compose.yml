@@ -122,6 +122,8 @@ services:
     environment:
       - MTLS_ENABLED=${MTLS_ENABLED:-false}
       - CERTS_DIR=/certs
+      # Empty trusts no proxy: the client IP is the TCP peer. See .env.example.
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-}
     ports:
       - "8081:8081"
     restart: unless-stopped
@@ -165,6 +167,7 @@ services:
       FLAG_API_URL: http://flag-api:8081
       MTLS_ENABLED: ${MTLS_ENABLED:-false}
       CERTS_DIR: /certs
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     ports:
       - "8082:8082"
     restart: unless-stopped
@@ -250,6 +253,7 @@ services:
     env_file: .env
     environment:
       PORT: "8086"
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     ports:
       - "8086:8086"
     restart: unless-stopped
