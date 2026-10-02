@@ -360,28 +360,38 @@ func TestWriteError_ResponseFormat(t *testing.T) {
 	}
 }
 
-// TestIpFromRequest verifies that IP extraction prefers X-Forwarded-For.
+// TestIpFromRequest pins that the IP recorded in the audit log is a single IP
+// taken from the connection peer, never text the caller chose: it is written
+// into a tamper-evident log, where a forged source address would be preserved
+// as faithfully as a real one. Behind a trusted proxy the value is the client
+// that proxy saw; internal/clientip owns that decision.
 func TestIpFromRequest(t *testing.T) {
-	t.Run("uses X-Forwarded-For when set", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("X-Forwarded-For", "203.0.113.1")
-		ip := ipFromRequest(req)
-		if ip != "203.0.113.1" {
-			t.Errorf("ipFromRequest = %q, want %q", ip, "203.0.113.1")
-		}
-	})
-
-	t.Run("falls back to RemoteAddr when no header", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.1:54321"
-		ip := ipFromRequest(req)
-		if ip == "" {
-			t.Error("ipFromRequest must not return empty string")
-		}
-		if ip != req.RemoteAddr {
-			t.Errorf("ipFromRequest = %q, want %q", ip, req.RemoteAddr)
-		}
-	})
+	tests := []struct {
+		name       string
+		headers    map[string]string
+		remoteAddr string
+		want       string
+	}{
+		{"peer host without the port", nil, "10.0.0.1:54321", "10.0.0.1"},
+		{"bare IPv4 peer", nil, "10.0.0.1", "10.0.0.1"},
+		{"bracketed IPv6 peer", nil, "[2001:db8::1]:54321", "2001:db8::1"},
+		{"ignores a forged X-Forwarded-For chain", map[string]string{"X-Forwarded-For": "6.6.6.6, 7.7.7.7"}, "203.0.113.9:4000", "203.0.113.9"},
+		{"ignores a forged X-Real-IP", map[string]string{"X-Real-IP": "6.6.6.6"}, "203.0.113.9:4000", "203.0.113.9"},
+		{"ignores a forged True-Client-IP", map[string]string{"True-Client-IP": "6.6.6.6"}, "203.0.113.9:4000", "203.0.113.9"},
+		{"never stores text the caller chose", map[string]string{"X-Forwarded-For": "ops-approved, 10.0.0.5"}, "203.0.113.9:4000", "203.0.113.9"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remoteAddr
+			for name, value := range tc.headers {
+				req.Header.Set(name, value)
+			}
+			if got := ipFromRequest(req); got != tc.want {
+				t.Errorf("ipFromRequest = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // ---- Merkle chain integrity tests ----

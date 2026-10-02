@@ -12,6 +12,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/tombstone/flag-api/internal/clientip"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -712,27 +715,35 @@ func TestExtractBearerToken(t *testing.T) {
 	}
 }
 
+// TestExtractIP pins that the IP bucket is keyed on the connection peer and
+// never on a header the caller controls: this limiter runs before
+// authentication, so every forwarded-for style header reaching it is
+// attacker-supplied unless a trusted proxy vouched for it (see
+// internal/clientip, which is the only place that decides that).
 func TestExtractIP(t *testing.T) {
 	tests := []struct {
 		name       string
-		realIP     string
-		forwarded  string
+		headers    map[string]string
 		remoteAddr string
 		want       string
 	}{
-		{"prefers X-Real-IP", "1.2.3.4", "5.6.7.8", "9.9.9.9:80", "1.2.3.4"},
-		{"falls back to X-Forwarded-For leftmost", "", "5.6.7.8, 9.9.9.9", "1.1.1.1:80", "5.6.7.8"},
-		{"falls back to RemoteAddr, strips port", "", "", "10.0.0.1:5432", "10.0.0.1"},
+		{"peer host, port stripped", nil, "10.0.0.1:5432", "10.0.0.1"},
+		{"bare IPv4 peer", nil, "10.0.0.1", "10.0.0.1"},
+		{"bracketed IPv6 peer, port stripped", nil, "[2001:db8::1]:5432", "2001:db8::1"},
+		{"bare IPv6 peer", nil, "2001:db8::1", "2001:db8::1"},
+		{"ignores X-Real-IP", map[string]string{"X-Real-IP": "1.2.3.4"}, "9.9.9.9:80", "9.9.9.9"},
+		{"ignores X-Forwarded-For", map[string]string{"X-Forwarded-For": "5.6.7.8, 9.9.9.9"}, "1.1.1.1:80", "1.1.1.1"},
+		{"ignores True-Client-IP", map[string]string{"True-Client-IP": "6.6.6.6"}, "9.9.9.9:80", "9.9.9.9"},
+		{"ignores all forwarded headers together", map[string]string{
+			"X-Real-IP": "1.2.3.4", "X-Forwarded-For": "5.6.7.8", "True-Client-IP": "6.6.6.6",
+		}, "9.9.9.9:80", "9.9.9.9"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.RemoteAddr = tc.remoteAddr
-			if tc.realIP != "" {
-				req.Header.Set("X-Real-IP", tc.realIP)
-			}
-			if tc.forwarded != "" {
-				req.Header.Set("X-Forwarded-For", tc.forwarded)
+			for name, value := range tc.headers {
+				req.Header.Set(name, value)
 			}
 			got := extractIP(req)
 			if got != tc.want {
@@ -740,4 +751,122 @@ func TestExtractIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRateLimit_IPBucketIgnoresForgedHeaders is the end-to-end form of the
+// test above. The peer's own bucket is pre-exhausted, so a request from that
+// peer is throttled only if it landed in it: a caller who could name another
+// client in a header would get a fresh bucket on every request and evade the
+// limit, or drain a victim's bucket instead of its own.
+func TestRateLimit_IPBucketIgnoresForgedHeaders(t *testing.T) {
+	const remoteAddr = "203.0.113.5:1234"
+	peerKey := ipKeyPrefix + "203.0.113.5"
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{"X-Real-IP naming another client", "X-Real-IP", "198.51.100.1"},
+		{"X-Forwarded-For naming another client", "X-Forwarded-For", "198.51.100.1, 192.0.2.9"},
+		{"True-Client-IP naming another client", "True-Client-IP", "198.51.100.1"},
+		{"X-Real-IP that is not an IP at all", "X-Real-IP", "not-an-ip'; DROP TABLE audit_log; --"},
+		{"X-Forwarded-For that is not an IP at all", "X-Forwarded-For", strings.Repeat("A", 4096)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, mr := newTestMiddlewareWithServer(t)
+			exhaustBucket(mr, peerKey)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/flags", nil)
+			req.RemoteAddr = remoteAddr
+			req.Header.Set(tc.header, tc.value)
+			rec := httptest.NewRecorder()
+
+			m.RateLimit(okHandler()).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("expected the request to land in the peer's exhausted bucket %q, got status %d", peerKey, rec.Code)
+			}
+			if keys := mr.Keys(); len(keys) != 1 || keys[0] != peerKey {
+				t.Errorf("bucket keys = %q, want exactly [%q]", keys, peerKey)
+			}
+		})
+	}
+}
+
+// TestRateLimit_IPBucketKeyIsAValidIP pins that the key suffix is always a
+// bare IP: never a bracketed or truncated IPv6 peer, and never a port.
+func TestRateLimit_IPBucketKeyIsAValidIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantIP     string
+	}{
+		{"IPv4 with port", "203.0.113.5:1234", "203.0.113.5"},
+		{"bare IPv4", "203.0.113.5", "203.0.113.5"},
+		{"bracketed IPv6 with port", "[2001:db8::1]:1234", "2001:db8::1"},
+		{"bare IPv6", "2001:db8::1", "2001:db8::1"},
+		{"v4-mapped IPv6 folds to IPv4", "[::ffff:203.0.113.5]:1234", "203.0.113.5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, mr := newTestMiddlewareWithServer(t)
+
+			serveOnce(m.RateLimit(okHandler()), "", tc.remoteAddr)
+
+			keys := mr.Keys()
+			if len(keys) != 1 || keys[0] != ipKeyPrefix+tc.wantIP {
+				t.Fatalf("bucket keys = %q, want exactly [%q]", keys, ipKeyPrefix+tc.wantIP)
+			}
+			if _, err := netip.ParseAddr(strings.TrimPrefix(keys[0], ipKeyPrefix)); err != nil {
+				t.Errorf("bucket key suffix is not a valid IP: %v", err)
+			}
+		})
+	}
+}
+
+// TestRateLimit_IPBucketBehindTrustedProxy pins the whole chain the deployed
+// service runs: with the trusted-proxy middleware in front, every client behind
+// one proxy gets its own bucket, named by the proxy's X-Forwarded-For entry,
+// and a caller prepending forged entries to that header cannot leave it.
+func TestRateLimit_IPBucketBehindTrustedProxy(t *testing.T) {
+	const proxyAddr = "10.1.2.3:4444"
+	trust, err := clientip.ParseTrust("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("ParseTrust: %v", err)
+	}
+	serve := func(m *RateLimitMiddleware, forwardedFor string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/flags", nil)
+		req.RemoteAddr = proxyAddr
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		rec := httptest.NewRecorder()
+		trust.Middleware(m.RateLimit(okHandler())).ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("a forged prefix does not leave the client's bucket", func(t *testing.T) {
+		m, mr := newTestMiddlewareWithServer(t)
+		exhaustBucket(mr, ipKeyPrefix+"198.51.100.7")
+
+		for _, forwardedFor := range []string{
+			"198.51.100.7",
+			"6.6.6.6, 198.51.100.7",
+			"7.7.7.7, 8.8.8.8, 198.51.100.7",
+		} {
+			if got := serve(m, forwardedFor); got != http.StatusTooManyRequests {
+				t.Errorf("X-Forwarded-For %q: status %d, want 429 from the client's exhausted bucket", forwardedFor, got)
+			}
+		}
+	})
+
+	t.Run("another client behind the same proxy has its own bucket", func(t *testing.T) {
+		m, mr := newTestMiddlewareWithServer(t)
+		exhaustBucket(mr, ipKeyPrefix+"198.51.100.7")
+
+		if got := serve(m, "198.51.100.8"); got != http.StatusOK {
+			t.Errorf("status %d, want 200: a different client must not share the exhausted bucket", got)
+		}
+		if !slices.Contains(mr.Keys(), ipKeyPrefix+"198.51.100.8") {
+			t.Errorf("bucket keys = %q, want one named for the client 198.51.100.8", mr.Keys())
+		}
+	})
 }
