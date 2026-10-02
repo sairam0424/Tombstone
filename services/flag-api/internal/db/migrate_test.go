@@ -13,7 +13,7 @@ import (
 // expectedVersions is the full set the runner must apply: 1 = schema.sql
 // baseline, then each migrations/NNN_*.sql prefix. Update this alongside any
 // new migration so the runner test stays a real regression gate.
-var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}
+var expectedVersions = []int64{1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28}
 
 // TestMigrationRunner exercises the runner against a REAL Postgres. It is the
 // executable gate for DATA-1 and runs in CI (the flag-api-migrations job sets
@@ -75,6 +75,13 @@ func TestMigrationRunner(t *testing.T) {
 				t.Fatalf("expected index %q to exist after migrate", idx)
 			}
 		}
+		// Both embedding backends produce 1024-dimensional vectors, so a fresh
+		// install must end with flags.embedding as vector(1024) and its HNSW
+		// index. This checks the migrated end state (schema.sql, then 028, which
+		// is a no-op on it), not schema.sql alone: the Python contract test
+		// test_embedding_schema_contract.py pins the baseline's own declaration.
+		// Migration 028's upgrade paths are exercised by the 028 subtests below.
+		requireEmbeddingState(ctx, t, database, embeddingTypeWant, embeddingIndexMethod)
 	})
 
 	t.Run("re-run is a no-op (idempotent)", func(t *testing.T) {
@@ -85,6 +92,30 @@ func TestMigrationRunner(t *testing.T) {
 		if len(applied) != 0 {
 			t.Fatalf("second Migrate applied %v, want none", applied)
 		}
+	})
+
+	t.Run("028 retypes a vector(768) column, NULLs stray vectors and swaps in HNSW", func(t *testing.T) {
+		testEmbedding028Upgrade(ctx, t, database)
+	})
+
+	t.Run("028 replaces an ivfflat index on an already-1024 column", func(t *testing.T) {
+		testEmbedding028ReplacesIvfflatOn1024(ctx, t, database)
+	})
+
+	t.Run("028 adds a missing embedding column", func(t *testing.T) {
+		testEmbedding028AddsAMissingColumn(ctx, t, database)
+	})
+
+	t.Run("028 re-run keeps 1024-dimensional embeddings and the index", func(t *testing.T) {
+		testEmbedding028Rerun(ctx, t, database)
+	})
+
+	t.Run("028 re-run takes no lock on flags", func(t *testing.T) {
+		testEmbedding028RerunTakesNoTableLock(ctx, t, database)
+	})
+
+	t.Run("028 gives up on a held table lock instead of queueing", func(t *testing.T) {
+		testEmbedding028GivesUpOnAHeldLock(ctx, t, database)
 	})
 
 	t.Run("baseline adopts an already-built DB without re-running SQL", func(t *testing.T) {
