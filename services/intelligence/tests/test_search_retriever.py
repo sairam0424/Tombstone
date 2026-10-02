@@ -73,3 +73,17 @@ async def test_vector_search_without_an_embedding_model_returns_nothing() -> Non
     retriever = _retriever(embedding_model=None)
 
     assert await retriever._vector_search(MagicMock(), "checkout", 5) == []
+
+
+@pytest.mark.asyncio
+async def test_vector_search_skips_the_query_when_embedding_the_query_failed() -> None:
+    """A failed query embedding must not reach pgvector: a zero query vector
+    gives NaN similarities, which /api/v1/search cannot serialise (HTTP 500)."""
+    model = MagicMock()
+    model.embed = AsyncMock(return_value=[[]])
+    retriever = _retriever(embedding_model=model)
+    pool = MagicMock()
+    pool.fetch = AsyncMock()
+
+    assert await retriever._vector_search(pool, "checkout", 5) == []
+    pool.fetch.assert_not_called()
