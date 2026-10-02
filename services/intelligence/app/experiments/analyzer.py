@@ -59,8 +59,9 @@ class ExperimentAnalyzer:
 
         if experiment.stat_method == "frequentist":
             if len(control_arr) >= 2 and len(treatment_arr) >= 2:
-                _, p_value = stats.ttest_ind(treatment_arr, control_arr)
-                is_significant = float(p_value) < (1 - 0.95)
+                _, raw_p_value = stats.ttest_ind(treatment_arr, control_arr)
+                p_value = float(raw_p_value)
+                is_significant = p_value < (1 - 0.95)
 
         elif experiment.stat_method == "bayesian":
             # Beta-Binomial conjugate for conversion metrics
@@ -196,7 +197,7 @@ class ExperimentAnalyzer:
             # matching how insufficient sample size is already reported below.
             has_variance = control_std > 0 or treatment_std > 0
             if control.sample_size >= 2 and treatment.sample_size >= 2 and has_variance:
-                _, p_value = stats.ttest_ind_from_stats(
+                _, raw_p_value = stats.ttest_ind_from_stats(
                     mean1=treatment.mean,
                     std1=treatment_std,
                     nobs1=treatment.sample_size,
@@ -204,7 +205,8 @@ class ExperimentAnalyzer:
                     std2=control_std,
                     nobs2=control.sample_size,
                 )
-                is_significant = float(p_value) < (1 - 0.95)
+                p_value = float(raw_p_value)
+                is_significant = p_value < (1 - 0.95)
 
         elif experiment.stat_method == "bayesian":
             # Beta-Binomial conjugate for conversion metrics, using the warehouse's

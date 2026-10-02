@@ -335,7 +335,10 @@ class DependencyGraphBuilder:
         ]
         edges = [
             GraphEdge(
-                source=k[0], target=k[1], weight=v["weight"], co_change_count=v["count"]
+                source=k[0],
+                target=k[1],
+                weight=v["weight"],
+                co_change_count=int(v["count"]),
             )
             for k, v in sorted(edge_map.items(), key=lambda x: -x[1]["weight"])[:50]
         ]

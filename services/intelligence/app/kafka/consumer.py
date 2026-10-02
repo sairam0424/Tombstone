@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 try:
     from aiokafka import AIOKafkaConsumer
@@ -20,6 +20,14 @@ if TYPE_CHECKING:
     from app.search.embedding_sync import EmbeddingSyncService
 
 logger = logging.getLogger(__name__)
+
+# redis-py types its stream commands with wide bytes/str/int unions and
+# invariant dict parameters. RedisStreamsEventConsumer connects with
+# decode_responses=True, so the real reply shapes are the ones below; the
+# field maps are dict[Any, Any] (str -> str at runtime) because redis-py's
+# Dict parameters reject a plain dict[str, str].
+_StreamFields = dict[Any, Any]
+_StreamEntries = list[tuple[str, _StreamFields]]
 
 
 class EventConsumer(ABC):
@@ -380,13 +388,16 @@ class RedisStreamsEventConsumer(EventConsumer):
         while self._running:
             try:
                 # Read from all streams in one call
-                stream_args = {s: ">" for s in self._streams}
-                results = await self._redis.xreadgroup(
-                    self._GROUP,
-                    consumer_name,
-                    stream_args,
-                    count=self._COUNT,
-                    block=self._BLOCK_MS,
+                stream_args: dict[Any, Any] = {s: ">" for s in self._streams}
+                results = cast(
+                    "list[tuple[str, _StreamEntries]] | None",
+                    await self._redis.xreadgroup(
+                        self._GROUP,
+                        consumer_name,
+                        stream_args,
+                        count=self._COUNT,
+                        block=self._BLOCK_MS,
+                    ),
                 )
 
                 for stream_key, messages in results or []:
@@ -566,13 +577,16 @@ class RedisStreamsEventConsumer(EventConsumer):
         """
         assert self._redis is not None
         try:
-            pending = await self._redis.xpending_range(
-                stream_key,
-                self._GROUP,
-                min="-",
-                max="+",
-                count=self._RECLAIM_SCAN_COUNT,
-                idle=self._RECLAIM_IDLE_THRESHOLD_MS,
+            pending = cast(
+                "list[dict[str, Any]] | None",
+                await self._redis.xpending_range(
+                    stream_key,
+                    self._GROUP,
+                    min="-",
+                    max="+",
+                    count=self._RECLAIM_SCAN_COUNT,
+                    idle=self._RECLAIM_IDLE_THRESHOLD_MS,
+                ),
             )
         except Exception as exc:
             logger.warning(
@@ -591,12 +605,15 @@ class RedisStreamsEventConsumer(EventConsumer):
                 continue
 
             try:
-                claimed = await self._redis.xclaim(
-                    stream_key,
-                    self._GROUP,
-                    consumer_name,
-                    min_idle_time=self._RECLAIM_IDLE_THRESHOLD_MS,
-                    message_ids=[msg_id],
+                claimed = cast(
+                    "_StreamEntries | None",
+                    await self._redis.xclaim(
+                        stream_key,
+                        self._GROUP,
+                        consumer_name,
+                        min_idle_time=self._RECLAIM_IDLE_THRESHOLD_MS,
+                        message_ids=[msg_id],
+                    ),
                 )
             except Exception as exc:
                 logger.warning(
@@ -622,7 +639,10 @@ class RedisStreamsEventConsumer(EventConsumer):
         assert self._redis is not None
         dlq_key = self.dlq_stream_key(stream_key)
         try:
-            entries = await self._redis.xrange(stream_key, min=msg_id, max=msg_id)
+            entries = cast(
+                "_StreamEntries",
+                await self._redis.xrange(stream_key, min=msg_id, max=msg_id),
+            )
         except Exception as exc:
             logger.warning(
                 "RedisStreamsEventConsumer: xrange failed for %s (%s): %s",
