@@ -57,6 +57,10 @@ If the `POLICY_DIR` environment variable points to a missing or empty directory,
 
 Any `.rego` file change in this directory triggers an asynchronous reload. The in-flight request uses the current policy; subsequent requests use the new policy. Reload errors are logged but do not crash the service — the last known-good policy is retained.
 
+## Rego syntax version
+
+The loader parses every `.rego` file in `POLICY_DIR` as Rego **v0**. Rego v1 syntax, such as `allow if { ... }`, needs `import rego.v1` at the top of the file, or an `import future.keywords.<keyword>` for each keyword used (`flags.rego` imports `if` and `in`). Without the import the file fails to compile and the middleware decides from the hardcoded permission matrix instead. The OPA CLI parses v1 by default, so a policy can pass `opa eval` and still be rejected here; pass `--v0-compatible` to the CLI to get the loader's behaviour, as in the example below.
+
 ## Testing policies
 
 ```bash
@@ -65,6 +69,7 @@ brew install opa   # or: curl -L -o opa https://openpolicyagent.org/downloads/la
 
 # Evaluate locally
 opa eval \
+  --v0-compatible \
   --input - \
   --data flags.rego \
   'data.tombstone.flags.allow' \
