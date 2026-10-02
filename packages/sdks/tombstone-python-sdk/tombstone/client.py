@@ -362,6 +362,9 @@ class TombstoneClient:
                         and existing.targeting_rules_updated_at >= snapshot_ts
                     )
 
+                    # Both keep_live_* flags imply `existing is not None`; the
+                    # explicit check below is redundant at runtime and only
+                    # lets the type checker narrow `existing`.
                     new_cache[flag_key] = FlagEnvironmentState(
                         flag_key=flag_key,
                         enabled=raw.get("enabled", False),
@@ -370,24 +373,24 @@ class TombstoneClient:
                         environment=payload.get("environment", self._environment),
                         targeting_rules=(
                             existing.targeting_rules
-                            if keep_live_targeting_rules
+                            if existing is not None and keep_live_targeting_rules
                             else targeting_rules
                         ),
                         prerequisites=(
                             existing.prerequisites
-                            if keep_live_prerequisites
+                            if existing is not None and keep_live_prerequisites
                             else raw.get("prerequisites", [])
                         ),
                         hash_version=raw.get("hash_version", 1),
                         target_list=raw.get("target_list", []),
                         prerequisites_updated_at=(
                             existing.prerequisites_updated_at
-                            if keep_live_prerequisites
+                            if existing is not None and keep_live_prerequisites
                             else snapshot_ts
                         ),
                         targeting_rules_updated_at=(
                             existing.targeting_rules_updated_at
-                            if keep_live_targeting_rules
+                            if existing is not None and keep_live_targeting_rules
                             else snapshot_ts
                         ),
                     )
