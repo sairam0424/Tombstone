@@ -8,6 +8,7 @@
 | Dashboard showing rate limit errors | IP tier hit (200 req/min per IP) | Ensure dashboard uses Bearer token auth, not unauthenticated |
 | Rate limits not enforced across replicas | Redis unavailable | Check Redis connectivity — limits fail-open without Redis |
 | Retry-After header shows very high value | Bucket fully drained | Wait for bucket refill or reduce request frequency |
+| Unauthenticated callers throttled together, all from one address | `TRUSTED_PROXY_CIDRS` unset behind a proxy, so every caller shares the proxy's IP bucket | Set it to the proxy's address range; see [Client IP and trusted proxies](../DEPLOYMENT_KUBERNETES.md#client-ip-and-trusted-proxies) |
 
 ---
 
@@ -28,6 +29,8 @@ ipRatePerMin  = 200    // sustained requests/minute
 ipBurst       = 20     // burst capacity
 keyPrefix     = "ratelimit:ip:"
 ```
+
+The IP is the TCP peer, or the client a proxy listed in `TRUSTED_PROXY_CIDRS` reported in `X-Forwarded-For`. Request headers alone never pick a bucket.
 
 The evaluator's telemetry route uses separate, higher limits (see `services/evaluator/internal/middleware/ratelimit.go`).
 

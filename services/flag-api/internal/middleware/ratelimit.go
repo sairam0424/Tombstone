@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/tombstone/flag-api/internal/clientip"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -288,24 +289,10 @@ func unkeyedDigest(cred string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// extractIP returns the most-specific client IP.
-// Prefers X-Real-IP (set by RealIP middleware), then X-Forwarded-For first entry,
-// then RemoteAddr.
+// extractIP returns the IP the per-IP bucket is keyed on: the client the
+// trusted-proxy middleware derived, or else the TCP peer. It never reads a
+// request header itself. This limiter runs before authentication, so a bucket
+// key taken from a header would let any caller pick (or rotate) its own bucket.
 func extractIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return ip
-	}
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// X-Forwarded-For: client, proxy1, proxy2 — take the leftmost
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	// Strip port from RemoteAddr ("1.2.3.4:5678" → "1.2.3.4")
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
-	}
-	return addr
+	return clientip.ClientIP(r)
 }

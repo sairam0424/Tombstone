@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/clientip"
 	"github.com/tombstone/flag-api/internal/db/sqlcgen"
 	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/secrets"
@@ -1201,9 +1202,11 @@ func (h *FlagHandler) projectRequiresApproval(ctx context.Context, projectID str
 	return requireApproval, nil
 }
 
+// ipFromRequest returns the source IP recorded in the audit log: a single
+// validated IP, the client the trusted-proxy middleware derived or else the TCP
+// peer. It is never a header value: the audit log is append-only and
+// hash-chained, so whatever is stored here is preserved as faithfully as a real
+// address.
 func ipFromRequest(r *http.Request) string {
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		return ip
-	}
-	return r.RemoteAddr
+	return clientip.ClientIP(r)
 }

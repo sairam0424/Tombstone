@@ -17,6 +17,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/tombstone/marketplace/internal/clientip"
 	"github.com/tombstone/marketplace/internal/httpclient"
 )
 
@@ -146,8 +147,11 @@ func (h *Handler) HandleDatadogInbound(w http.ResponseWriter, r *http.Request) {
 	secret := os.Getenv("DD_WEBHOOK_SECRET")
 	sig := r.Header.Get("DD-Signature")
 	if !verifyDatadogSignature(secret, rawBody, sig) {
+		// Attribution for the log only, no allow/deny decision depends on it.
+		// Anyone can send a bad signature, so this must be the trusted-proxy
+		// client (or the TCP peer), never a value taken from a header.
 		h.logger.Warn("datadog inbound: signature verification failed",
-			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("client_ip", clientip.ClientIP(r)),
 		)
 		h.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 		return

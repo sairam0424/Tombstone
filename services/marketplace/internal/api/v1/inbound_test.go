@@ -3,12 +3,21 @@ package v1_test
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
+	v1 "github.com/tombstone/marketplace/internal/api/v1"
+	"github.com/tombstone/marketplace/internal/clientip"
+	"github.com/tombstone/marketplace/internal/registry"
+	"github.com/tombstone/marketplace/internal/webhook"
 )
 
 func signDatadogBody(t *testing.T, secret string, body []byte) string {
@@ -127,5 +136,111 @@ func TestHandleDatadogInbound_KillSwitchesOnBlockedP1(t *testing.T) {
 	}
 	if len(summary.KillSwitched) != 1 || summary.KillSwitched[0] != flagKey {
 		t.Errorf("KillSwitched = %v, want [%q] -- the blast-radius-driven auto-kill-switch never fired", summary.KillSwitched, flagKey)
+	}
+}
+
+// randomHex returns a fresh value generated at run time, so no secret-looking
+// literal is ever committed.
+func randomHex(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("generate random value: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// failedSignatureClientIP sends a Datadog alert signed with the wrong secret
+// through wrap(handler) and returns the client_ip the handler logged for the
+// rejection. wrap lets a test put middleware in front of the handler.
+func failedSignatureClientIP(t *testing.T, remoteAddr string, headers map[string]string, wrap func(http.Handler) http.Handler) string {
+	t.Helper()
+	t.Setenv("DD_WEBHOOK_SECRET", randomHex(t))
+
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	reg := registry.NewRegistry(nil, logger)
+	h := v1.NewHandler(reg, webhook.NewDispatcher(reg, logger), logger, "")
+
+	body := []byte(`{"alert_id":"alert-1","title":"spike","severity":"P1","tags":["service:payments"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/marketplace/inbound/datadog", bytes.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("DD-Signature", signDatadogBody(t, randomHex(t), body))
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	w := httptest.NewRecorder()
+
+	wrap(http.HandlerFunc(h.HandleDatadogInbound)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a bad signature", w.Code)
+	}
+	entries := logs.FilterMessage("datadog inbound: signature verification failed").All()
+	if len(entries) != 1 {
+		t.Fatalf("logged %d signature failures, want exactly 1", len(entries))
+	}
+	clientIP, ok := entries[0].ContextMap()["client_ip"].(string)
+	if !ok {
+		t.Fatalf("signature failure logged no client_ip field: %v", entries[0].ContextMap())
+	}
+	return clientIP
+}
+
+func noMiddleware(next http.Handler) http.Handler { return next }
+
+// TestHandleDatadogInbound_FailedSignatureAttributesTheConnectionPeer pins that
+// the attribution logged for a rejected webhook is the connection peer, never a
+// forwarded header: anyone can send a request with a bad signature, so the
+// header is exactly the thing a prober would forge to point at someone else.
+func TestHandleDatadogInbound_FailedSignatureAttributesTheConnectionPeer(t *testing.T) {
+	tests := []struct {
+		name    string
+		remote  string
+		headers map[string]string
+		want    string
+	}{
+		{"no forwarding headers", "203.0.113.9:4000", nil, "203.0.113.9"},
+		{"forged X-Forwarded-For", "203.0.113.9:4000", map[string]string{"X-Forwarded-For": "6.6.6.6"}, "203.0.113.9"},
+		{"forged X-Real-IP", "203.0.113.9:4000", map[string]string{"X-Real-IP": "6.6.6.6"}, "203.0.113.9"},
+		{"forged True-Client-IP", "203.0.113.9:4000", map[string]string{"True-Client-IP": "6.6.6.6"}, "203.0.113.9"},
+		{"IPv6 peer", "[2001:db8::1]:4000", nil, "2001:db8::1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := failedSignatureClientIP(t, tc.remote, tc.headers, noMiddleware); got != tc.want {
+				t.Errorf("client_ip = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleDatadogInbound_FailedSignatureBehindATrustedProxy covers the
+// deployed shape: the proxy's X-Forwarded-For entry is logged, not the proxy's
+// own address and not any entry the caller prepended; and a direct caller
+// naming a trusted address in the header gains nothing.
+func TestHandleDatadogInbound_FailedSignatureBehindATrustedProxy(t *testing.T) {
+	trust, err := clientip.ParseTrust("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("ParseTrust: %v", err)
+	}
+	tests := []struct {
+		name      string
+		remote    string
+		forwarded string
+		want      string
+	}{
+		{"client seen by the proxy", "10.1.2.3:4000", "198.51.100.7", "198.51.100.7"},
+		{"caller prepended entries", "10.1.2.3:4000", "6.6.6.6, 198.51.100.7", "198.51.100.7"},
+		{"direct caller naming a trusted address", "203.0.113.9:4000", "10.1.2.3", "203.0.113.9"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := failedSignatureClientIP(t, tc.remote, map[string]string{"X-Forwarded-For": tc.forwarded}, trust.Middleware)
+
+			if got != tc.want {
+				t.Errorf("client_ip = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

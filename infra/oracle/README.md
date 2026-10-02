@@ -12,3 +12,5 @@ This directory contains Oracle Cloud ARM VM deployment files for v1.1+ productio
 - `nginx.conf` — Reverse proxy config
 - `cloud-init.yml` — Oracle ARM Ubuntu bootstrap script
 - `setup.sh` — One-shot server setup
+
+Set `TRUSTED_PROXY_CIDRS` so flag-api, evaluator and marketplace see the real client behind nginx; see [Client IP and trusted proxies](../../docs/DEPLOYMENT_KUBERNETES.md#client-ip-and-trusted-proxies).

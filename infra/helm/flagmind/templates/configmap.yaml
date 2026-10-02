@@ -40,6 +40,12 @@ data:
   # if this folds to zero usable domains) -- matches infra/.env.example's
   # own default and disclosed tradeoff, not silently overridden here.
   SSO_ALLOWED_DOMAINS: {{ .Values.ssoAllowedDomains | default "" | quote }}
+  # Read by flag-api, evaluator and marketplace (all three mount this
+  # ConfigMap via envFrom). Empty trusts no proxy: the client IP is then always
+  # the TCP peer, i.e. the ingress pod when one is in front. See values.yaml.
+  # join accepts the comma-separated string or a YAML list (a list rendered
+  # directly would be "[a b]", which the services reject at startup).
+  TRUSTED_PROXY_CIDRS: {{ join "," .Values.trustedProxyCIDRs | quote }}
   # marketplace's flag-lifecycle webhook receiver -- unset means
   # notifyMarketplace's dispatch is a no-op (async, fail-open), matching
   # DASHBOARD_URL/SLACK_WEBHOOK_URL's own "third-party integration is

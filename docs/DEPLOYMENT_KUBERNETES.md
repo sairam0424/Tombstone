@@ -369,6 +369,80 @@ spec:
 
 ---
 
+## Client IP and trusted proxies
+
+flag-api, evaluator and marketplace decide which client IP a request belongs to in one place (`internal/clientip`, one copy per service). It feeds the per-IP rate-limit buckets, the audit log's `ip_address` (flag-api), the access logs and marketplace's failed-webhook-signature log line.
+
+### Default behaviour
+
+- The client is the **TCP peer**: the address that opened the connection to the service.
+- `X-Forwarded-For` is believed only when that peer is inside `TRUSTED_PROXY_CIDRS` (comma-separated CIDRs; whitespace and a trailing comma are fine). The header is then walked right to left, trusted hops are skipped, and the first other entry is the client. An entry that is not an IP ends the walk and the peer is used.
+- `X-Real-IP` and `True-Client-IP` are never read.
+- Unset or empty trusts no proxy. An invalid entry stops the service at startup with an error naming the entry: a typo, `10.0.0.1` without a prefix length, a `/0` (it would make every caller a trusted proxy), or an IPv4-mapped IPv6 prefix such as `::ffff:10.0.0.0/104` (it never matches; write the IPv4 CIDR).
+- Each service logs `client IP resolution` once at startup with `mode` (`peer_only` or `trusted_proxies`) and the `trusted_proxy_cidrs` it parsed. No request data is logged.
+
+### If you leave it unset behind a proxy
+
+Nothing fails, which makes it easy to miss. Every request looks like it came from the proxy:
+
+- All callers that are rate-limited by IP share **one bucket**. In flag-api that is every request without a `Bearer` credential (200 requests/min sustained, burst 20). In evaluator it is every request (200/min, burst 20; the telemetry route has its own bucket at 5000/min, burst 200).
+- **New audit rows record the proxy's IP** in `ip_address`. Earlier rows are unchanged.
+- Access logs (flag-api, marketplace) and marketplace's failed-signature line name the proxy.
+
+Check the startup line and the `from <ip>` address in the access log after any change to the proxy layer.
+
+### Choosing the value
+
+Trust the smallest range that contains only your proxies, meaning the address the **service sees** as the peer, not the client-facing address. Never list client ranges: trusted entries are skipped while walking the chain, so a listed client could never be identified.
+
+To find the peer address, leave the variable empty, send one request through the proxy, and read the `from <ip>` address in flag-api's (or marketplace's) access log. With nothing trusted that is the TCP peer.
+
+A trusted proxy must set `X-Forwarded-For` itself. One that passes a client-sent header through unchanged hands the client's value to the service.
+
+### Kubernetes with ingress-nginx (Helm)
+
+Set `trustedProxyCIDRs` in your Helm values, as a comma-separated string or a YAML list. Use a values file: `--set trustedProxyCIDRs=a,b` splits on the comma and fails. The GitOps `HelmRelease` (`gitops/apps/production/tombstone/helmrelease.yaml`) takes values from a Secret (`helm-values.yaml`), so the live value is not necessarily in this repo, and it also has an inline `values:` block that can carry it. Set it in one of them. The chart renders it into the `tombstone-config` ConfigMap as `TRUSTED_PROXY_CIDRS`, which the flag-api, evaluator and marketplace Deployments all mount through `envFrom`.
+
+- Leave ingress-nginx's `use-forwarded-headers` off (its default). Per the upstream documentation the controller then ignores an incoming `X-Forwarded-For` and writes the address it sees, so a client-sent chain never reaches the services. Confirm this on your controller version.
+- The services' peer is the **ingress controller pod**, so trust the pod address range of the nodes the controller runs on, or something narrower. Do not trust the whole cluster pod CIDR: the chart ships no NetworkPolicy, so any pod can reach a ClusterIP service, and a trusted range lets that pod assert any client IP.
+- The ingress itself must see the real client address. A cloud load balancer that source-NATs (`externalTrafficPolicy: Cluster`) makes the ingress see a node address as the client. Use `externalTrafficPolicy: Local` or PROXY protocol, and check the result with the access-log method above.
+- If an L7 proxy or CDN sits in front of the ingress, `use-forwarded-headers` and the controller's trusted-proxy setting change. The services' trusted range is still the ingress pods, because they are what connects to the services.
+
+Rollout:
+
+- **Set the value before the image that contains this change is promoted.** Flux image automation rolls new tags independently of the chart values (the `$imagepolicy` markers in that `HelmRelease`). Older images ignore the variable, so setting it first is harmless. The other order leaves flag-api and evaluator on one shared IP bucket, and new audit rows recording the ingress IP, until the value lands.
+- **Restart after changing it.** The chart has no config checksum annotation, so a changed value updates the ConfigMap but running pods keep their old environment. Restart the `<release>-tombstone-flag-api`, `-evaluator` and `-marketplace` Deployments (`kubectl rollout restart deployment/<name>`), then read the `client IP resolution` startup line, which still shows the old mode until they restart.
+- **Unset is a change from before.** flag-api used to run chi's `RealIP`, which believes `X-Real-IP` and `X-Forwarded-For` from anyone, so behind an ingress that fills those headers callers had separate buckets with no configuration. Unset now puts every caller in the ingress pod's bucket (see above).
+
+### Oracle VM with host nginx (`infra/oracle`)
+
+`infra/oracle/nginx.conf` overwrites `X-Forwarded-For` with `$remote_addr` in every location, so a client-sent chain cannot survive. Set `TRUSTED_PROXY_CIDRS` (`infra/oracle/docker-compose.prod.yml` passes it to flag-api, evaluator and marketplace) to the address the containers see for nginx. That depends on how Docker publishes the port (commonly the compose network's gateway address), so measure it with the method above and trust that one address (`/32`), not the whole compose subnet. Deploy the nginx change and the variable together with the new images: until the variable is set, every client is the nginx address.
+
+Compose fills `${TRUSTED_PROXY_CIDRS}` from the same place as that file's other `${...}` values (`DB_URL`, `JWT_SECRET` and so on), so put it beside them. `setup.sh` checks `infra/.env`, but which file Compose reads depends on the project directory and `--env-file`, which this repo does not pin. Do not assume: after `docker compose up -d`, each service's `client IP resolution` startup line must report `trusted_proxies`.
+
+Two things make the measured address stop being right, and nothing at runtime signals either (a trusted range that no longer matches quietly falls back to the peer):
+
+- Recreating the Docker network can change the gateway address. Re-measure after any recreation; pinning the compose network's subnet is an option, and the owner's call.
+- If a CDN or load balancer fronts nginx, `$remote_addr` is that proxy's address, not the client's. nginx then needs its real-IP module configured with that proxy's ranges before the value it forwards means anything. This repo does not say whether such a proxy exists.
+
+The compose file publishes the service ports on all interfaces, and `cloud-init.yml` opens 8081, 8082, 8084, 8085 and 8086 in ufw, so a client may be able to reach a service directly and skip nginx. Whether that is safe depends on what the service sees as the peer for such a caller, and **that has not been measured on this host**. If Docker preserves the caller's source address, the caller is not a trusted peer and its forwarded headers are ignored. If Docker rewrites it to the address nginx also arrives from (its userland proxy does this; which connections take that path depends on the Docker version and configuration), the caller looks like nginx and can forge `X-Forwarded-For`, which is the original hole.
+
+Measure it from a machine outside the VM, over IPv4 and, if the VM has an IPv6 address, over IPv6: send a request straight to a published port with `X-Forwarded-For: 198.51.100.77` and read the `from <ip>` address in the access log. It must be the outside machine's address, neither the sentinel nor the nginx address. These are recommendations for the owner to decide; none is applied by the change that added this section:
+
+1. Bind the published ports to loopback (`127.0.0.1:8081:8081` and so on) so nginx is the only path in. This is what closes the direct path whatever Docker does to the source address. Without it, trusting the gateway address is safe only if the measurement above shows the caller's address is preserved. Re-measure the peer address afterwards, as it can change.
+2. Removing the ufw allow rules for 8081, 8082, 8084, 8085 and 8086 in `cloud-init.yml` (and on existing hosts) is tidy-up, not a substitute for step 1: Docker publishes ports through its own iptables rules, which ufw's rules generally do not filter. `DOCKER-USER` rules are the Docker-aware alternative. Confirm with the outside-machine check above.
+3. Check the OCI security lists for the same ports. They are not visible in this repo.
+
+### Local development
+
+`make dev` has no proxy in front of the services. Leave `TRUSTED_PROXY_CIDRS` empty; the client is the Docker bridge address the request arrives from.
+
+### Reading older audit rows
+
+`audit_log.ip_address` is now a single validated IP. Earlier rows could hold the raw `X-Forwarded-For` header, including text the caller chose, so treat an older value as unverified. The hash chain and `GET /api/v1/audit/verify` are unaffected: they hash whatever was stored.
+
+---
+
 ## Upgrading
 
 ```bash
