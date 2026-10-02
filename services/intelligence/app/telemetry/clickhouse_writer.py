@@ -18,6 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 try:
     import httpx as _httpx
@@ -57,7 +58,9 @@ class ClickHouseWriter:
     database: str = "tombstone"
     user: str = "default"
     password: str = ""
-    redis_client: object = field(default=None, repr=False)
+    # Optional async Redis client (rpop/lpush/ltrim) backing the DLQ; duck-typed,
+    # None disables the DLQ. See _redis_available().
+    redis_client: Any = field(default=None, repr=False)
 
     # --- internal batch state (not dataclass-managed) ---
     def __post_init__(self) -> None:
@@ -156,7 +159,7 @@ class ClickHouseWriter:
             if not self._redis_available():
                 continue
             try:
-                item = await self.redis_client.rpop(DLQ_KEY)  # type: ignore[union-attr]
+                item = await self.redis_client.rpop(DLQ_KEY)
                 if item:
                     data = json.loads(item)
                     logger.info(
@@ -200,8 +203,8 @@ class ClickHouseWriter:
             return
         try:
             payload = json.dumps({"batch": batch, "error": error})
-            await self.redis_client.lpush(DLQ_KEY, payload)  # type: ignore[union-attr]
-            await self.redis_client.ltrim(DLQ_KEY, 0, DLQ_MAX - 1)  # type: ignore[union-attr]
+            await self.redis_client.lpush(DLQ_KEY, payload)
+            await self.redis_client.ltrim(DLQ_KEY, 0, DLQ_MAX - 1)
             logger.info("DLQ: %d events queued (error: %s)", len(batch), error)
         except Exception as exc:
             logger.error(
@@ -255,12 +258,8 @@ class ClickHouseWriter:
         )
         auth = (self.user, self.password) if self.password else None
 
-        async with _httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                url,
-                content=rows.encode(),
-                auth=auth,
-            )
+        async with _httpx.AsyncClient(timeout=10.0, auth=auth) as client:
+            resp = await client.post(url, content=rows.encode())
             if resp.status_code >= 400:
                 raise RuntimeError(
                     f"ClickHouse HTTP {resp.status_code}: {resp.text[:200]}"

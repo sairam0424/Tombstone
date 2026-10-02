@@ -23,11 +23,13 @@ optional dependency, not merely theoretical.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
+import secrets
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from app.telemetry.clickhouse_writer import ClickHouseWriter
+from app.telemetry.clickhouse_writer import DLQ_KEY, DLQ_MAX, ClickHouseWriter
 
 
 @pytest.fixture
@@ -184,3 +186,84 @@ class TestCreateTables:
         joined = "\n".join(executed)
         assert "tombstone_evaluations" in joined
         assert "evaluation_events" not in joined
+
+
+class _RecordingAsyncClient:
+    """Stands in for httpx.AsyncClient: records constructor and post() kwargs."""
+
+    instances: list[_RecordingAsyncClient] = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.posts: list[tuple[str, dict]] = []
+        _RecordingAsyncClient.instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return None
+
+    async def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        return SimpleNamespace(status_code=200, text="")
+
+
+class TestInsertHttpAuth:
+    """
+    _insert() hands credentials to httpx.AsyncClient (constructor-level auth)
+    rather than per-request, so an unset password means no auth at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_recorder(self):
+        _RecordingAsyncClient.instances = []
+
+    @pytest.mark.asyncio
+    async def test_password_configures_basic_auth_on_the_client(self):
+        password = secrets.token_hex(8)  # generated, so no secret-like literal
+        writer = ClickHouseWriter(host="ch.internal", user="svc", password=password)
+        fake_httpx = SimpleNamespace(AsyncClient=_RecordingAsyncClient)
+
+        with patch("app.telemetry.clickhouse_writer._httpx", fake_httpx):
+            await writer._insert([{"flag_key": "f", "latency_ms": 1.5}])
+
+        (client,) = _RecordingAsyncClient.instances
+        assert client.kwargs["auth"] == ("svc", password)
+        (url, post_kwargs) = client.posts[0]
+        assert "INSERT+INTO+tombstone.tombstone_evaluations" in url
+        assert post_kwargs["content"]
+        assert "auth" not in post_kwargs
+
+    @pytest.mark.asyncio
+    async def test_no_password_sends_no_auth(self):
+        writer = ClickHouseWriter(host="ch.internal")
+        fake_httpx = SimpleNamespace(AsyncClient=_RecordingAsyncClient)
+
+        with patch("app.telemetry.clickhouse_writer._httpx", fake_httpx):
+            await writer._insert([{"flag_key": "f"}])
+
+        (client,) = _RecordingAsyncClient.instances
+        assert client.kwargs["auth"] is None
+
+
+class TestDeadLetterQueue:
+    @pytest.mark.asyncio
+    async def test_to_dlq_pushes_then_trims_through_the_redis_client(self):
+        redis = MagicMock()
+        redis.lpush = AsyncMock()
+        redis.ltrim = AsyncMock()
+        writer = ClickHouseWriter(host="ch.internal", redis_client=redis)
+
+        await writer._to_dlq([{"flag_key": "f"}], "boom")
+
+        payload = redis.lpush.await_args.args[1]
+        assert redis.lpush.await_args.args[0] == DLQ_KEY
+        assert '"flag_key": "f"' in payload and '"error": "boom"' in payload
+        redis.ltrim.assert_awaited_once_with(DLQ_KEY, 0, DLQ_MAX - 1)
+
+    @pytest.mark.asyncio
+    async def test_to_dlq_without_redis_drops_the_batch_without_raising(self):
+        writer = ClickHouseWriter(host="ch.internal")
+
+        await writer._to_dlq([{"flag_key": "f"}], "boom")

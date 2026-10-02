@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +23,7 @@ class LocalEmbeddingModel:
 
     def __init__(self, model_name: str = "BAAI/bge-m3") -> None:
         self._model_name = model_name
-        self._model = None
+        self._model: SentenceTransformer | None = None
 
     async def initialize(self) -> None:
         loop = asyncio.get_running_loop()
@@ -35,10 +38,11 @@ class LocalEmbeddingModel:
             self._model = None
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        if self._model is None:
+        model = self._model
+        if model is None:
             return [[] for _ in texts]
         loop = asyncio.get_running_loop()
-        vectors = await loop.run_in_executor(None, lambda: self._model.encode(texts))
+        vectors = await loop.run_in_executor(None, lambda: model.encode(texts))
         return [v.tolist() if hasattr(v, "tolist") else list(v) for v in vectors]
 
     async def close(self) -> None:
