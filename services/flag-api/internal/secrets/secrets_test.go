@@ -1,6 +1,9 @@
 package secrets
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -60,6 +63,66 @@ func TestTokenHashDistinguishesInputs(t *testing.T) {
 	h := mustHasher(t, fx("pepper-a"))
 	if h.Hash("value-one") == h.Hash("value-two") {
 		t.Fatal("distinct inputs must hash differently")
+	}
+}
+
+// scopedReference recomputes HashScoped from the documented construction,
+// HMAC(HMAC(pepper, scope), value), so the tests do not just compare the
+// method with itself.
+func scopedReference(pepper, scope, value string) string {
+	subKey := hmac.New(sha256.New, []byte(pepper))
+	subKey.Write([]byte(scope))
+	mac := hmac.New(sha256.New, subKey.Sum(nil))
+	mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestHashScopedMatchesDocumentedConstruction(t *testing.T) {
+	pepper := fx("pepper-a")
+	h := mustHasher(t, pepper)
+	got := h.HashScoped("scope-one", sampleInput())
+
+	if want := scopedReference(pepper, "scope-one", sampleInput()); got != want {
+		t.Fatalf("HashScoped = %q, want %q", got, want)
+	}
+	if got != h.HashScoped("scope-one", sampleInput()) {
+		t.Fatal("HashScoped must be deterministic - bucket identity depends on it")
+	}
+	if len(got) != 64 { // HMAC-SHA256 hex
+		t.Errorf("HashScoped length = %d, want 64 hex chars", len(got))
+	}
+}
+
+func TestHashScopedIsNotTheStoredTokenHash(t *testing.T) {
+	h := mustHasher(t, fx("pepper-a"))
+	in := sampleInput()
+
+	if h.HashScoped("scope-one", in) == h.Hash(in) {
+		t.Fatal("a scoped hash must never equal service_tokens.token_hash for the same value")
+	}
+	if h.HashScoped("", in) == h.Hash(in) {
+		t.Fatal("even an empty scope must not collapse to the stored-hash construction")
+	}
+}
+
+func TestHashScopedDependsOnPepperScopeAndValue(t *testing.T) {
+	a, b := mustHasher(t, fx("pepper-a")), mustHasher(t, fx("pepper-b"))
+	base := a.HashScoped("scope-one", "value-one")
+
+	tests := []struct {
+		name string
+		got  string
+	}{
+		{"different pepper", b.HashScoped("scope-one", "value-one")},
+		{"different scope", a.HashScoped("scope-two", "value-one")},
+		{"different value", a.HashScoped("scope-one", "value-two")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got == base {
+				t.Errorf("%s must change the scoped hash", tc.name)
+			}
+		})
 	}
 }
 
