@@ -14,7 +14,12 @@ import pytest
 from scipy import stats  # type: ignore[import]
 
 from app.experiments.analyzer import ExperimentAnalyzer
-from app.experiments.models import ExperimentDefinition, MetricResult, VariantStats
+from app.experiments.models import (
+    ExperimentDefinition,
+    MetricResult,
+    StatMethod,
+    VariantStats,
+)
 from app.experiments.srm import SRMResult, srm_check
 from app.warehouse.connector import AggregatedMetric
 
@@ -29,7 +34,7 @@ def _extract_e_value(metric_name: str) -> float:
 
 
 def _make_experiment(
-    stat_method: str, min_sample_size: int = 100
+    stat_method: StatMethod, min_sample_size: int = 100
 ) -> ExperimentDefinition:
     return ExperimentDefinition(
         id="exp-1",

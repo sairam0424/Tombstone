@@ -372,3 +372,27 @@ def test_analyze_cuped_is_rejected_rather_than_fabricating_a_result(mock_get_con
     # none of that data (found by adversarial review: a prior version of
     # this fix checked stat_method="cuped" AFTER the query already ran).
     assert connector.call_count == 0
+
+
+@patch("app.experiments.routes.get_connector")
+def test_analyze_rejects_an_unknown_stat_method_before_querying_the_warehouse(
+    mock_get_connector,
+):
+    """
+    stat_method is typed as the StatMethod Literal on the request model, so a
+    value outside frequentist/bayesian/sequential/cuped is a 422 from request
+    validation. Before, any string was accepted: the warehouse was queried and
+    the analyzer fell through all of its branches, returning 200 with
+    recommendation CONTINUE and null p_value / probability_beats_control.
+    """
+    connector = CountingConnector(_CLOSE_METRICS)
+    mock_get_connector.return_value = connector
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/experiments/analyze", json=_request_body(stat_method="bogus")
+    )
+
+    assert response.status_code == 422
+    assert "stat_method" in response.text
+    assert connector.call_count == 0

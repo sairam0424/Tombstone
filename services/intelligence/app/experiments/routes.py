@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator
 from app.experiments.analyzer import ExperimentAnalyzer
 from app.experiments.collision import ExperimentSpec, detect_collisions
 from app.experiments.cuped import cuped_effect_size
-from app.experiments.models import ExperimentDefinition
+from app.experiments.models import ExperimentDefinition, StatMethod
 from app.experiments.srm import srm_check
 from app.warehouse.connector import get_connector
 
@@ -35,7 +35,7 @@ class RunExperimentRequest(BaseModel):
     # needs real per-user outcome/covariate pairs, which this warehouse-
     # aggregate endpoint cannot provide; see POST /cuped-adjust instead
     # (EXP-1 PR 3/3).
-    stat_method: str = "bayesian"
+    stat_method: StatMethod = "bayesian"
     min_sample_size: int = 100
     min_detectable_effect: float = 0.05
     # EXP-2: the intended fraction of traffic allocated to control, used
