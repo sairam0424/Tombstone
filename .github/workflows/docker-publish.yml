@@ -103,11 +103,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: true
 
+  # OFF unless the repository variable ENABLE_GITOPS_TAG_BUMP is 'true' (it is unset).
+  # Do not set it until the three problems below are fixed.
+  #
+  # 1. No cluster consumes gitops/ yet (OKE is not provisioned and no Flux
+  #    bootstrap has ever succeeded), so a bump has nothing to deploy to.
+  # 2. The final `git push` goes straight to main. The branch ruleset on main
+  #    requires a pull request and has no bypass actors, and Actions may not
+  #    open PRs (can_approve_pull_request_reviews is false), so the push is
+  #    rejected. Needs a PR-based flow or a dedicated token/app allowed to
+  #    bypass, and a repo-level decision on which.
+  # 3. helmrelease.yaml still pins v1.3.0 and carries Flux $imagepolicy markers,
+  #    so Flux image automation (gitops/infrastructure/controllers/image-automation)
+  #    is the intended tag-bump mechanism once a cluster exists. Decide whether
+  #    this job should exist at all alongside it.
+  #
+  # The tag format is already fixed below: images are published as X.Y.Z (the
+  # docker/metadata-action semver pattern strips the leading v), so the tag
+  # written into the HelmRelease must not carry one.
   update-gitops-tags:
     name: Update GitOps image tags
     runs-on: ubuntu-latest
     needs: [publish, publish-intelligence]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_GITOPS_TAG_BUMP == 'true'
     permissions:
       contents: write
     steps:
@@ -119,8 +137,9 @@ jobs:
       - name: Extract version tag
         id: tag
         run: |
-          # Safe: GITHUB_REF is a controlled GitHub variable, not attacker-supplied input
-          echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          # Safe: GITHUB_REF_NAME is a controlled GitHub variable, not attacker-supplied input.
+          # Strip the leading v: images are published as X.Y.Z, not vX.Y.Z.
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Update image tags in HelmRelease
         env:
