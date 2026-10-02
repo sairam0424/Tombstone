@@ -23,6 +23,7 @@ import (
 
 	v1 "github.com/tombstone/flag-api/internal/api/v1"
 	"github.com/tombstone/flag-api/internal/audit"
+	"github.com/tombstone/flag-api/internal/clientip"
 	"github.com/tombstone/flag-api/internal/docs"
 	"github.com/tombstone/flag-api/internal/health"
 	"github.com/tombstone/flag-api/internal/middleware"
@@ -98,6 +99,17 @@ func main() {
 		port = "8081"
 	}
 
+	// Which proxies' X-Forwarded-For is believed. Empty (the default) trusts
+	// none, so the client is always the TCP peer. An invalid list is fatal: a
+	// typo must not silently trust less, or more, than the operator meant.
+	proxyTrust, err := clientip.TrustFromEnv()
+	if err != nil {
+		logger.Fatal("invalid trusted proxy configuration", zap.Error(err))
+	}
+	logger.Info("client IP resolution",
+		zap.String("mode", proxyTrust.Mode()),
+		zap.Strings("trusted_proxy_cidrs", proxyTrust.CIDRs()))
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		logger.Fatal("open db", zap.Error(err))
@@ -154,7 +166,7 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher, logger)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware(rdb)
+	rateMw := middleware.NewRateLimitMiddleware(rdb, middleware.WithCredentialHasher(tokenHasher))
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)
@@ -200,7 +212,9 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
-	r.Use(chiMiddleware.RealIP)
+	// Before Logger (so access logs name the derived client) and before the
+	// rate limiter (which keys on it).
+	r.Use(proxyTrust.Middleware)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(httpMetrics)

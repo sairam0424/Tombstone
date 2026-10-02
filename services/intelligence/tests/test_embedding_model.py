@@ -97,6 +97,35 @@ async def test_bedrock_embedding_model_embed_multiple_texts():
     assert mock_client.invoke_model.call_count == 3
 
 
+@pytest.mark.asyncio
+async def test_bedrock_embed_failure_yields_no_vector_not_a_zero_vector(monkeypatch):
+    """A failed invoke_model must not become a vector pgvector would accept.
+
+    An all-zero vector was stored for the flag (and never retried, because the
+    backfill only selects embedding IS NULL) and, as a query vector, made every
+    cosine distance NaN. The failure must surface as [] -- the same "no
+    embedding" signal LocalEmbeddingModel returns -- and leave the other texts
+    in the call untouched.
+    """
+    import json
+    from io import BytesIO
+
+    from app.search.embedding_model_bedrock import BedrockEmbeddingModel
+
+    mock_client = MagicMock()
+    mock_client.invoke_model.side_effect = [
+        RuntimeError("ThrottlingException"),
+        {"body": BytesIO(json.dumps({"embedding": [0.1] * 1024}).encode())},
+    ]
+    model = BedrockEmbeddingModel("k", "s", "us-east-1")
+    monkeypatch.setattr(model, "_client", mock_client)  # bypass initialize(): no boto3 needed
+
+    result = await model.embed(["fails", "succeeds"])
+
+    assert result[0] == []
+    assert len(result[1]) == 1024
+
+
 def test_create_embedding_model_returns_bedrock():
     with patch("app.search.embedding_model_bedrock.BedrockEmbeddingModel") as MockBedrock:
         _model = create_embedding_model(

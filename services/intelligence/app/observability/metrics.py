@@ -19,7 +19,7 @@ which is the actual cross-service goal (one comparable dashboard).
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Awaitable, Callable
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -63,7 +63,7 @@ def _status_class(status_code: int) -> str:
 
 def build_red_metrics_dispatch(
     request_count: Counter, request_duration: Histogram
-) -> Callable[[Request, RequestResponseEndpoint], "Response"]:
+) -> Callable[[Request, RequestResponseEndpoint], Awaitable[Response]]:
     """Builds a BaseHTTPMiddleware-compatible dispatch function bound to the
     given Counter/Histogram — mirrors the Go services' HTTPMetrics(meter),
     which likewise takes the metric instruments as a parameter rather than

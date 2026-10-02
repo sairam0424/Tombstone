@@ -68,7 +68,9 @@ class BedrockEmbeddingModel:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """
-        Returns 1024-dim vectors for each text.
+        Returns 1024-dim vectors for each text, or [] for a text whose
+        invoke_model call failed (the same "no embedding" signal
+        LocalEmbeddingModel returns when its model is not loaded).
         Calls invoke_model once per text (Titan V2 embeds one text per call).
         Runs in executor to avoid blocking the event loop.
         """
@@ -98,7 +100,11 @@ class BedrockEmbeddingModel:
                 results.append(payload["embedding"])
             except Exception as exc:
                 logger.error("BedrockEmbeddingModel: invoke_model failed for text snippet %r: %s", text[:50], exc)
-                results.append([0.0] * _DIMENSIONS)  # zero vector on failure — won't break pgvector
+                # Never substitute a zero vector: pgvector accepts it, so a flag's
+                # failed embed would be stored and never retried (the backfill only
+                # selects embedding IS NULL), and as a query vector it makes every
+                # cosine distance NaN, which the search endpoint cannot serialise.
+                results.append([])
 
         return results
 

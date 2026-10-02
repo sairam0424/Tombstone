@@ -25,6 +25,7 @@ import (
 	apiv1 "github.com/tombstone/evaluator/internal/api/v1"
 	"github.com/tombstone/evaluator/internal/blast"
 	"github.com/tombstone/evaluator/internal/circuit"
+	"github.com/tombstone/evaluator/internal/clientip"
 	"github.com/tombstone/evaluator/internal/health"
 	"github.com/tombstone/evaluator/internal/middleware"
 	"github.com/tombstone/evaluator/internal/notify"
@@ -65,6 +66,17 @@ func main() {
 	if port == "" {
 		port = "8082"
 	}
+
+	// Which proxies' X-Forwarded-For is believed. Empty (the default) trusts
+	// none, so the client is always the TCP peer. An invalid list is fatal: a
+	// typo must not silently trust less, or more, than the operator meant.
+	proxyTrust, err := clientip.TrustFromEnv()
+	if err != nil {
+		logger.Fatal("invalid trusted proxy configuration", zap.Error(err))
+	}
+	logger.Info("client IP resolution",
+		zap.String("mode", proxyTrust.Mode()),
+		zap.Strings("trusted_proxy_cidrs", proxyTrust.CIDRs()))
 
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
@@ -193,6 +205,8 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.Recoverer)
+	// Before the rate limiter, which keys every bucket on the client IP.
+	r.Use(proxyTrust.Middleware)
 	r.Use(httpMetrics)
 	// Matches flag-api's own cmd/main.go CORS config exactly. Without this,
 	// every browser call this service ever receives is blocked before the

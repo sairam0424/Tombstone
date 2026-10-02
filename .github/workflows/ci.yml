@@ -305,7 +305,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        # pgvector image — schema.sql's embedding vector(768) column needs it.
+        # pgvector image — schema.sql's embedding vector(1024) column needs it.
         image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: tombstone

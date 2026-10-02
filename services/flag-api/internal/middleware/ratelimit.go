@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math"
@@ -11,6 +13,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/tombstone/flag-api/internal/clientip"
+	"github.com/tombstone/flag-api/internal/secrets"
 )
 
 const (
@@ -27,6 +32,12 @@ const (
 	// two credential classes never collide.
 	keyPrefixSDK = "ratelimit:sdk:"
 	keyPrefixIP  = "ratelimit:ip:"
+
+	// bucketKeyScope separates the digests this limiter derives from the
+	// pepper from every other use of it (see secrets.TokenHasher.HashScoped).
+	// Changing it resets every SDK bucket, which is harmless: buckets live for
+	// seconds.
+	bucketKeyScope = "flag-api/ratelimit/sdk-bucket/v1"
 )
 
 // bucketScriptSrc is a single atomic Lua script implementing a leaky-bucket
@@ -99,11 +110,37 @@ var bucketScript = redis.NewScript(bucketScriptSrc)
 // service via Redis, rather than held in per-process memory.
 type RateLimitMiddleware struct {
 	rdb *redis.Client
+	// credentialDigest maps a bearer credential to the identifier used in its
+	// bucket key. It never returns the credential itself.
+	credentialDigest func(cred string) string
+}
+
+// RateLimitOption configures a RateLimitMiddleware.
+type RateLimitOption func(*RateLimitMiddleware)
+
+// WithCredentialHasher keys SDK buckets with a pepper-keyed HMAC of the
+// credential instead of the default unkeyed SHA-256. Production wiring should
+// always pass it: operator-chosen tokens (the documented dev token,
+// SCIM_TOKEN) are guessable, and without the pepper a reader of Redis cannot
+// confirm a guess against a keyed digest. A nil hasher keeps the default.
+func WithCredentialHasher(h *secrets.TokenHasher) RateLimitOption {
+	return func(m *RateLimitMiddleware) {
+		if h == nil {
+			return
+		}
+		m.credentialDigest = func(cred string) string {
+			return h.HashScoped(bucketKeyScope, cred)
+		}
+	}
 }
 
 // NewRateLimitMiddleware constructs the middleware backed by rdb.
-func NewRateLimitMiddleware(rdb *redis.Client) *RateLimitMiddleware {
-	return &RateLimitMiddleware{rdb: rdb}
+func NewRateLimitMiddleware(rdb *redis.Client, opts ...RateLimitOption) *RateLimitMiddleware {
+	m := &RateLimitMiddleware{rdb: rdb, credentialDigest: unkeyedDigest}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Stop is a no-op kept for interface compatibility with callers that defer
@@ -143,7 +180,7 @@ func (m *RateLimitMiddleware) RateLimit(next http.Handler) http.Handler {
 			keyType    string
 		)
 		if cred := extractBearerToken(r); cred != "" {
-			bucketID = keyPrefixSDK + cred
+			bucketID = m.sdkBucketKey(cred)
 			ratePerMin = sdkRatePerMin
 			burst = sdkBurst
 			keyType = "token"
@@ -222,24 +259,40 @@ func extractBearerToken(r *http.Request) string {
 	return parts[1]
 }
 
-// extractIP returns the most-specific client IP.
-// Prefers X-Real-IP (set by RealIP middleware), then X-Forwarded-For first entry,
-// then RemoteAddr.
+// sdkBucketKey returns the Redis key of the token bucket for a bearer
+// credential: the SDK namespace prefix plus a fixed-size digest of the
+// credential.
+//
+// The raw credential must never be a Redis key name. This limiter runs before
+// authentication, so the value is attacker-supplied as often as it is real,
+// and key names are readable through KEYS/SCAN/MONITOR/SLOWLOG, keyspace
+// events, RDB/AOF files and replicas. The digest also bounds the key to a
+// fixed size however large a header the caller sends.
+//
+// How much the digest protects depends on how it is computed. Nothing in
+// flag-api enforces token entropy, and the documented dev token and
+// SCIM_TOKEN are human-readable, so a pepper-keyed digest
+// (WithCredentialHasher) is what stops a Redis reader confirming guesses. It
+// is deliberately derived under its own scope, not secrets.TokenHasher.Hash:
+// that value is service_tokens.token_hash, and copying it into Redis would
+// spread the stored hash to a second, less-protected datastore.
+func (m *RateLimitMiddleware) sdkBucketKey(cred string) string {
+	return keyPrefixSDK + m.credentialDigest(cred)
+}
+
+// unkeyedDigest is the hex SHA-256 of the credential, used when no hasher is
+// configured. It keeps the raw credential out of Redis and bounds the key
+// size, but it only resists guessing for high-entropy credentials: a weak
+// token can be recovered from its digest by anyone who can read the key.
+func unkeyedDigest(cred string) string {
+	digest := sha256.Sum256([]byte(cred))
+	return hex.EncodeToString(digest[:])
+}
+
+// extractIP returns the IP the per-IP bucket is keyed on: the client the
+// trusted-proxy middleware derived, or else the TCP peer. It never reads a
+// request header itself. This limiter runs before authentication, so a bucket
+// key taken from a header would let any caller pick (or rotate) its own bucket.
 func extractIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return ip
-	}
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// X-Forwarded-For: client, proxy1, proxy2 — take the leftmost
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	// Strip port from RemoteAddr ("1.2.3.4:5678" → "1.2.3.4")
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
-	}
-	return addr
+	return clientip.ClientIP(r)
 }

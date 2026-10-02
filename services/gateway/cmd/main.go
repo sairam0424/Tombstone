@@ -143,7 +143,6 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
-	r.Use(chiMiddleware.RealIP)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(httpMetrics)
 	r.Use(cors.Handler(cors.Options{

@@ -12,7 +12,7 @@
 | 005 | `005_scheduled_changes_v2.sql` | Scheduled flag change improvements |
 | 006 | _(inline in `../schema.sql`)_ | Flag prerequisites (GrowthBook ParentConditions pattern) |
 | 007 | _(inline in `../schema.sql`)_ | Multivariate flag variations |
-| 008 | _(inline in `../schema.sql`)_ | pgvector embeddings for semantic search |
+| 008 | _(inline in `../schema.sql`)_ | pgvector embeddings for semantic search (declared `vector(768)` by mistake — corrected to `vector(1024)` by 028) |
 | 009 | _(inline in `../schema.sql`)_ | Rekor transparency log integration |
 | 010 | `010_idempotency_keys.sql` | Idempotency-key support for flag-api mutation endpoints |
 | 011 | `011_scheduler_retry_columns.sql` | Scheduler retry/backoff columns (retry_count, max_retries, next_retry_at). Confirmed no collision with 010 above — both were developed concurrently from the same `develop` base and landed cleanly. |
@@ -25,6 +25,7 @@
 | 024 | `024_user_token_watermarks.sql` | SEC-5: adds `user_token_watermarks(user_email PK, valid_after)` — lets `validateJWT` reject a token issued before the subject's most recent forced-logout timestamp, closing the gap where SCIM deprovisioning revoked `user_roles` but left an already-issued JWT valid until natural expiry. |
 | 025-026 | _(see git log)_ | Audit log retention (`025_audit_log_retention.sql`), circuit-breaker role (`026_circuit_breaker_role.sql`) — this table fell behind again; not backfilled retroactively, same as 016-022 above. |
 | 027 | `027_targeting_rules_hardening.sql` | `targeting_rules` has existed since the baseline schema as pure scaffolding (no query file, no REST endpoint, no snapshot wiring) — adds `created_at` (mirroring sibling `flag_prerequisites`, migration 006) and an `idx_targeting_rules_flag_env(flag_id, environment)` index before that surface is built. Purely additive, no application code change to any EXISTING code path. |
+| 028 | `028_flags_embedding_1024.sql` | `flags.embedding` was declared `vector(768)`, but both embedding backends (local BAAI/bge-m3 and Bedrock Titan V2) return 1024-dimensional vectors, so pgvector rejected every embedding write and the dense arm of the hybrid search returned nothing — search was lexical-only everywhere. Retypes the column to `vector(1024)` (adding it if missing; any stray non-1024-dimensional vector is set to NULL) and replaces the baseline's ivfflat `idx_flags_embedding` with an HNSW index (pgvector 0.5.0 or newer; an ivfflat index built on the empty column has random lists and poor recall). **Takes `ACCESS EXCLUSIVE` on `flags`** and gives up after 5 s on a held lock (`lock_timeout`); a no-op on a database already in the target state. **`cmd/migrate -baseline` does not run it**, so a database adopted that way needs the file applied by hand. Upgrade procedure (apply, verify, restart the intelligence service): the CHANGELOG's `[2.0.3]` upgrade notes and this file's header. |
 
 ## Why 001 Is Skipped
 
@@ -64,9 +65,12 @@ backward compatibility — but always prefer setting `DB_URL_DIRECT` explicitly.
 `-baseline` records every version as applied **without running any SQL** — use
 it exactly once when adopting the runner on a database that was already built by
 hand (via the manual steps below), so the ledger reflects reality and the runner
-never tries to re-apply a non-idempotent statement. flag-api's own startup does
-**not** auto-migrate: running migrations stays an explicit, auditable step (CI,
-docker-compose init, or ops).
+never tries to re-apply a non-idempotent statement. Because it runs no SQL, it
+also skips migrations that change an existing object: baselining a database built
+before migration 028 marks 028 applied while `flags.embedding` is still
+`vector(768)` — apply `migrations/028_flags_embedding_1024.sql` by hand afterwards
+(see its row above). flag-api's own startup does **not** auto-migrate: running
+migrations stays an explicit, auditable step (CI, docker-compose init, or ops).
 
 ### Manual (reference / fallback)
 

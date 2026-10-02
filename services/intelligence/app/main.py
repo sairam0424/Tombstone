@@ -7,6 +7,7 @@ import httpx
 from collections import deque, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -172,13 +173,15 @@ async def lifespan(app: FastAPI):
     #   result String, reason String, latency_ms Float64, ts DateTime
     # ) ENGINE = MergeTree() ORDER BY (flag_key, ts);
     ch_host = os.environ.get("CLICKHOUSE_HOST", "")
-    redis_client = getattr(app.state, "redis", None)
+    ch_redis_client = getattr(app.state, "redis", None)
     if ch_host:
-        app.state.clickhouse = ClickHouseWriter(host=ch_host, redis_client=redis_client)
+        app.state.clickhouse = ClickHouseWriter(
+            host=ch_host, redis_client=ch_redis_client
+        )
         await app.state.clickhouse.create_tables()
     else:
         app.state.clickhouse = ClickHouseWriter(
-            host="localhost", redis_client=redis_client
+            host="localhost", redis_client=ch_redis_client
         )  # unavailable but won't crash
     await app.state.clickhouse.start()
 
@@ -632,7 +635,7 @@ async def get_critical_flags(
         in_weights[target].append(w)
 
     all_flags = set(in_weights.keys()) | set(out_weights.keys())
-    flag_data = []
+    flag_data: list[dict[str, Any]] = []
 
     for flag_key in all_flags:
         in_w = in_weights.get(flag_key, [])

@@ -3,6 +3,7 @@ import sys
 import os
 import threading
 import time
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -23,19 +24,19 @@ def _client() -> TombstoneClient:
     return client
 
 
-def _install_refetch_counter(client: TombstoneClient) -> dict:
+def _install_refetch_counter(client: TombstoneClient) -> dict[str, Any]:
     """Stub the snapshot refetch so no HTTP happens; count invocations.
 
     Mirrors how the existing tests exercise the client without a network by
     driving its methods directly (see test_evaluation.test_snapshot_*).
     """
-    state = {"count": 0, "fired": threading.Event()}
+    state: dict[str, Any] = {"count": 0, "fired": threading.Event()}
 
     def _fake_fetch() -> None:
         state["count"] += 1
         state["fired"].set()
 
-    client._fetch_snapshot = _fake_fetch
+    setattr(client, "_fetch_snapshot", _fake_fetch)
     return state
 
 
