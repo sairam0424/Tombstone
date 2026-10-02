@@ -7,10 +7,11 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/tombstone/evaluator/internal/clientip"
 )
 
 const (
@@ -204,20 +205,10 @@ func (m *RateLimitMiddleware) checkLimit(ctx context.Context, bucketID string, c
 	return allowed, retryAfter, nil
 }
 
-// extractIP returns the most-specific client IP from the request.
+// extractIP returns the IP every bucket is keyed on: the client the
+// trusted-proxy middleware derived, or else the TCP peer. It never reads a
+// request header itself. These limits are keyed on nothing else, so a key taken
+// from a header would let any caller rotate it to evade them entirely.
 func extractIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return ip
-	}
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
-	}
-	return addr
+	return clientip.ClientIP(r)
 }
