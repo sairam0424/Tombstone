@@ -8,6 +8,11 @@ from app.search.embedding_model import EmbeddingModel
 logger = logging.getLogger(__name__)
 
 
+async def _no_results() -> list[dict]:
+    """Stand-in for the dense arm when no embedding model is configured."""
+    return []
+
+
 class FlagSearchRetriever:
     """
     Hybrid flag search: dense vector retrieval (BGE-M3) + full-text lexical search
@@ -69,7 +74,7 @@ class FlagSearchRetriever:
         dense_task = (
             self._vector_search(pool, query, limit * 2)
             if self._embedding_model
-            else asyncio.coroutine(lambda: [])()
+            else _no_results()
         )
         lexical_task = self._fulltext_search(pool, query, limit * 2)
         fallback_task = self._ilike_search(pool, query, limit * 2)
@@ -91,8 +96,11 @@ class FlagSearchRetriever:
         self, pool: asyncpg.Pool, query: str, limit: int
     ) -> list[dict]:
         """Dense retrieval via pgvector cosine similarity. Falls back to [] on any error."""
+        model = self._embedding_model
+        if model is None:
+            return []
         try:
-            vecs = await self._embedding_model.embed([query])
+            vecs = await model.embed([query])
             embedding = vecs[0] if vecs and vecs[0] else None
             if embedding is None:
                 return []
