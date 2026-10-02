@@ -36,7 +36,9 @@ jobs:
           - name: marketplace
             context: services/marketplace
             port: 8086
-          - name: tombstone-operator
+          # Published as ghcr.io/<owner>/tombstone-operator (IMAGE_PREFIX already ends in
+          # "tombstone"), which is the repository infra/helm/tombstone-operator pulls.
+          - name: operator
             context: services/tombstone-operator
             port: 8088
 
