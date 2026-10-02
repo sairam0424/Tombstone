@@ -154,7 +154,7 @@ func main() {
 
 	authMw := middleware.NewAuthMiddleware(db, jwtSecret, tokenHasher, logger)
 	rbacMw := middleware.NewRBACMiddleware(db, logger)
-	rateMw := middleware.NewRateLimitMiddleware(rdb)
+	rateMw := middleware.NewRateLimitMiddleware(rdb, middleware.WithCredentialHasher(tokenHasher))
 	defer rateMw.Stop()
 	idempotencyMw := middleware.NewIdempotencyMiddleware(db, logger)
 	loadShedMw := middleware.NewLoadShedMiddleware(middleware.DefaultLoadShedConfig(), logger)

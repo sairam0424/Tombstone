@@ -61,6 +61,24 @@ func (h *TokenHasher) Hash(token string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// HashScoped returns a hex-encoded HMAC-SHA256 of value under a sub-key derived
+// from the pepper and scope: HMAC(HMAC(pepper, scope), value).
+//
+// It is for callers that need a stable identifier for a presented credential
+// somewhere other than the credentials table, such as a rate-limit bucket name
+// in Redis. Two properties matter there. The result depends on the pepper, so
+// a reader of that other store cannot confirm guesses at a weak,
+// operator-chosen token without also holding the pepper. And the scope-derived
+// sub-key means the result differs from Hash(value), so it is not a copy of
+// the stored service_tokens.token_hash. Use a distinct scope per purpose.
+func (h *TokenHasher) HashScoped(scope, value string) string {
+	subKey := hmac.New(sha256.New, h.pepper)
+	subKey.Write([]byte(scope))
+	mac := hmac.New(sha256.New, subKey.Sum(nil))
+	mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // Equal compares a presented token against a stored hash in constant time,
 // so a timing side channel cannot be used to discover a valid hash byte by byte.
 func (h *TokenHasher) Equal(token, storedHash string) bool {
