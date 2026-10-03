@@ -21,11 +21,11 @@ dependencies = [
 [project.optional-dependencies]
 llm = ["anthropic>=0.55.0"]
 snowflake = ["snowflake-connector-python>=4.7.1"]
-bigquery = ["google-cloud-bigquery[pandas]>=3.0"]
+bigquery = ["google-cloud-bigquery[pandas]>=3.45.2"]
 databricks = ["databricks-sql-connector>=3.0"]
 all-warehouses = [
     "snowflake-connector-python>=4.7.1",
-    "google-cloud-bigquery[pandas]>=3.0",
+    "google-cloud-bigquery[pandas]>=3.45.2",
     "databricks-sql-connector>=3.0",
 ]
 clickhouse = ["clickhouse-driver>=0.2.9"]

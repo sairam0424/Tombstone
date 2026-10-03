@@ -665,7 +665,7 @@ wheels = [
 
 [[package]]
 name = "google-cloud-bigquery"
-version = "3.42.1"
+version = "3.45.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-api-core", extra = ["grpc"] },
@@ -676,9 +676,9 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/15/a2/be1cffbb1a9894ecf394ab0096b113ae9e4f73686595d906a9f3082b07c2/google_cloud_bigquery-3.42.1.tar.gz", hash = "sha256:3c6878f424fc2b21f0bb414ca7262abd008465575a7b7c44c552105278a18914", size = 515411, upload-time = "2026-06-22T23:21:05.884Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/d2/8a1d3b94ebab86003661b5264882f2f2d9596b33c77a5c994f3761f4e0ef/google_cloud_bigquery-3.45.2.tar.gz", hash = "sha256:9342158e1a413c66b44b676a42c79cb8d1750da3971b957b267c9327749b4723", size = 529264, upload-time = "2026-09-17T20:30:15.507Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/1e/8b098aeb69ef87de5195d076ce6d82002c3ebf1920373d386ca7b6e63cfa/google_cloud_bigquery-3.42.1-py3-none-any.whl", hash = "sha256:159143c1b7248858f35549c09efea5d031c2883145623419ea7c505a50c0899a", size = 263814, upload-time = "2026-06-22T23:18:42.313Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/64/fc977715bb54d78e4863d705eb6013241ade24247f1373a2be20e05cf6e3/google_cloud_bigquery-3.45.2-py3-none-any.whl", hash = "sha256:6920be2d7199810e2472be58204d7787dcf3cf677a21e682d5c636bae1b082ea", size = 267839, upload-time = "2026-09-17T20:29:41.9Z" },
 ]
 
 [package.optional-dependencies]
@@ -2473,8 +2473,8 @@ requires-dist = [
     { name = "databricks-sql-connector", marker = "extra == 'all-warehouses'", specifier = ">=3.0" },
     { name = "databricks-sql-connector", marker = "extra == 'databricks'", specifier = ">=3.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "google-cloud-bigquery", extras = ["pandas"], marker = "extra == 'all-warehouses'", specifier = ">=3.0" },
-    { name = "google-cloud-bigquery", extras = ["pandas"], marker = "extra == 'bigquery'", specifier = ">=3.0" },
+    { name = "google-cloud-bigquery", extras = ["pandas"], marker = "extra == 'all-warehouses'", specifier = ">=3.45.2" },
+    { name = "google-cloud-bigquery", extras = ["pandas"], marker = "extra == 'bigquery'", specifier = ">=3.45.2" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "pgvector", specifier = ">=0.3.0" },
