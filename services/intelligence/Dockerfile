@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 WORKDIR /app
 
 # INFRA-1: HF_HOME set explicitly and BEFORE the model-bake step below, so
