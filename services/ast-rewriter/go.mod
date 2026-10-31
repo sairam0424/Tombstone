@@ -3,7 +3,7 @@ module github.com/tombstone/ast-rewriter
 go 1.25.0
 
 require (
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.22.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
