@@ -19,6 +19,7 @@ import (
 // Environment, all optional:
 //
 //	SHIM_ARGV_TO     write the argv the CLI received (JSON) to this path
+//	SHIM_CWD_TO      write the working directory the CLI ran in to this path
 //	SHIM_COPY_TO     copy the transform file to this path before loading it
 //	SHIM_SCENARIO    JSON array of IfStatement nodes the stub AST contains
 //	SHIM_RESULT_TO   write every replaceWith() argument (JSON) to this path
@@ -27,6 +28,7 @@ const shimSource = `#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
 if (process.env.SHIM_ARGV_TO) { fs.writeFileSync(process.env.SHIM_ARGV_TO, JSON.stringify(args)); }
+if (process.env.SHIM_CWD_TO) { fs.writeFileSync(process.env.SHIM_CWD_TO, process.cwd()); }
 const at = args.indexOf('--transform');
 if (at < 0 || !args[at + 1]) { console.error('shim: missing --transform'); process.exit(2); }
 const transformPath = args[at + 1];

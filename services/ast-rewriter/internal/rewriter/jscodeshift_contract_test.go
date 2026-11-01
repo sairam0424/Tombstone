@@ -239,17 +239,37 @@ func TestRewriteWithJscodeshift_CancelledContextStopsTheRun(t *testing.T) {
 
 // ---- Go side: process environment and command line -----------------------------
 
-// TestRewriteWithJscodeshift_RunEnvironmentAndCleanup checks the temp artifacts
-// that now carry request data: a private directory holding exactly the two
-// files, the caller's working directory for the child, and nothing left behind.
-func TestRewriteWithJscodeshift_RunEnvironmentAndCleanup(t *testing.T) {
-	scratch, repo, out := t.TempDir(), t.TempDir(), t.TempDir()
+// TestRewriteWithJscodeshift_ChildRunsInCallersWorkingDirectory pins that the
+// child inherits the caller's working directory and is not moved into the temp
+// directory that holds the transform.
+func TestRewriteWithJscodeshift_ChildRunsInCallersWorkingDirectory(t *testing.T) {
+	installShim(t)
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	cwdPath := filepath.Join(t.TempDir(), "cwd")
+	t.Setenv("SHIM_CWD_TO", cwdPath)
+	if _, err := RewriteWithJscodeshift(context.Background(), t.TempDir(), "k", "true", true); err != nil {
+		t.Fatalf("RewriteWithJscodeshift: %v", err)
+	}
+	raw, err := os.ReadFile(cwdPath)
+	if err != nil {
+		t.Fatalf("the shim did not record its working directory: %v", err)
+	}
+	got, _ := filepath.EvalSymlinks(strings.TrimSpace(string(raw)))
+	want, _ := filepath.EvalSymlinks(wd)
+	if got != want {
+		t.Errorf("tool ran in %s, want the caller's working directory %s", got, want)
+	}
+}
+
+// TestRewriteWithJscodeshift_RunEnvironmentAndCleanup checks the temp artifacts
+// that now carry request data: a private directory holding exactly the two
+// files, and nothing left behind.
+func TestRewriteWithJscodeshift_RunEnvironmentAndCleanup(t *testing.T) {
+	scratch, repo, out := t.TempDir(), t.TempDir(), t.TempDir()
 	installExecutable(t, "#!/bin/sh\n"+
-		`pwd > "`+out+`/cwd"`+"\n"+
 		`ls -ld "$(dirname "$2")" > "`+out+`/mode"`+"\n"+
 		`ls "$(dirname "$2")" > "`+out+`/files"`+"\n")
 	t.Setenv("TMPDIR", scratch) // after every t.TempDir() above
@@ -263,11 +283,6 @@ func TestRewriteWithJscodeshift_RunEnvironmentAndCleanup(t *testing.T) {
 			t.Fatalf("the stand-in did not record %s: %v", name, err)
 		}
 		return strings.TrimSpace(string(b))
-	}
-	gotCwd, _ := filepath.EvalSymlinks(read("cwd"))
-	wantCwd, _ := filepath.EvalSymlinks(wd)
-	if gotCwd != wantCwd {
-		t.Errorf("tool ran in %s, want the caller's working directory %s", gotCwd, wantCwd)
 	}
 	if mode := read("mode"); !strings.HasPrefix(mode, "drwx------") {
 		t.Errorf("transform dir is not private (0700): %s", mode)
