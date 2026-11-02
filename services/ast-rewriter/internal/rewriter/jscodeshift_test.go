@@ -10,51 +10,6 @@ import (
 	"testing"
 )
 
-// shimSource stands in for the jscodeshift CLI in hermetic tests. Like the real
-// tool it require()s the transform module, so any top-level code in the
-// generated file executes at load time, and then invokes the exported function
-// once against a minimal stub of the jscodeshift API. SHIM_COPY_TO, when set,
-// receives a copy of the transform file before it is loaded.
-const shimSource = `#!/usr/bin/env node
-const fs = require('fs');
-const args = process.argv.slice(2);
-const at = args.indexOf('--transform');
-if (at < 0 || !args[at + 1]) { console.error('shim: missing --transform'); process.exit(2); }
-const transformPath = args[at + 1];
-if (process.env.SHIM_COPY_TO) { fs.copyFileSync(transformPath, process.env.SHIM_COPY_TO); }
-const transform = require(transformPath);
-const j = Object.assign(
-  function () {
-    return {
-      find: function () { return { forEach: function () {} }; },
-      toSource: function () { return ''; },
-    };
-  },
-  {
-    IfStatement: 'IfStatement',
-    blockStatement: function (body) { return { type: 'BlockStatement', body: body }; },
-  }
-);
-transform({ path: 'x.ts', source: '' }, { jscodeshift: j }, {});
-`
-
-// installShim puts the Node-based jscodeshift shim first on PATH for one test.
-func installShim(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node is not on PATH: the hermetic jscodeshift shim needs it")
-	}
-	binDir := t.TempDir()
-	shimPath := filepath.Join(binDir, "jscodeshift")
-	if err := os.WriteFile(shimPath, []byte(shimSource), 0o600); err != nil {
-		t.Fatalf("writing jscodeshift shim: %v", err)
-	}
-	if err := os.Chmod(shimPath, 0o700); err != nil { // the shim must be executable
-		t.Fatalf("making jscodeshift shim executable: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // useRealJscodeshift makes the real jscodeshift CLI resolvable for one test, or
 // skips with instructions when it is not installed.
 func useRealJscodeshift(t *testing.T) {
@@ -113,75 +68,78 @@ func assertNotExecuted(t *testing.T, sentinel string) {
 	}
 }
 
-// TestRewriteWithJscodeshift_HostileInputsNeverExecute is the regression test
-// for the code-injection finding: no flag key or winning variant may ever run
-// as code, whichever way it tries to break out of the generated transform.
-func TestRewriteWithJscodeshift_HostileInputsNeverExecute(t *testing.T) {
-	installShim(t)
-	for _, tc := range hostileCases {
-		t.Run(tc.name, func(t *testing.T) {
-			sentinel := filepath.Join(t.TempDir(), "pwned")
-			key, variant := tc.build(payloadJS(t, sentinel))
+// controlKeys are flag keys that Go's %q escapes into sequences JSON does not
+// accept (\a, \x00, \x7f, \U000e0001). They guard against ever serialising the
+// parameters with %q instead of encoding/json.
+var controlKeys = []string{"x\u0007y", "x\x00y", "x\x7fy", "x\U000e0001y"}
 
-			if _, err := RewriteWithJscodeshift(context.Background(), t.TempDir(), key, variant, true); err != nil {
-				t.Fatalf("RewriteWithJscodeshift returned an error: %v", err)
-			}
-			assertNotExecuted(t, sentinel)
-		})
+// TestWriteTransform_SourceIsConstant needs no Node: whatever the caller
+// supplies, the transform file written to disk is exactly the compile-time
+// constant, so request data cannot be part of it.
+func TestWriteTransform_SourceIsConstant(t *testing.T) {
+	inputs := []struct{ key, variant string }{
+		{"new-checkout", "true"},
+		{"other-flag", "false"},
+		{"x */ evil() /*", "on */ evil() /*"},
+		{`x"; evil(); var y="`, "blue"},
+		{"x\nevil()\n//", "true"},
+		{controlKeys[0], "enabled"},
+	}
+	for _, in := range inputs {
+		path, err := writeTransform(t.TempDir(), in.key, in.variant)
+		if err != nil {
+			t.Fatalf("writeTransform(%q, %q): %v", in.key, in.variant, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading transform: %v", err)
+		}
+		if string(got) != transformSource {
+			t.Errorf("transform for key %q variant %q differs from the constant source", in.key, in.variant)
+		}
 	}
 }
 
-// TestRewriteWithJscodeshift_TransformSourceIgnoresInputs pins the property that
-// makes the fix hold by construction: the generated transform program is the
-// same bytes whatever the flag key and winning variant are, so no caller data
-// can ever reach executable code.
-func TestRewriteWithJscodeshift_TransformSourceIgnoresInputs(t *testing.T) {
-	installShim(t)
-	copyDir := t.TempDir()
-
-	generate := func(name, key, variant string) string {
-		t.Helper()
-		dst := filepath.Join(copyDir, name)
-		t.Setenv("SHIM_COPY_TO", dst)
-		if _, err := RewriteWithJscodeshift(context.Background(), t.TempDir(), key, variant, true); err != nil {
-			t.Fatalf("%s: RewriteWithJscodeshift returned an error: %v", name, err)
+// TestTransformParams pins how caller values map onto the JSON parameters, and
+// that hostile strings survive the JSON round trip byte for byte (they are data).
+func TestTransformParams(t *testing.T) {
+	branches := []struct {
+		variant string
+		want    int
+	}{
+		{"true", 0}, {"TRUE", 0}, {"on", 0}, {"ON", 0}, {"enabled", 0}, {"Enabled", 0},
+		{"false", 1}, {"off", 1}, {"disabled", 1}, {"blue", 1}, {"", 1},
+		{"yes", 1}, {"1", 1}, {"y", 1}, {"t", 1}, // only true, on and enabled keep the if branch
+	}
+	for _, tc := range branches {
+		if got := newTransformParams("k", tc.variant).BranchIndex; got != tc.want {
+			t.Errorf("variant %q: branchIndex = %d, want %d", tc.variant, got, tc.want)
 		}
-		body, err := os.ReadFile(dst)
+	}
+
+	// Keys must reach the transform verbatim: no case folding, no trimming.
+	verbatim := []string{"MixedCase", "UPPER", "  padded  ", "\tTabbed\n"}
+	hostile := append([]string{`x */ evil() /*`, `x"; evil(); var y="`, "x\nevil()\n//", "x`;evil()//", "x evil()", `we"ird`, "flag-é-ü"}, verbatim...)
+	for _, key := range append(hostile, controlKeys...) {
+		dir := t.TempDir()
+		if _, err := writeTransform(dir, key, "true"); err != nil {
+			t.Fatalf("writeTransform(%q): %v", key, err)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, paramsFileName))
 		if err != nil {
-			t.Fatalf("%s: shim did not capture the transform: %v", name, err)
+			t.Fatalf("reading params for %q: %v", key, err)
 		}
-		return string(body)
-	}
-
-	enabled := generate("enabled", "new-checkout", "true")
-	disabled := generate("disabled", "other-flag", "false")
-	hostile := generate("hostile", `x */ evil() /*`, `on */ evil() /*`)
-
-	if enabled != disabled {
-		t.Errorf("transform source depends on the flag key or variant (enabled vs disabled differ)")
-	}
-	if enabled != hostile {
-		t.Errorf("transform source depends on the flag key or variant (benign vs hostile differ)")
-	}
-	if strings.Contains(hostile, "evil()") {
-		t.Errorf("hostile input was embedded in the generated transform")
+		var got transformParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("params for %q are not valid JSON: %v", key, err)
+		}
+		if got.FlagKey != key {
+			t.Errorf("flag key did not survive the round trip: got %q, want %q", got.FlagKey, key)
+		}
 	}
 }
 
 // ---- real jscodeshift --------------------------------------------------------
-
-func ifElseSource(t *testing.T, flagKey string) string {
-	t.Helper()
-	literal, err := json.Marshal(flagKey) // a double-quoted JS string literal
-	if err != nil {
-		t.Fatalf("quoting flag key: %v", err)
-	}
-	return "if (flagClient.evaluate(" + string(literal) + ", ctx)) {\n" +
-		"  enabledPath();\n" +
-		"} else {\n" +
-		"  disabledPath();\n" +
-		"}\n"
-}
 
 // runRealTransform applies the generated transform to one file with the real
 // jscodeshift CLI, selecting the tsx parser explicitly. The transform matches
@@ -201,77 +159,62 @@ func runRealTransform(t *testing.T, file, flagKey, variant string) {
 	}
 }
 
-// TestTransformParams pins how caller values map onto the JSON parameters, and
-// that hostile strings survive the JSON round trip byte for byte (they are data).
-func TestTransformParams(t *testing.T) {
-	branches := []struct {
-		variant string
-		want    int
-	}{
-		{"true", 0}, {"TRUE", 0}, {"on", 0}, {"ON", 0}, {"enabled", 0}, {"Enabled", 0},
-		{"false", 1}, {"off", 1}, {"disabled", 1}, {"blue", 1}, {"", 1},
-	}
-	for _, tc := range branches {
-		if got := newTransformParams("k", tc.variant).BranchIndex; got != tc.want {
-			t.Errorf("variant %q: branchIndex = %d, want %d", tc.variant, got, tc.want)
-		}
-	}
-
-	hostile := []string{`x */ evil() /*`, `x"; evil(); var y="`, "x\nevil()\n//", "x`;evil()//", "x evil()", `we"ird`, "flag-é-ü"}
-	for _, key := range hostile {
-		dir := t.TempDir()
-		if _, err := writeTransform(dir, key, "true"); err != nil {
-			t.Fatalf("writeTransform(%q): %v", key, err)
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, paramsFileName))
-		if err != nil {
-			t.Fatalf("reading params for %q: %v", key, err)
-		}
-		var got transformParams
-		if err := json.Unmarshal(raw, &got); err != nil {
-			t.Fatalf("params for %q are not valid JSON: %v", key, err)
-		}
-		if got.FlagKey != key {
-			t.Errorf("flag key did not survive the round trip: got %q, want %q", got.FlagKey, key)
-		}
-	}
-}
-
-// TestTransform_RealToolRewritesBranches proves legitimate behaviour: the
-// matching flag collapses to the winning branch, and everything else is left
-// alone, including keys with unusual characters.
+// TestTransform_RealToolRewritesBranches proves legitimate behaviour end to end:
+// the matching flag collapses to the winning branch and everything else is left
+// alone, for every supported call shape and for keys with unusual characters.
 func TestTransform_RealToolRewritesBranches(t *testing.T) {
 	useRealJscodeshift(t)
 
+	literal := func(s string) string {
+		b, err := json.Marshal(s) // a double-quoted JS string literal
+		if err != nil {
+			t.Fatalf("quoting %q: %v", s, err)
+		}
+		return string(b)
+	}
+	ifElse := func(call string) string {
+		return "if (" + call + ") {\n  enabledPath();\n} else {\n  disabledPath();\n}\n"
+	}
+	member := func(key string) string { return "flagClient.evaluate(" + literal(key) + ", ctx)" }
+
 	tests := []struct {
-		name       string
-		sourceFlag string // flag key present in the source file
-		flagKey    string // flag key passed to the rewriter
-		variant    string
-		want       []string
-		absent     []string
+		name    string
+		source  string
+		flagKey string
+		variant string
+		want    []string
+		absent  []string
 	}{
-		{"enabled variant keeps the if branch", "new-checkout", "new-checkout", "true",
+		{"enabled variant keeps the if branch", ifElse(member("new-checkout")), "new-checkout", "true",
 			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
-		{"on variant keeps the if branch", "new-checkout", "new-checkout", "ON",
+		{"on variant keeps the if branch", ifElse(member("new-checkout")), "new-checkout", "ON",
 			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
-		{"disabled variant keeps the else branch", "new-checkout", "new-checkout", "false",
+		{"disabled variant keeps the else branch", ifElse(member("new-checkout")), "new-checkout", "false",
 			[]string{"disabledPath()"}, []string{"enabledPath()", "evaluate("}},
-		{"a different flag is left untouched", "new-checkout", "other-flag", "true",
+		{"a different flag is left untouched", ifElse(member("new-checkout")), "other-flag", "true",
 			[]string{"evaluate(", "enabledPath()", "disabledPath()"}, nil},
-		{"namespaced key with punctuation matches", "team:feat.v2_beta-1", "team:feat.v2_beta-1", "true",
+		{"bare evaluate call matches", ifElse("evaluate(" + literal("new-checkout") + ")"), "new-checkout", "true",
 			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
-		{"key containing a double quote matches", `we"ird`, `we"ird`, "true",
+		{"else-less if with a disabled variant vanishes", "if (" + member("k") + ") {\n  onlyIf();\n}\nafter();\n", "k", "false",
+			[]string{"after()"}, []string{"onlyIf()", "evaluate("}},
+		{"non-block branch is inlined", "if (c.evaluate(" + literal("k") + ")) a(); else b();\n", "k", "true",
+			[]string{"a();"}, []string{"b();", "evaluate("}},
+		{"namespaced key with punctuation matches", ifElse(member("team:feat.v2_beta-1")), "team:feat.v2_beta-1", "true",
 			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
-		{"non-ASCII key matches", "flag-é-ü", "flag-é-ü", "false",
+		{"key containing a double quote matches", ifElse(member(`we"ird`)), `we"ird`, "true",
+			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
+		{"non-ASCII key matches", ifElse(member("flag-é-ü")), "flag-é-ü", "false",
 			[]string{"disabledPath()"}, []string{"enabledPath()", "evaluate("}},
+		{"key with a BEL control character matches", ifElse(member(controlKeys[0])), controlKeys[0], "true",
+			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
+		{"key with a non-printable astral rune matches", ifElse(member(controlKeys[3])), controlKeys[3], "true",
+			[]string{"enabledPath()"}, []string{"disabledPath()", "evaluate("}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := t.TempDir()
-			file := filepath.Join(repo, "a.ts")
-			if err := os.WriteFile(file, []byte(ifElseSource(t, tc.sourceFlag)), 0o600); err != nil {
+			file := filepath.Join(t.TempDir(), "a.ts")
+			if err := os.WriteFile(file, []byte(tc.source), 0o600); err != nil {
 				t.Fatalf("writing fixture: %v", err)
 			}
 
@@ -297,20 +240,28 @@ func TestTransform_RealToolRewritesBranches(t *testing.T) {
 
 // TestRewriteWithJscodeshift_RealToolHostileInputsNeverExecute repeats the
 // injection regression against the real CLI, which loads the transform inside a
-// worker only when there is at least one file to process.
+// worker only when there is at least one file to process. "0 errors" in the
+// tool's own report is the positive control that the worker really loaded the
+// transform and processed the file, so a timeout or crash cannot pass this test.
 func TestRewriteWithJscodeshift_RealToolHostileInputsNeverExecute(t *testing.T) {
 	useRealJscodeshift(t)
+	requirePayloadFires(t)
 	for _, tc := range hostileCases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := t.TempDir()
-			if err := os.WriteFile(filepath.Join(repo, "a.ts"), []byte(ifElseSource(t, "ok-flag")), 0o600); err != nil {
+			fixture := "if (flagClient.evaluate(\"ok-flag\", ctx)) {\n  enabledPath();\n} else {\n  disabledPath();\n}\n"
+			if err := os.WriteFile(filepath.Join(repo, "a.ts"), []byte(fixture), 0o600); err != nil {
 				t.Fatalf("writing fixture: %v", err)
 			}
 			sentinel := filepath.Join(t.TempDir(), "pwned")
 			key, variant := tc.build(payloadJS(t, sentinel))
 
-			if _, err := RewriteWithJscodeshift(context.Background(), repo, key, variant, true); err != nil {
+			res, err := RewriteWithJscodeshift(context.Background(), repo, key, variant, true)
+			if err != nil {
 				t.Fatalf("RewriteWithJscodeshift returned an error: %v", err)
+			}
+			if !res.TransformApplied || !strings.Contains(res.RawOutput, "0 errors") {
+				t.Fatalf("jscodeshift did not load the transform and process the file cleanly:\n%s", res.RawOutput)
 			}
 			assertNotExecuted(t, sentinel)
 		})
