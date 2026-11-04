@@ -1,5 +1,5 @@
 # ---- build stage ----
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -o /ast-rewriter ./cmd/main.go
 
 # ---- runtime stage ----
-FROM alpine:3.20
+FROM alpine:3.24
 LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
       org.opencontainers.image.description="Tombstone ast-rewriter service" \
       org.opencontainers.image.licenses="MIT"
