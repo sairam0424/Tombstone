@@ -16,6 +16,7 @@ import (
 
 	"github.com/tombstone/flag-api/internal/audit"
 	"github.com/tombstone/flag-api/internal/db/sqlcgen"
+	"github.com/tombstone/flag-api/internal/middleware"
 	"github.com/tombstone/flag-api/internal/secrets"
 )
 
@@ -173,16 +174,42 @@ func NewBreakGlassHandler(db *sql.DB, rdb *redis.Client, logger *zap.Logger, has
 	return &BreakGlassHandler{db: db, rdb: rdb, logger: logger, hasher: hasher, audit: auditW}
 }
 
+const (
+	// defaultBreakGlassExpiryHours is the lifetime of a token whose request
+	// omits expires_in_hours or sends a non-positive value.
+	defaultBreakGlassExpiryHours = 4
+	// maxBreakGlassExpiryHours is the longest lifetime a token can be minted
+	// with. Break-glass access lasts as long as one incident; before this
+	// bound a single request could mint a credential that outlived it by
+	// years (and a large enough value overflowed time.Duration into an
+	// arbitrary expiry). The dashboard's input already stops at this value.
+	maxBreakGlassExpiryHours = 24
+
+	// breakGlassTokenDeniedEvent is the audit event for a refused mint.
+	breakGlassTokenDeniedEvent = "break_glass_token_denied"
+	// msgBreakGlassHumanOnly is the stable refusal text clients can rely on.
+	msgBreakGlassHumanOnly = "break-glass tokens can only be created by a human user, not a service token"
+)
+
 type CreateBreakGlassTokenRequest struct {
 	Scope       string `json:"scope"` // "all-flags" | "payment-flags" | "auth-flags"
 	CreatedBy   string `json:"created_by"`
-	ExpiresInH  int    `json:"expires_in_hours"` // default 4
+	ExpiresInH  int    `json:"expires_in_hours"` // default 4, at most 24
 	IncidentRef string `json:"incident_ref"`
 }
 
 // CreateToken handles POST /api/v1/break-glass/tokens
-// Creates a pre-authorized emergency token. Requires ADMIN role.
+// Creates a pre-authorized emergency token. Requires ADMIN role, and a human
+// caller: a service token (an SDK key) is refused even when it holds ADMIN,
+// because a leaked key must not be able to mint credentials that bypass the
+// four-eyes approval gate. The refusal is audited as break_glass_token_denied.
 func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) {
+	actor := actorFromContext(r.Context())
+	if middleware.IsServiceTokenCaller(r.Context()) {
+		h.denyServiceTokenCaller(w, r, actor)
+		return
+	}
+
 	// SEC-3b part 2: the token is scoped to the caller's own project (ADMIN
 	// is itself a per-project role) — otherwise a token minted for one
 	// project's incident could bypass a completely unrelated project's
@@ -202,10 +229,14 @@ func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) 
 	}
 	expiresIn := req.ExpiresInH
 	if expiresIn <= 0 {
-		expiresIn = 4
+		expiresIn = defaultBreakGlassExpiryHours
+	}
+	if expiresIn > maxBreakGlassExpiryHours {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("expires_in_hours must be at most %d", maxBreakGlassExpiryHours))
+		return
 	}
 
-	actor := actorFromContext(r.Context())
 	if req.CreatedBy == "" {
 		req.CreatedBy = actor
 	}
@@ -252,6 +283,22 @@ func (h *BreakGlassHandler) CreateToken(w http.ResponseWriter, r *http.Request) 
 		"expires_at": expiresAt.Unix(),
 		"warning":    "Store this token securely. It cannot be retrieved again.",
 	})
+}
+
+// denyServiceTokenCaller refuses a service-token caller and records the
+// attempt. The audit entry is the useful signal here: only an ADMIN-role key
+// reaches this handler, so a denial means such a key is being used to try to
+// mint emergency access. project_id is included because the actor ("sdk:" plus
+// the token's name) is not unique across tokens.
+func (h *BreakGlassHandler) denyServiceTokenCaller(w http.ResponseWriter, r *http.Request, actor string) {
+	details := map[string]any{"reason": "service_token_caller"}
+	if projectID, ok := projectIDFromContext(r.Context()); ok {
+		details["project_id"] = projectID
+	}
+	h.writeAuditBreakGlass(r, actor, breakGlassTokenDeniedEvent, details)
+	h.logger.Warn("break-glass token creation refused for a service-token caller",
+		zap.String("actor", actor))
+	writeError(w, http.StatusForbidden, msgBreakGlassHumanOnly)
 }
 
 // UseToken handles POST /api/v1/break-glass/use

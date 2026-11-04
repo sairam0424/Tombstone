@@ -173,10 +173,14 @@ For on-call scenarios where the approval workflow would take too long:
 
 1. Navigate to **Settings** > **SDK Tokens**.
 2. Click **Create Break-Glass Token**.
-3. Set scope (environment + flag keys or `*`), expiry (e.g., 4 hours), and an incident reference.
+3. Set scope (environment + flag keys or `*`), expiry (e.g., 4 hours; at most 24), and an incident reference.
 4. Copy the token — it is shown once.
 5. Use the token in any SDK or direct API call to bypass normal approval gates.
 6. The token and all actions taken with it are recorded in the audit log.
+
+Only a signed-in person with the ADMIN role can create a break-glass token. An SDK or service token is refused with HTTP 403 even if it holds the ADMIN role, and the attempt is recorded in the audit log as `break_glass_token_denied`.
+
+Signing in as a person needs SSO: Tombstone issues a person's login token (a JWT) only through its SSO login, which is available only when `SSO_PROVIDER` is set (see `infra/.env.example`). A deployment without SSO therefore cannot create break-glass tokens. The expiry is at most 24 hours: a larger `expires_in_hours` is rejected with HTTP 400, and an omitted or non-positive value means 4 hours.
 
 ---
 
