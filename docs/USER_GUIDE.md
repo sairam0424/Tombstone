@@ -181,7 +181,8 @@ Emergency override tokens for on-call incidents. When normal approval workflows 
 
 A break-glass token is:
 - Scoped to specific flags and environments (or `*` for all)
-- Time-limited (expires automatically — typically 1–8 hours)
+- Time-limited (expires automatically — typically 1–8 hours; the maximum is 24)
+- Created by a signed-in person with the ADMIN role, never by an SDK or service token (an ADMIN-role service token is refused with HTTP 403 and the attempt is audited as `break_glass_token_denied`; service tokens with any other role are refused earlier by the role check). People sign in only through SSO (`SSO_PROVIDER` set), so a deployment without SSO cannot create break-glass tokens
 - Tied to an incident reference number
 - Fully logged in the audit trail
 
@@ -588,7 +589,7 @@ Click **Create Break-Glass Token**.
 
 Fill in:
 - **Scope:** Select the specific flag key (`payment-processor-v2`) and environment (`production`). For broader incidents, you can use `*` to scope to all flags, but prefer the smallest scope that solves the problem.
-- **Expiry:** Set to 1 hour (you can extend it if the incident runs long, but start small).
+- **Expiry:** Set to 1 hour (you can extend it if the incident runs long, but start small). The maximum is 24 hours; a longer request is rejected.
 - **Incident reference:** Enter your PagerDuty incident number, a Jira ticket, or any reference string. This is recorded in the audit trail.
 
 Click **Create Token**.

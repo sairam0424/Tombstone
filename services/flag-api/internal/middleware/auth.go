@@ -29,6 +29,20 @@ var ContextKeyActor = actorKey{"actor"}
 // than by the non-unique service_tokens.name.
 var ContextKeyServiceRole = actorKey{"service_role"}
 
+// IsServiceTokenCaller reports whether the request was authenticated with a
+// service token (an SDK key) rather than as a signed-in human. Authenticate
+// records ContextKeyServiceRole for service tokens and for nothing else, so
+// the marker's presence is the principal kind whatever role the token holds.
+// That is deliberate: the "sdk:" prefix on the actor string is a naming
+// convention, not something a handler should have to parse to decide who is
+// calling.
+//
+// Use it to keep an action human-only even when a service token's role would
+// satisfy the route's permission check.
+func IsServiceTokenCaller(ctx context.Context) bool {
+	return ctx.Value(ContextKeyServiceRole) != nil
+}
+
 type AuthMiddleware struct {
 	db        *sql.DB
 	jwtSecret []byte

@@ -39,7 +39,7 @@
 | `POST` | `/api/v1/flags/{key}/scheduled-changes` | Schedule a future change | Required |
 | `GET` | `/api/v1/change-requests` | List pending approvals | Required |
 | `POST` | `/api/v1/change-requests/{id}/approve` | Approve a change request | Required |
-| `POST` | `/api/v1/break-glass/tokens` | Create emergency override token | Required |
+| `POST` | `/api/v1/break-glass/tokens` | Create emergency override token. The caller must be a signed-in human (JWT) with the ADMIN role; a service token gets `403` even with ADMIN. A human login exists only when SSO is configured (`SSO_PROVIDER` set), so a deployment without SSO cannot create one. `expires_in_hours` is 1-24; omitted, `0` or negative means 4; above 24 gets `400` | Required |
 | `GET` | `/readyz` | Readiness probe (checks DB + Redis) | None |
 | `GET` | `/health` | Liveness probe | None |
 
