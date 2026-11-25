@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN GOWORK=off go mod download
@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GOWORK=off CGO_ENABLED=0 GOOS=linux go build -o /flag-api ./cmd/main.go
 
-FROM alpine:3.19
+FROM alpine:3.24
 LABEL org.opencontainers.image.source="https://github.com/sairam0424/Tombstone" \
       org.opencontainers.image.description="Tombstone flag-api — control plane for feature flags" \
       org.opencontainers.image.licenses="MIT"
